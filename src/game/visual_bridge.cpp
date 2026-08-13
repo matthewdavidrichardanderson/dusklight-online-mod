@@ -11,7 +11,7 @@
 
 // These two public game classes do not expose the draw-buffer/minimap layout
 // needed by their own draw methods. The access change is local to this TU and
-// does not alter either pinned source tree or the compiled game ABI.
+// does not alter the compiled game ABI.
 #define private public
 #include "d/d_drawlist.h"
 #include "d/d_map.h"

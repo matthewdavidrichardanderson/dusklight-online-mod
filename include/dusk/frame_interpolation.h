@@ -21,9 +21,7 @@ void reset_callbacks();
 void observe_engine_frame(bool enabled, bool isSimFrame, float step);
 void begin_engine_sim_tick();
 
-// Added by the Online/MFB branch. Mainline has the interpolation callback
-// surface but not its replacement-map override, so the mod supplies a safe
-// compatibility entry point for that one optional presentation enhancement.
+// Store a mod-owned replacement matrix for the current presentation frame.
 void override_replacement(const void* key, Mtx matrix);
 
 }  // namespace dusk::frame_interp

@@ -10,10 +10,7 @@ class fopAc_ac_c;
 
 namespace dusk::multiplayer {
 
-// Matches the pinned TwilitRealm Online branch. Remote Midna streaming is
-// deliberately disabled there because the matrix stream desynchronizes and
-// consumes excessive bandwidth. Keep the capability in the protocol for wire
-// compatibility, but never advertise, transmit, accept, or render it.
+// Remote Midna streaming is disabled because its matrix stream is not sent.
 inline constexpr bool kRemoteMidnaStreamingEnabled = false;
 
 struct RemoteModelMatrixSnapshot {

@@ -38,8 +38,8 @@ generator-specific equivalent).
 
 ## Credits
 
-Based on [TwilitRealm/Dusklight](https://github.com/TwilitRealm/dusklight) and
-its original multiplayer work. Dusklight Online is maintained by mdra5000.
+Built for [TwilitRealm/Dusklight](https://github.com/TwilitRealm/dusklight).
+Dusklight Online is maintained by mdra5000.
 
 This project does not include the game or its copyrighted assets. You must
 provide your own copy of *Twilight Princess*.

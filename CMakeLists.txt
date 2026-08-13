@@ -33,9 +33,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(zstd)
 
-# The native world-label renderer uses the same ImGui font-atlas implementation
-# and exact version as the pinned Online branch. It is private to the mod DLL;
-# no host ImGui internals are imported.
+# The native world-label renderer uses a private ImGui font atlas. No host
+# ImGui internals are imported.
 FetchContent_Declare(
     online_imgui
     URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
@@ -56,62 +55,61 @@ target_include_directories(dusklight_online_imgui PUBLIC "${online_imgui_SOURCE_
 target_compile_features(dusklight_online_imgui PUBLIC cxx_std_20)
 set_target_properties(dusklight_online_imgui PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Remote Link is intentionally compiled from the exact upstream Online source.
-# Only its actor source and actor header are consumed; the rest of the target
-# continues to compile against the pinned mainline Dusklight SDK above.
-set(DUSKLIGHT_ONLINE_REFERENCE_VERSION "6b5ff27b1f8363d4a4ebd909c72c92927c53153d")
-set(DUSKLIGHT_ONLINE_REFERENCE_DIR
+# Remote Link uses actor files pinned to a known Dusklight revision. Only those
+# actor files and the two font resources are consumed from this source tree;
+# the rest of the mod compiles against the SDK selected above.
+set(DUSKLIGHT_REMOTE_LINK_SOURCE_VERSION "6b5ff27b1f8363d4a4ebd909c72c92927c53153d")
+set(DUSKLIGHT_REMOTE_LINK_SOURCE_DIR
     ""
-    CACHE PATH "Optional checkout of TwilitRealm/dusklight at the pinned Online revision"
+    CACHE PATH "Optional checkout of the pinned Dusklight Remote Link source revision"
 )
-set(DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR "${DUSKLIGHT_ONLINE_REFERENCE_DIR}")
-if (NOT EXISTS "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/src/d/actor/d_a_remote_link.cpp")
+set(DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT "${DUSKLIGHT_REMOTE_LINK_SOURCE_DIR}")
+if (NOT EXISTS "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/src/d/actor/d_a_remote_link.cpp")
     FetchContent_Declare(
-        dusklight_online_reference
+        dusklight_remote_link_source
         GIT_REPOSITORY https://github.com/TwilitRealm/dusklight.git
-        GIT_TAG ${DUSKLIGHT_ONLINE_REFERENCE_VERSION}
+        GIT_TAG ${DUSKLIGHT_REMOTE_LINK_SOURCE_VERSION}
         GIT_SHALLOW FALSE
     )
-    FetchContent_GetProperties(dusklight_online_reference)
-    if (NOT dusklight_online_reference_POPULATED)
-        FetchContent_Populate(dusklight_online_reference)
+    FetchContent_GetProperties(dusklight_remote_link_source)
+    if (NOT dusklight_remote_link_source_POPULATED)
+        FetchContent_Populate(dusklight_remote_link_source)
     endif ()
-    set(DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR "${dusklight_online_reference_SOURCE_DIR}")
+    set(DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT "${dusklight_remote_link_source_SOURCE_DIR}")
 endif ()
 
-# An explicitly supplied checkout must not bypass the pinned revision. Fail
-# closed on every Online-tip asset actually compiled or packaged so a stale
-# checkout cannot silently change Remote Link behavior.
-function(dusklight_online_require_sha256 relative_path expected_sha256)
-    set(reference_path "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/${relative_path}")
-    if (NOT EXISTS "${reference_path}")
-        message(FATAL_ERROR "Pinned Online reference file is missing: ${relative_path}")
+# Fail closed on every imported file so an explicitly supplied checkout cannot
+# silently change Remote Link behavior or packaged resources.
+function(dusklight_remote_link_require_sha256 relative_path expected_sha256)
+    set(source_path "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/${relative_path}")
+    if (NOT EXISTS "${source_path}")
+        message(FATAL_ERROR "Pinned Remote Link source file is missing: ${relative_path}")
     endif ()
-    file(SHA256 "${reference_path}" actual_sha256)
+    file(SHA256 "${source_path}" actual_sha256)
     string(TOLOWER "${expected_sha256}" expected_sha256_lower)
     if (NOT actual_sha256 STREQUAL expected_sha256_lower)
         message(FATAL_ERROR
-            "Online reference file does not match ${DUSKLIGHT_ONLINE_REFERENCE_VERSION}: "
+            "Remote Link source file does not match ${DUSKLIGHT_REMOTE_LINK_SOURCE_VERSION}: "
             "${relative_path} (got ${actual_sha256})")
     endif ()
 endfunction()
 
-dusklight_online_require_sha256(
+dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
     "8CEE4667C4D77F1E92C9791DA8DCC0E7A3BC0E8BDB043693AA6CEE76697F306A")
-dusklight_online_require_sha256(
+dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
     "E15643ACF03D0A6578A0703184C7FA0C5D9C5AAB7A86F9065BEBEE647BA78506")
-dusklight_online_require_sha256(
+dusklight_remote_link_require_sha256(
     "src/dusk/multiplayer/remote_link_dummy.cpp"
     "F4C6F011D655509812B05EEE5AA2E2DB9E00276E7F740F36E31DEF30C9D69742")
-dusklight_online_require_sha256(
+dusklight_remote_link_require_sha256(
     "include/dusk/multiplayer/remote_link_dummy.hpp"
     "6A21876BAC92EF0C0386AE34389A7E7D0D6A7AD69BBD00661E7CF0148247C6A4")
-dusklight_online_require_sha256(
+dusklight_remote_link_require_sha256(
     "res/AlegreyaSC-Bold.ttf"
     "F0EDAF1F289B7EB1B94BA9290146D57E5B413364BCF723CD0196779FAA557AFA")
-dusklight_online_require_sha256(
+dusklight_remote_link_require_sha256(
     "res/Inter-Regular.ttf"
     "712FB3AE7568CC3812776EDA49922FF8BCA5521CB02C006DEC80040E9260C262")
 
@@ -120,19 +118,19 @@ set(DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated
 file(MAKE_DIRECTORY "${DUSKLIGHT_ONLINE_GENERATED_INCLUDE_DIR}/d/actor")
 file(MAKE_DIRECTORY "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}")
 configure_file(
-    "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/include/d/actor/d_a_remote_link.h"
+    "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/include/d/actor/d_a_remote_link.h"
     "${DUSKLIGHT_ONLINE_GENERATED_INCLUDE_DIR}/d/actor/d_a_remote_link.h"
     COPYONLY
 )
 set(DUSKLIGHT_ONLINE_GENERATED_RES_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/res")
 file(MAKE_DIRECTORY "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}")
 configure_file(
-    "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/res/AlegreyaSC-Bold.ttf"
+    "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/res/AlegreyaSC-Bold.ttf"
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/AlegreyaSC-Bold.ttf"
     COPYONLY
 )
 configure_file(
-    "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/res/Inter-Regular.ttf"
+    "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/res/Inter-Regular.ttf"
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/Inter-Regular.ttf"
     COPYONLY
 )
@@ -146,11 +144,10 @@ configure_file(
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/THIRD_PARTY_LICENSES.txt"
     COPYONLY
 )
-# Mainline does not yet declare Online's Z2AudioMgr::seStartNoCull helper. Keep
-# the actor byte-for-byte upstream apart from this single, asserted call-site
-# adaptation into the mod-owned semantic equivalent.
+# The selected SDK does not expose Z2AudioMgr::seStartNoCull. Preserve the
+# actor source apart from this asserted call-site adaptation.
 file(READ
-    "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/src/d/actor/d_a_remote_link.cpp"
+    "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/src/d/actor/d_a_remote_link.cpp"
     DUSKLIGHT_ONLINE_REMOTE_LINK_SOURCE
 )
 set(DUSKLIGHT_ONLINE_REMOTE_NO_CULL_CALL "audioMgr->seStartNoCull(")
@@ -196,18 +193,18 @@ string(REPLACE
     "${DUSKLIGHT_ONLINE_REMOTE_LINK_SOURCE}"
 )
 file(WRITE
-    "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}/d_a_remote_link_upstream.inc"
+    "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}/d_a_remote_link_impl.inc"
     "${DUSKLIGHT_ONLINE_REMOTE_LINK_SOURCE}"
 )
 file(MAKE_DIRECTORY "${DUSKLIGHT_ONLINE_GENERATED_INCLUDE_DIR}/dusk/multiplayer")
 configure_file(
-    "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/include/dusk/multiplayer/remote_link_dummy.hpp"
+    "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/include/dusk/multiplayer/remote_link_dummy.hpp"
     "${DUSKLIGHT_ONLINE_GENERATED_INCLUDE_DIR}/dusk/multiplayer/remote_link_dummy.hpp"
     COPYONLY
 )
 configure_file(
-    "${DUSKLIGHT_ONLINE_REFERENCE_SOURCE_DIR}/src/dusk/multiplayer/remote_link_dummy.cpp"
-    "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}/remote_link_dummy_upstream.inc"
+    "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/src/dusk/multiplayer/remote_link_dummy.cpp"
+    "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}/remote_link_dummy_impl.inc"
     COPYONLY
 )
 
@@ -231,8 +228,8 @@ set(ONLINE_GAME_SOURCES
     src/game/remote_pose.cpp
     src/game/remote_actor_bridge.cpp
     src/game/visual_bridge.cpp
-    src/game/remote_link_upstream.cpp
-    src/game/remote_link_dummy_upstream.cpp
+    src/game/remote_link.cpp
+    src/game/remote_link_dummy.cpp
 )
 
 add_mod(dusklight_online
@@ -256,7 +253,7 @@ target_include_directories(dusklight_online PRIVATE
 # Remote Link is supplied by this mod rather than mainline's profile table.
 # Keep it on a private s16 ID and substitute the profile only for process IDs
 # created by this mod. This avoids colliding with GAMEOVER or a future profile
-# appended at Online's historic one-past-end value (0x318).
+# assigned a private value outside the host's process-name range.
 target_compile_definitions(dusklight_online PRIVATE fpcNm_REMOTE_LINK_e=0x7FFE)
 target_link_libraries(dusklight_online PRIVATE
     nlohmann_json::nlohmann_json

@@ -335,9 +335,8 @@ bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady
         J3DModel* hand = wolf ? link->getMidnaHandModel() : nullptr;
         J3DModel* hair = wolf ? link->getMidnaHairHandModel() : nullptr;
         J3DModel* glow = nullptr;
-        // Shadow Midna's model accessors are MFB-only and are the explicitly
-        // permitted branch-specific exception. Mainline still exposes Link's
-        // complete riding-Midna model set, which is streamed here.
+        // Shadow Midna model accessors are unavailable. Link's riding-Midna
+        // model set remains available for this pose.
         const bool shadow = false;
         state["midna_draw"] = body != nullptr;
         state["midna_mask_draw"] = mask != nullptr;

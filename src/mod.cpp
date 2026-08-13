@@ -25,11 +25,10 @@ namespace {
 
 std::unique_ptr<dusklight_online::OnlineApp> sApp;
 
-// The integrated Online branch advances multiplayer immediately after
-// fapGm_Execute(), once actor execution and frame-interpolation recording have
-// completed.  ModLoader::tick() runs near the start of fapGm_Execute(), so
-// updating from mod_update would move Remote Link one simulation phase too
-// early and leave its actor base transform stepping between presentations.
+// Advance multiplayer immediately after fapGm_Execute(), once actor execution
+// and frame-interpolation recording have completed. ModLoader::tick() runs
+// near the start of fapGm_Execute(), so updating from mod_update would move
+// Remote Link one simulation phase too early.
 DEFINE_HOOK(&fapGm_Execute, OnlineGameExecuteHook);
 
 HookAction game_execute_pre(ModContext*, void*, void*, void*) {
@@ -73,8 +72,8 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    // Intentionally empty: see OnlineGameExecuteHook.  This entry point is
-    // invoked before fpcM_Management(), unlike Online's native update site.
+    // Intentionally empty: see OnlineGameExecuteHook. This entry point runs
+    // before fpcM_Management(), which is too early for multiplayer updates.
     return MOD_OK;
 }
 

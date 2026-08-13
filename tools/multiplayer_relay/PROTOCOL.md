@@ -1,7 +1,7 @@
 # Multiplayer Relay Protocol
 
-This document is the compatibility contract between `multiplayer.cpp` and the
-standalone relay.
+This document defines the contract between the game client and standalone
+relay.
 
 ## Framing and limits
 

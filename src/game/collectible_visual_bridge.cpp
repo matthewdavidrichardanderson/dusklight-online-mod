@@ -2,10 +2,9 @@
 
 #include "d/dolzel.h"
 
-// These fields are private only as a source-level encapsulation detail; the
-// pinned Online branch implements forceOpenVisual as a daTbox_c member. Keep
-// the exact behavior in this isolated translation unit without changing the
-// mainline SDK checkout or relying on a fixed byte offset.
+// These fields are private only as a source-level encapsulation detail. Keep
+// the chest visual repair isolated here without changing the SDK checkout or
+// relying on a fixed byte offset.
 #define private public
 #include "d/actor/d_a_tbox.h"
 #include "d/actor/d_a_door_mbossL1.h"
@@ -125,9 +124,7 @@ void repair_current_stage_collectibles() {
     }
     for (int flag = 0; flag < dSv_info_c::DAN_ITEM; ++flag) {
         // Current-stage memory is authoritative while an item cutscene is in
-        // flight; Savedata can lag it until the stage/save commit. The Online
-        // branch's dComIfGs_isStageMemoryItem() takes this same live-memory
-        // path for the current stage.
+        // flight; Savedata can lag it until the stage/save commit.
         if (g_dComIfG_gameInfo.info.getMemory().getBit().isItem(flag)) {
             const int globalBit = flag + dSv_info_c::MEMORY_ITEM;
             if (!repair_life_visual(globalBit)) repair_sword_visual(globalBit);

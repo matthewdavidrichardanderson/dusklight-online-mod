@@ -13,9 +13,9 @@ struct Entry {
     MessageSpec spec;
 };
 
-// This is deliberately exhaustive against protocol 2 and multiplayer.cpp's
-// local control messages. Additions remain visible as Unsupported instead of
-// falling through a permissive catch-all.
+// This is deliberately exhaustive for protocol 2 and local control messages.
+// Additions remain visible as Unsupported instead of falling through a
+// permissive catch-all.
 constexpr std::array kEntries = {
     Entry{"welcome", {Domain::Session, false, false}},
     Entry{"error", {Domain::Session, false, false}},

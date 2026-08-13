@@ -763,8 +763,8 @@ bool OnlineApp::pvp_setting_locked(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
     const bool roomLocked = room_settings_host_controlled(status);
-    // Online locks this control from the raw room collision option. The
-    // remote-model option participates only in effective runtime PvP.
+    // The raw room collision option controls this UI lock. The remote-model
+    // option participates only in effective runtime PvP.
     const bool collisionEnabled = status.enabled ? status.settings.remoteCollision :
         app.bool_value(app.config_.remoteCollision, true);
     return roomLocked || !collisionEnabled;

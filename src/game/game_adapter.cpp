@@ -64,7 +64,7 @@ DEFINE_HOOK(&dSv_memBit_c::onItem, MemoryItemOnHook);
 DEFINE_HOOK(&dSv_memBit_c::onSwitch, MemorySwitchOnHook);
 DEFINE_HOOK(&dSv_memBit_c::offSwitch, MemorySwitchOffHook);
 DEFINE_HOOK(&dSv_memBit_c::onDungeonItem, MemoryDungeonItemOnHook);
-// The public PC game keeps this method out-of-line. The main-branch Mod SDK
+// The public PC game keeps this method out-of-line. The selected Mod SDK
 // header currently exposes the non-PC inline body, so resolve the actual game
 // symbol explicitly instead of taking the address of a DLL-local inline copy.
 DEFINE_HOOK_SYMBOL("dSv_memBit_c::onStageBossEnemy", void(dSv_memBit_c*),
@@ -240,9 +240,8 @@ HookAction remote_wolf_lock_pre(ModContext*, void* args, void*, void*) {
     auto* outActor = static_cast<fopAc_ac_c**>(mods::arg<void*>(args, 2));
     if (link == nullptr || !is_remote_link_actor(actor)) return HOOK_CONTINUE;
 
-    // Exact REMOTE_LINK branch from the pinned Online implementation. It
-    // deliberately avoids fopEn_enemy_c::checkWolfNoLock: Remote Link is an
-    // actor target, not an enemy-class instance.
+    // Remote Link is an actor target, not an enemy-class instance, so avoid
+    // fopEn_enemy_c::checkWolfNoLock here.
     for (int i = 0; i < link->mWolfLockNum; ++i) {
         if (link->mWolfLockAcKeep[i].getActor() == actor) return HOOK_SKIP_ORIGINAL;
     }
@@ -1066,9 +1065,8 @@ void stage_key_num_set_post(ModContext*, void* args, void*, void*) {
     const int stage = mods::arg<int>(args, 0);
     const int count = mods::arg<u8>(args, 1);
     if (stage != current_stage_table() || !valid_stage(stage) || count < 0 || count > 99) return;
-    // This is the exact out-of-line stage setter used by vanilla. Its current
-    // stage branch calls Online's notifying one-argument wrapper; its durable
-    // off-stage maintenance branch deliberately does not.
+    // Publish only the current-stage branch. Durable off-stage maintenance is
+    // save bookkeeping rather than a live key-count mutation.
     sActiveAdapter->publish_local(
         {{"type", "key_num"}, {"stage", stage}, {"count", count}});
 }
@@ -1151,8 +1149,7 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
     }
     if (wasSet || sActiveAdapter == nullptr || sActiveAdapter->applying_remote()) return;
     auto* bits = mods::arg<dSv_memBit_c*>(args, 0);
-    // Final Online notifies only through the current-memory wrappers. The
-    // engine often mirrors that mutation into the durable stage table next;
+    // The engine often mirrors this mutation into the durable stage table;
     // observing both low-level calls would publish the same switch twice.
     if (bits != &g_dComIfG_gameInfo.info.getMemory().getBit()) return;
     const int stage = current_stage_table();
@@ -1214,9 +1211,8 @@ void memory_dungeon_item_on_post(ModContext*, void* args, void*, void*) {
     if (bits != &g_dComIfG_gameInfo.info.getMemory().getBit()) return;
     const int stage = current_stage_table();
     const int kind = mods::arg<int>(args, 1);
-    // onStageBossEnemy() sets both the boss-clear bit and the Ooccoo-note bit,
-    // but final Online deliberately publishes only logical kind 3. The Note
-    // has its own shared state lane and must not leak as a second dungeon-item
+    // onStageBossEnemy() sets both the boss-clear bit and Ooccoo-note bit. The
+    // note has its own state lane and must not leak as a second dungeon-item
     // event from this nested implementation detail.
     if (sStageBossEnemyDepth != 0 && kind != 3) return;
     if (valid_stage(stage) && kind >= 0 && kind <= 7) {
@@ -1360,8 +1356,8 @@ HookAction process_execute_pre(ModContext*, void* args, void*, void*) {
 
 void mirror_table_set_base_mtx_compat(daObjMirrorTable_c* table) {
     // Mainline declares setBaseMtx but does not export it through the mod SDK.
-    // Keep the exact 82e2 method body here so the final-tip null-animation
-    // guard can return at the same point without an unresolved game import.
+    // Keep this small method body local so the null-animation guard can return
+    // without an unresolved game import.
     mDoMtx_stack_c::transS(table->current.pos);
     mDoMtx_stack_c::ZXYrotM(table->shape_angle);
     table->mpTableModel->setBaseTRMtx(mDoMtx_stack_c::get());
@@ -1401,8 +1397,8 @@ HookAction mirror_table_execute_pre(ModContext*, void* args, void* retval, void*
         !dComIfGs_isEventBit(dSv_event_flag_c::saveBitLabels[354])) {
         return HOOK_CONTINUE;
     }
-    // Final Online waits for the room reload when the completion flag changes
-    // on an actor created without the complete-only stair resources.
+    // Avoid executing the missing stair animation when this actor was created
+    // without the complete-only stair resources.
     mirror_table_set_base_mtx_compat(table);
     if (retval != nullptr) *static_cast<int*>(retval) = 1;
     return HOOK_SKIP_ORIGINAL;
@@ -1511,10 +1507,9 @@ void GameAdapter::observe_local_memory_item(int stage, int flag) {
         flag >= dSv_info_c::DAN_ITEM) {
         return;
     }
-    // Preserve the pickup before the welcome check. Vanilla can leave the
-    // current-stage memory newer than the durable stage table until a later
-    // transition; the final Online implementation keeps this observation for
-    // late-join snapshots and periodic reapplication.
+    // Preserve the pickup before the welcome check. Current-stage memory can
+    // be newer than the durable stage table until a later transition, so keep
+    // this observation for late-join snapshots and periodic reapplication.
     remember_memory_item(stage, flag);
     publish_local({{"type", "item_bit"}, {"stage", stage}, {"flag", flag}});
 }
@@ -1565,8 +1560,8 @@ void GameAdapter::notify_local_light_drop_num(int area, int previous, int value)
 
 void GameAdapter::notify_local_dark_clear(int level) {
     // A local or remotely-applied setter satisfies an older deferred clear at
-    // the mutation boundary. Final Online performs this before any sender
-    // guards, so do not leave the pending repair alive until the next tick.
+    // the mutation boundary; do not leave the pending repair alive until the
+    // next tick.
     if (level >= 0 && level < static_cast<int>(pendingDarkClears_.size())) {
         pendingDarkClears_[static_cast<size_t>(level)] = 0;
     }
@@ -1783,9 +1778,8 @@ void GameAdapter::publish_local(nlohmann::json message) {
             set_local_faron_warp_sequence_active(true);
         }
         if (stage == dStage_SaveTbl_FARON && flag == 71 && set) {
-            // Completion is the coordination edge that releases every peer's
-            // safety fence. Advertise the inactive participant state before
-            // the completion switch, matching final Online's wire order.
+            // Completion releases every peer's safety fence. Advertise the
+            // inactive participant state before the completion switch.
             set_local_faron_warp_sequence_active(false);
             transport_.send(message);
             return;
@@ -1793,7 +1787,7 @@ void GameAdapter::publish_local(nlohmann::json message) {
         if (is_faron_warp_sequence_switch(stage, flag) &&
             should_defer_faron_warp_sequence()) {
             // This is a trusted local mutation stream. Preserve every ordered
-            // set/off edge exactly as final Online does.
+            // set/off edge.
             deferredLocalEvents_.push_back(std::move(message));
             return;
         }
@@ -2554,13 +2548,12 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                                         reject("unknown interaction message: " + type);
         case MessageDomain::Visual:
             // Protocol 2 uses UDP exclusively for Link/Midna visuals. A TCP
-            // copy is not a fallback in the pinned branch and must not clog
-            // the stage deferral queue.
+            // copy must not clog the stage deferral queue.
             return ApplyResult::IgnoredByPolicy;
         case MessageDomain::Ganondorf:
-            // Explicit user-requested exclusion: the pinned branch's
-            // Ganondorf protocol (including final-hit sync) was nonfunctional.
-            // Consume it as policy-disabled so packets never fill the queue.
+            // Ganondorf synchronization is not implemented by this mod.
+            // Consume these packets as policy-disabled so they cannot fill
+            // the queue.
             return ApplyResult::IgnoredByPolicy;
         default:
             return reject("unclassified message reached game adapter: " + type);
@@ -2915,9 +2908,9 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
         set_local_faron_warp_sequence_active(false);
     }
     if (is_faron_warp_sequence_switch(stage, flag) && should_defer_faron_warp_sequence()) {
-        // Event bits and switch bits share one ordered queue in final Online.
-        // Keep the full message and sender so cross-type ordering, repeated
-        // edges, prompts, and source policy survive replay exactly.
+        // Event bits and switch bits share one ordered queue. Keep the full
+        // message and sender so cross-type ordering, repeated edges, prompts,
+        // and source policy survive replay.
         deferredFaronInbound_.push_back(
             {std::string(peerId), message,
              {MessageDomain::Progression, true, true}});
@@ -3306,9 +3299,9 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return apply_save_snapshot(routed);
     }
     if (type == "sync_request") {
-        // Final Online does not replay a request which arrived during an
-        // unsafe stage/event/title window. Only a safely accepted request may
-        // outlive this call, in the typed pending-reply queue below.
+        // Do not replay a request which arrived during an unsafe
+        // stage/event/title window. Only a safely accepted request may outlive
+        // this call in the typed pending-reply queue below.
         if (dComIfGp_getStageStagInfo() == nullptr || dComIfGp_event_runCheck() ||
             opening_or_title_active() || routed.peerId.empty()) {
             return ApplyResult::IgnoredByPolicy;
@@ -4202,9 +4195,9 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         return applied ? ApplyResult::Applied : reject("manual sync state rejected");
     }
 
-    // Final Online hydrates snapshot event bits first and as raw save state.
-    // Routing them through the live-event policy can suppress Malo/Transform
-    // prerequisites or incorrectly trigger reload and progression-prompt work.
+    // Hydrate snapshot event bits first and as raw save state. Routing them
+    // through live-event policy can suppress prerequisites or incorrectly
+    // trigger reload and progression-prompt work.
     const int localMaloPhaseBeforeSnapshot = malo_fundraising_phase();
     const bool snapshotOoccooAccepted = message.contains("ooccoo_state") &&
         accept_ooccoo_state(message["ooccoo_state"]);

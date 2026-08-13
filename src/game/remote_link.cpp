@@ -1,8 +1,8 @@
 #include "f_pc/f_pc_profile.h"
-// Online added this entry point to Z2SeMgr. Mainline has the same handle pool
-// and starter machinery but not the public member, so expose the existing
-// field only in this isolated compatibility translation unit and reproduce
-// the final implementation exactly.
+
+// The selected SDK has the required handle pool and starter machinery but
+// does not expose the no-cull entry point used by Remote Link. Access the
+// existing field only inside this compatibility translation unit.
 #define private public
 #include "Z2AudioLib/Z2SeMgr.h"
 #undef private
@@ -35,7 +35,6 @@ bool remote_audio_start_no_cull(Z2AudioMgr* audioMgr, JAISoundID soundId, u32 ma
     // Do not use the header-inline Z2GetSoundStarter() from a mod DLL. Its
     // template static can bind to the DLL's own uninitialised singleton slot
     // instead of the game's slot, which is null during Remote Link playback.
-    // The live audio manager owns the exact starter used by the engine.
     return audioMgr->mSoundStarter.startSound(soundId, handle, nullptr, mapInfo,
                                               reverb / 127.0f, pitch, volume, pan,
                                               dolby, 0);
@@ -52,7 +51,6 @@ bool remote_audio_start_no_cull(Z2AudioMgr* audioMgr, JAISoundID soundId, u32 ma
 // condition bookkeeping remain unchanged.
 #define OSPanic(...) ((void)0)
 
-// The imported actor is compiled with a private process ID. The bridge returns
-// this mod-owned profile only while resolving a recorded Remote Link creation,
-// so it neither indexes mainline's profile table nor impersonates a game actor.
-#include "d_a_remote_link_upstream.inc"
+// The actor uses a private process ID. The bridge returns this mod-owned
+// profile only while resolving a recorded Remote Link creation.
+#include "d_a_remote_link_impl.inc"

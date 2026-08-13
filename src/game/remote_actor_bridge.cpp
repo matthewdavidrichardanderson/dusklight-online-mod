@@ -533,9 +533,8 @@ bool lookup_local_concat_replacement(const void* lhs, const void* rhs, Mtx out) 
         rhsMatrix = &rhsScratch;
     }
 
-    // The pinned Online implementation resolves both operands before concatenating. When just
-    // one operand belongs to Online, retain any mainline replacement for the
-    // other operand rather than falling back to its simulation-frame value.
+    // Resolve both operands before concatenating. When only one operand has a
+    // local override, retain the host replacement for the other operand.
     const auto hostLookup = dusklight_online::game::EngineInterpLookupHook::g_orig;
     if (!hasLocalLhs && hostLookup != nullptr && hostLookup(lhs, lhsScratch)) {
         lhsMatrix = &lhsScratch;
@@ -552,9 +551,8 @@ bool lookup_replacement(const void* key, Mtx out) {
     if (key == nullptr || out == nullptr) return false;
     if (lookup_local_replacement(key, out)) return true;
 
-    // This bridge hooks the host lookup in order to layer the Online-only
-    // override map over mainline. Calling g_orig here reaches the host's real
-    // recording/replacement map without recursively entering our pre-hook.
+    // Layer the mod-owned override map over the host map. Calling g_orig here
+    // reaches the host lookup without recursively entering the pre-hook.
     const auto hostLookup = dusklight_online::game::EngineInterpLookupHook::g_orig;
     return hostLookup != nullptr && hostLookup(key, out);
 }
@@ -579,10 +577,8 @@ void add_interpolation_callback(InterpolationCallBack callback, void* userWork) 
         resolved_engine_function<
             Function, dusklight_online::game::EngineInterpAddCallbackSymbol>();
     if (hostAdd != nullptr) {
-        // Register with Dusklight's own per-simulation callback list. This is
-        // the exact path used by the pinned Online branch's Remote Link actor,
-        // so callback timing, camera validity, and presentation nesting stay
-        // owned by the engine instead of a parallel approximation in the mod.
+        // Register with Dusklight's per-simulation callback list so callback
+        // timing, camera validity, and presentation nesting remain engine-owned.
         hostAdd(&dispatch_interpolation_callback, rawEntry);
     }
 }
@@ -602,9 +598,8 @@ void prepare_presentation_callbacks() {
 
 void run_presentation_callbacks() {
     // When the host callback API is present, begin_presentation_camera has
-    // already dispatched these callbacks internally, exactly as it does for
-    // the built-in Online implementation. The post hook is only a fallback
-    // for an older host that exposes the timing hooks but not that API.
+    // already dispatched these callbacks. The post hook is a fallback for a
+    // host that exposes the timing hooks but not the callback API.
     if (using_engine_callback_dispatch() || !sEngineEnabled || sEngineSimFrame ||
         sCallbacks.empty()) {
         return;

@@ -737,9 +737,8 @@ struct Transport::Impl {
         // failed generation is stale and must never replay into it.
         events.clear();
         ++connectionEpoch;
-        // Online treats UDP as an optional visual fast path. A machine which
-        // cannot open/resolve the datagram channel must still be able to join
-        // over the reliable TCP gameplay channel.
+        // UDP is an optional visual fast path. A machine that cannot open or
+        // resolve it must still be able to join over reliable TCP.
         close_socket(socket);
         socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (socket == kInvalidSocket) {
@@ -808,8 +807,8 @@ struct Transport::Impl {
         }
         status.state = State::Listening;
         status.error.clear();
-        // Match Online's best-effort direct-host visual channel. TCP owns the
-        // session; UDP failure only disables pose/object datagrams.
+        // TCP owns the session; UDP failure only disables pose/object
+        // datagrams.
         (void)open_udp(status.bindHost, status.port);
         return true;
     }
@@ -1344,9 +1343,8 @@ struct Transport::Impl {
                 peerStages[id] = {message.value("stage", ""), 0};
             }
             // Direct-host messages intentionally omit client_id on the wire.
-            // Match the original Online implementation's resolve_peer_id()
-            // fallback so host-originated gameplay is attributed to the host
-            // instead of being discarded as an anonymous/self-invalid event.
+            // Attribute those messages to the host instead of discarding them
+            // as anonymous or self-invalid events.
             const char* fallbackSender = status.mode == Mode::DirectJoin ? "direct" : "";
             emit(EventKind::Message, message.value("client_id", fallbackSender), {}, message);
         }
