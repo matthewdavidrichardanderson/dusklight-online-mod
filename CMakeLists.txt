@@ -55,28 +55,12 @@ target_include_directories(dusklight_online_imgui PUBLIC "${online_imgui_SOURCE_
 target_compile_features(dusklight_online_imgui PUBLIC cxx_std_20)
 set_target_properties(dusklight_online_imgui PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Remote Link uses actor files pinned to a known Dusklight revision. Only those
-# actor files and the two font resources are consumed from this source tree;
-# the rest of the mod compiles against the SDK selected above.
-set(DUSKLIGHT_REMOTE_LINK_SOURCE_VERSION "6b5ff27b1f8363d4a4ebd909c72c92927c53153d")
-set(DUSKLIGHT_REMOTE_LINK_SOURCE_DIR
-    ""
-    CACHE PATH "Optional checkout of the pinned Dusklight Remote Link source revision"
+# Remote Link's actor files and font resources are included with this project
+# so a clean checkout has every input needed to configure the build. The rest
+# of the mod compiles against the SDK selected above.
+set(DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dusklight_remote_link"
 )
-set(DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT "${DUSKLIGHT_REMOTE_LINK_SOURCE_DIR}")
-if (NOT EXISTS "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/src/d/actor/d_a_remote_link.cpp")
-    FetchContent_Declare(
-        dusklight_remote_link_source
-        GIT_REPOSITORY https://github.com/TwilitRealm/dusklight.git
-        GIT_TAG ${DUSKLIGHT_REMOTE_LINK_SOURCE_VERSION}
-        GIT_SHALLOW FALSE
-    )
-    FetchContent_GetProperties(dusklight_remote_link_source)
-    if (NOT dusklight_remote_link_source_POPULATED)
-        FetchContent_Populate(dusklight_remote_link_source)
-    endif ()
-    set(DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT "${dusklight_remote_link_source_SOURCE_DIR}")
-endif ()
 
 # Fail closed on every imported file so an explicitly supplied checkout cannot
 # silently change Remote Link behavior or packaged resources.
@@ -89,7 +73,7 @@ function(dusklight_remote_link_require_sha256 relative_path expected_sha256)
     string(TOLOWER "${expected_sha256}" expected_sha256_lower)
     if (NOT actual_sha256 STREQUAL expected_sha256_lower)
         message(FATAL_ERROR
-            "Remote Link source file does not match ${DUSKLIGHT_REMOTE_LINK_SOURCE_VERSION}: "
+            "Bundled Remote Link source file has an unexpected hash: "
             "${relative_path} (got ${actual_sha256})")
     endif ()
 endfunction()
