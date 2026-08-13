@@ -4,7 +4,7 @@ project(dusklight_online LANGUAGES CXX)
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "82e2fd4bea95c101ad15caf4ea6ad051132c82e8")
+    set(DUSKLIGHT_VERSION "008a18c1428c1827795867a6645898a035b64a7b")
 endif ()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
@@ -203,6 +203,7 @@ set(ONLINE_CORE_SOURCES
 )
 
 set(ONLINE_GAME_SOURCES
+    src/game/abi_compat.cpp
     src/game/audio_bridge.cpp
     src/game/bomb_bridge.cpp
     src/game/collectible_visual_bridge.cpp
@@ -243,6 +244,7 @@ target_link_libraries(dusklight_online PRIVATE
     nlohmann_json::nlohmann_json
     libzstd_static
     dusklight_online_imgui
+    ${CMAKE_DL_LIBS}
 )
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32)

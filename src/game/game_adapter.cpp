@@ -1,4 +1,5 @@
 #include "dusklight_online/game/game_adapter.hpp"
+#include "dusklight_online/game/abi_compat.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -809,7 +810,7 @@ std::vector<u8> capture_current_synced_key_items() {
 
 void restore_captured_synced_key_items(const std::vector<u8>& items) {
     for (const u8 item : items) {
-        if (!dComIfGs_isItemFirstBit(item)) execItemGet(item);
+        if (!dComIfGs_isItemFirstBit(item)) execute_item_get_compat(item);
     }
 }
 
@@ -3398,7 +3399,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return reject("invalid or unsynchronized item_get item_id");
         }
         if (!dComIfGs_isItemFirstBit(static_cast<u8>(itemId))) {
-            execItemGet(static_cast<u8>(itemId));
+            execute_item_get_compat(static_cast<u8>(itemId));
         }
         if (itemId == dItemNo_KANTERA_e) repair_lantern_item_state();
         return ApplyResult::Applied;
@@ -4286,7 +4287,8 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         if (!raw.is_number_integer()) continue;
         const int item = raw.get<int>();
         if (item >= 0 && item <= 0xFF && is_synced_key_item(item) &&
-            !dComIfGs_isItemFirstBit(static_cast<u8>(item))) execItemGet(static_cast<u8>(item));
+            !dComIfGs_isItemFirstBit(static_cast<u8>(item)))
+            execute_item_get_compat(static_cast<u8>(item));
     }
     repair_lantern_item_state();
     repair_current_stage_collectibles();
