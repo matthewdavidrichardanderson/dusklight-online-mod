@@ -667,7 +667,17 @@ int bottle_slot_count() {
 }
 
 bool opening_or_title_active() {
-    return fpcM_SearchByName(fpcNm_OPENING_SCENE_e) != nullptr ||
+    // The opening scene initializes temporary save data for the title-screen
+    // Link before the opening process itself becomes searchable. Those
+    // equipment setters are presentation-only and must not be published as
+    // persistent inventory. Use the raw start layer to avoid resolving the
+    // computed layer through randomizer state during process creation.
+    const char* stage = dComIfGp_getStartStageName();
+    return (stage != nullptr &&
+            (std::strcmp(stage, "S_MV000") == 0 ||
+             (std::strcmp(stage, "F_SP102") == 0 &&
+              dComIfGp_getStartStageLayer() == 10))) ||
+           fpcM_SearchByName(fpcNm_OPENING_SCENE_e) != nullptr ||
            fpcM_SearchByName(fpcNm_TITLE_e) != nullptr;
 }
 

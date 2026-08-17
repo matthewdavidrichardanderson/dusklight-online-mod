@@ -341,6 +341,9 @@ std::string OnlineApp::status_text() const {
     if (status.enabled) {
         text << "\nPlayer: " << status.name << "\nLobby: " << status.room
              << "\nPeers: " << transport_.peers().size();
+        if (!status.host.empty() && status.port != 0) {
+            text << "\nServer: " << status.host << ':' << status.port;
+        }
         for (const auto& [id, name] : transport_.peers()) {
             text << "\n  " << name << " [" << id << ']';
         }
@@ -507,7 +510,8 @@ void OnlineApp::host_relay() {
                          (error.empty() ? std::string("not a relay code") : error);
         return;
     }
-    config.host = bool_value(config_.relayLocal) ? "127.0.0.1" : endpoint->host;
+    const bool useLocalRelay = bool_value(config_.relayLocal);
+    config.host = useLocalRelay ? "127.0.0.1" : endpoint->host;
     config.port = static_cast<uint16_t>(endpoint->port);
     config.sessionId = endpoint->sessionId;
     config.sessionKey = endpoint->sessionKey;
@@ -515,7 +519,9 @@ void OnlineApp::host_relay() {
         statusMessage_ = "Relay host failed: " + error;
     } else {
         activeCode_ = code;
-        statusMessage_ = "Creating relay lobby";
+        statusMessage_ = useLocalRelay
+            ? "Creating relay lobby using the relay on this PC"
+            : "Creating relay lobby using the server in the relay code";
     }
 }
 
@@ -532,7 +538,8 @@ void OnlineApp::join_relay() {
     config.name = string_value(config_.playerName);
     config.room = string_value(config_.relayRoom);
     config.password = string_value(config_.relayPassword);
-    config.host = bool_value(config_.relayLocal) ? "127.0.0.1" : endpoint->host;
+    const bool useLocalRelay = bool_value(config_.relayLocal);
+    config.host = useLocalRelay ? "127.0.0.1" : endpoint->host;
     config.port = static_cast<uint16_t>(endpoint->port);
     config.sessionId = endpoint->sessionId;
     config.sessionKey = endpoint->sessionKey;
@@ -543,7 +550,9 @@ void OnlineApp::join_relay() {
         statusMessage_ = "Relay join failed: " + error;
     } else {
         activeCode_ = code;
-        statusMessage_ = "Joining relay lobby";
+        statusMessage_ = useLocalRelay
+            ? "Joining relay lobby using the relay on this PC"
+            : "Joining relay lobby using the server in the relay code";
     }
 }
 
@@ -685,7 +694,8 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     add_bound_control(left, UI_CONTROL_STRING, "Relay code", app.config_.relayCode, 0, 0, 1, 2048);
     add_bound_control(left, UI_CONTROL_STRING, "Lobby name", app.config_.relayRoom, 0, 0, 1, 64);
     add_bound_control(left, UI_CONTROL_STRING, "Password", app.config_.relayPassword, 0, 0, 1, 128);
-    add_bound_control(left, UI_CONTROL_TOGGLE, "Relay is on this PC", app.config_.relayLocal);
+    add_bound_control(left, UI_CONTROL_TOGGLE,
+                      "Use relay on this PC (ignores code address)", app.config_.relayLocal);
     add_button(left, "Host relay lobby", &OnlineApp::host_relay_pressed, &app, true);
     add_button(left, "Join relay lobby", &OnlineApp::join_relay_pressed, &app, true);
     return MOD_OK;
