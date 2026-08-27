@@ -120,6 +120,7 @@ constexpr uint32_t kProgressionPromptDurationTicks = 8 * 30;
 constexpr uint32_t kProgressionPromptHoldTicks = 30;
 constexpr uint32_t kProgressionStateReadyMaxAgeTicks = 90;
 constexpr uint32_t kPendingSyncReplyTimeoutTicks = 1800;
+constexpr uint32_t kOrdonReloadWarningTicks = 180;
 constexpr std::string_view kOoccooSaveBlob = "ooccoo-note-v1";
 constexpr uint16_t kTitleSyntheticEponaRescuedEventBit = 0x0601;
 constexpr std::string_view kTitleDemoStage = "F_SP102";
@@ -2041,6 +2042,9 @@ void GameAdapter::clear_replaced_save_progression_state() {
     pendingDarkClears_.fill(0);
     pendingOrdonEventBits_.clear();
     ordonReloadSafeTicks_ = 0;
+    ordonReloadWaitTicks_ = 0;
+    ordonReloadTransitionActive_ = false;
+    ordonReloadSawStageLoad_ = false;
     mirrorReloadPending_ = false;
     zoraThawPending_ = nlohmann::json();
     deferredStoryEvents_.clear();
@@ -2374,6 +2378,9 @@ void GameAdapter::clear_disabled_sync_flags_state() {
     localFaronWarpSequenceActive_ = false;
     pendingOrdonEventBits_.clear();
     ordonReloadSafeTicks_ = 0;
+    ordonReloadWaitTicks_ = 0;
+    ordonReloadTransitionActive_ = false;
+    ordonReloadSawStageLoad_ = false;
     mirrorReloadPending_ = false;
     zoraThawPending_ = nlohmann::json();
     pendingManualInfo_.clear();
@@ -2427,6 +2434,14 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         tick_manual_transition();
         update_pending_sync_replies();
     }
+    if (ordonReloadTransitionActive_) {
+        if (!engine_stage_ready()) {
+            ordonReloadSawStageLoad_ = true;
+        } else if (ordonReloadSawStageLoad_) {
+            ordonReloadTransitionActive_ = false;
+            ordonReloadSawStageLoad_ = false;
+        }
+    }
     const net::Status status = transport_.status();
     if (!status.welcomed) clear_local_audio_events();
     set_bomb_sync_enabled(status.welcomed && syncWorldEnabled);
@@ -2449,7 +2464,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     promptView.holdRatio = progressionPrompt_.active && !progressionPrompt_.waiting ?
         std::clamp(float(progressionPrompt_.holdTicks) /
                        float(kProgressionPromptHoldTicks), 0.0f, 1.0f) : 0.0f;
-    const bool remoteGameplayReady = remote_link_gameplay_ready(manualTransitionActive_);
+    const bool remoteGameplayReady = remote_link_gameplay_ready(
+        manualTransitionActive_ || ordonReloadTransitionActive_);
     update_visual_overlays(status.welcomed, remoteGameplayReady, nameLabelsEnabled,
                            remoteModelEnabled, playerListEnabled, status.room,
                            (status.mode == net::Mode::DirectHost || status.isOwner) ?
@@ -2473,7 +2489,11 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     }
     if (visualReceiveActive && remoteGameplayReady) {
         dusk::multiplayer::sync_remote_link_actor_dummies(peerPoses_);
-    } else {
+    } else if (!visualReceiveActive) {
+        // Disconnecting or disabling remote models is owned by the mod and
+        // requires explicit cleanup. During room/stage transitions, however,
+        // the scene owns actor teardown; touching the same actors here races
+        // the process deletion list (the recurring Ordon/load crash family).
         dusk::multiplayer::destroy_all_remote_link_dummies();
     }
     // The remote-model option controls what this client receives/renders. It
@@ -3062,6 +3082,9 @@ void GameAdapter::reset_session() {
     manualReloadPending_ = false;
     pendingOrdonEventBits_.clear();
     ordonReloadSafeTicks_ = 0;
+    ordonReloadWaitTicks_ = 0;
+    ordonReloadTransitionActive_ = false;
+    ordonReloadSawStageLoad_ = false;
     mirrorReloadPending_ = false;
     zoraThawPending_ = nlohmann::json();
     deferredStoryEvents_.clear();
@@ -3370,8 +3393,12 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
             return ApplyResult::Retained;
         }
         if (is_ordon_day_boundary_stage(stableStageName_)) {
-            pendingOrdonEventBits_.insert(flag);
-            ordonReloadSafeTicks_ = 0;
+            if (pendingOrdonEventBits_.insert(flag).second) {
+                ordonReloadSafeTicks_ = 0;
+                ordonReloadWaitTicks_ = 0;
+                ordonReloadTransitionActive_ = true;
+                ordonReloadSawStageLoad_ = false;
+            }
             return ApplyResult::Retained;
         }
     }
@@ -3476,7 +3503,13 @@ void GameAdapter::flush_story_events() {
         if (!is_ordon_day_boundary_stage(stableStageName_)) {
             pendingOrdonEventBits_.clear();
             ordonReloadSafeTicks_ = 0;
+            ordonReloadWaitTicks_ = 0;
+            ordonReloadTransitionActive_ = false;
+            ordonReloadSawStageLoad_ = false;
             return;
+        }
+        if (ordonReloadWaitTicks_ < std::numeric_limits<uint32_t>::max()) {
+            ++ordonReloadWaitTicks_;
         }
         bool peerUnsafe = false;
         for (const auto& [peer, state] : peerProgressionStates_) {
@@ -3489,14 +3522,22 @@ void GameAdapter::flush_story_events() {
                 break;
             }
         }
-        if (peerUnsafe || !fpcDt_IsComplete()) {
+        const bool deleteQueueBusy = !fpcDt_IsComplete();
+        if (peerUnsafe || deleteQueueBusy) {
             ordonReloadSafeTicks_ = 0;
+            if (ordonReloadWaitTicks_ == kOrdonReloadWarningTicks) {
+                svc_log->warn(mod_ctx,
+                    "Ordon day-boundary reload remains deferred for safety");
+            }
             return;
         }
-        if (++ordonReloadSafeTicks_ < 3) return;
+        if (++ordonReloadSafeTicks_ < 3) {
+            return;
+        }
         for (const uint16_t flag : pendingOrdonEventBits_) dComIfGs_onEventBit(flag);
         pendingOrdonEventBits_.clear();
         ordonReloadSafeTicks_ = 0;
+        ordonReloadWaitTicks_ = 0;
         daPy_py_c::forceRestartRoom(0, 5, 0xC9);
     }
 }

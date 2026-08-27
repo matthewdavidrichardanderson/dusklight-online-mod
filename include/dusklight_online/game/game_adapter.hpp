@@ -131,6 +131,9 @@ private:
     bool manualReloadPending_ = false;
     std::set<uint16_t> pendingOrdonEventBits_;
     uint32_t ordonReloadSafeTicks_ = 0;
+    uint32_t ordonReloadWaitTicks_ = 0;
+    bool ordonReloadTransitionActive_ = false;
+    bool ordonReloadSawStageLoad_ = false;
     bool mirrorReloadPending_ = false;
     nlohmann::json zoraThawPending_;
     std::deque<nlohmann::json> deferredStoryEvents_;
