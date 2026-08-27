@@ -2,6 +2,9 @@
 
 #include "f_pc/f_pc_manager.h"
 
+class mDoMemCd_Ctrl_c;
+extern DUSK_GAME_DATA mDoMemCd_Ctrl_c g_mDoMemCd_control;
+
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -29,6 +32,7 @@ using CreateActorCurrent = fpc_ProcID (*)(s16, u32, const cXyz*, int, const csXy
                                           const cXyz*, s8, u32, u8);
 using ExecuteItemGetOld = void (*)(u8);
 using ExecuteItemGetNew = void (*)(u8, u32, fopAc_ac_c*);
+using GetSaveFileName = const char* (*)(mDoMemCd_Ctrl_c*);
 
 CreateActorCurrent create_actor_current() {
     static const auto function = reinterpret_cast<CreateActorCurrent>(find_game_symbol(
@@ -64,6 +68,13 @@ ExecuteItemGetOld execute_item_get_old() {
     return function;
 }
 
+GetSaveFileName get_save_file_name() {
+    static const auto function = reinterpret_cast<GetSaveFileName>(find_game_symbol(
+        "?getFileName@mDoMemCd_Ctrl_c@@QEAAPEBDXZ",
+        "_ZN15mDoMemCd_Ctrl_c11getFileNameEv"));
+    return function;
+}
+
 }  // namespace
 
 bool required_game_abi_available() {
@@ -93,6 +104,13 @@ void execute_item_get_compat(u8 item) {
     } else if (const auto function = execute_item_get_old(); function != nullptr) {
         function(item);
     }
+}
+
+const char* current_save_file_name_compat() {
+    if (const auto function = get_save_file_name(); function != nullptr) {
+        return function(&g_mDoMemCd_control);
+    }
+    return nullptr;
 }
 
 }  // namespace dusklight_online::game

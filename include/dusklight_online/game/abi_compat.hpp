@@ -17,4 +17,9 @@ fpc_ProcID create_actor_compat(s16 profile, u32 parameters, const cXyz* position
 
 void execute_item_get_compat(u8 item);
 
+// Returns the host-selected save namespace when the running game exports the
+// PC save-name accessor. Older SDKs do not declare that accessor, so callers
+// must treat nullptr as "not available".
+const char* current_save_file_name_compat();
+
 }  // namespace dusklight_online::game

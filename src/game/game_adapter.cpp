@@ -1574,7 +1574,8 @@ bool GameAdapter::randomizer_active() const {
     // the old all-in-one build, its private context is not linkable from this
     // standalone mod, so use the host-selected save namespace only to choose
     // randomizer packet semantics.
-    return std::string_view(g_mDoMemCd_control.mFileName) == "randomizer";
+    const char* saveFileName = current_save_file_name_compat();
+    return saveFileName != nullptr && std::string_view(saveFileName) == "randomizer";
 }
 
 void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
