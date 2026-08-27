@@ -71,7 +71,7 @@ constexpr std::array kEntries = {
     Entry{"malo_fundraising", {Domain::Progression, false, true}},
     Entry{"charlo_offering", {Domain::Progression, false, true}},
     Entry{"fish_record", {Domain::Progression, false, true}},
-    Entry{"rando_item_get", {Domain::OptionalRandomizer, false, true}},
+    Entry{"rando_item_get", {Domain::OptionalRandomizer, true, true}},
     Entry{"pose", {Domain::Visual, false, false}},
     Entry{"midna_pose", {Domain::Visual, false, false}},
     Entry{"pvp_hit", {Domain::Interaction, false, false}},

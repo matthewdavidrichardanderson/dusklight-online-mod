@@ -15,6 +15,7 @@
 #include "d/actor/d_a_obj_Lv5Key.h"
 #include "d/actor/d_a_obj_keyhole.h"
 #include "d/actor/d_a_obj_drop.h"
+#include "d/actor/d_a_obj_item.h"
 #include "d/actor/d_a_obj_life_container.h"
 #include "d/actor/d_a_obj_smallkey.h"
 #include "d/actor/d_a_obj_sword.h"
@@ -51,6 +52,12 @@ void* judge_life(void* actor, void* data) {
     if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_Obj_LifeContainer_e) return nullptr;
     auto* life = static_cast<daObjLife_c*>(actor);
     return life->getSaveBitNo() == *static_cast<int*>(data) ? actor : nullptr;
+}
+
+void* judge_item(void* actor, void* data) {
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_ITEM_e) return nullptr;
+    auto* item = static_cast<daItem_c*>(actor);
+    return daItem_prm::getItemBitNo(item) == *static_cast<int*>(data) ? actor : nullptr;
 }
 
 void* judge_sword(void* actor, void* data) {
@@ -90,6 +97,13 @@ bool repair_life_visual(int globalBit) {
     return true;
 }
 
+bool repair_item_visual(int flag) {
+    auto* item = static_cast<daItem_c*>(fopAcIt_Judge(judge_item, &flag));
+    if (item == nullptr) return false;
+    fopAcM_delete(item);
+    return true;
+}
+
 bool repair_sword_visual(int globalBit) {
     auto* sword = static_cast<daObjSword_c*>(fopAcIt_Judge(judge_sword, &globalBit));
     if (sword == nullptr) return false;
@@ -113,7 +127,9 @@ void repair_remote_tbox_collectible(int stage, int flag, bool newlySet) {
 void repair_remote_memory_item_collectible(int stage, int flag) {
     if (stage != current_stage_table()) return;
     const int globalBit = flag + dSv_info_c::MEMORY_ITEM;
-    if (!repair_life_visual(globalBit)) repair_sword_visual(globalBit);
+    if (!repair_item_visual(globalBit) && !repair_life_visual(globalBit)) {
+        repair_sword_visual(globalBit);
+    }
 }
 
 void repair_current_stage_collectibles() {
@@ -127,7 +143,9 @@ void repair_current_stage_collectibles() {
         // flight; Savedata can lag it until the stage/save commit.
         if (g_dComIfG_gameInfo.info.getMemory().getBit().isItem(flag)) {
             const int globalBit = flag + dSv_info_c::MEMORY_ITEM;
-            if (!repair_life_visual(globalBit)) repair_sword_visual(globalBit);
+            if (!repair_item_visual(globalBit) && !repair_life_visual(globalBit)) {
+                repair_sword_visual(globalBit);
+            }
         }
     }
 }

@@ -70,7 +70,7 @@ int main() {
         {"rupee_count",Domain::Progression,false,true}, {"poe_count",Domain::Progression,false,true},
         {"malo_fundraising",Domain::Progression,false,true}, {"charlo_offering",Domain::Progression,false,true},
         {"fish_record",Domain::Progression,false,true},
-        {"rando_item_get",Domain::OptionalRandomizer,false,true},
+        {"rando_item_get",Domain::OptionalRandomizer,true,true},
         {"pose",Domain::Visual,false,false}, {"midna_pose",Domain::Visual,false,false},
         {"pvp_hit",Domain::Interaction,false,false},
         {"ganondorf_owner_claim",Domain::Ganondorf,false,true}, {"ganondorf_owner",Domain::Ganondorf,false,true},

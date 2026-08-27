@@ -39,6 +39,7 @@ int sLevelDepth = 0;
 int sLinkStarterDepth = 0;
 std::vector<RemoteAudioEvent> sPending;
 std::vector<RemoteAudioEvent> sActive;
+bool sRandomizerAudioFilter = false;
 
 uint8_t classify(JAISoundID soundId) {
     switch (soundId.id_.info.type.parts.groupID) {
@@ -119,6 +120,15 @@ void sound_level_post(ModContext*, void* args, void* retval, void*) {
     auto* handle = retval == nullptr ? nullptr : *static_cast<JAISoundHandle**>(retval);
     if (handle == nullptr || !*handle) return;
     const JAISoundID sound = mods::arg<JAISoundID>(args, 1);
+    // Foolish Item already reaches every randomizer player through
+    // rando_item_get and plays this sound locally. Streaming the originating
+    // Link's level-sound copy as well duplicates it and can keep the remote
+    // positional handle alive indefinitely because the trap has no matching
+    // Link-audio stop event.
+    if (sRandomizerAudioFilter &&
+        static_cast<uint32_t>(sound) == static_cast<uint32_t>(Z2SE_WL_V_LAND_DAMAGE)) {
+        return;
+    }
     activate(static_cast<uint32_t>(sound), mods::arg<uint32_t>(args, 2),
              mods::arg<int8_t>(args, 3),
              dusk::multiplayer::REMOTE_AUDIO_SOURCE_LINK_SOUND_LEVEL);
@@ -155,6 +165,15 @@ void uninstall_audio_hooks() {
     mods::hook::uninstall<BaseStarterSoundHook>();
     mods::hook::uninstall<LinkStarterSoundHook>();
     clear_local_audio_events();
+}
+
+void set_randomizer_audio_filter(bool active) {
+    sRandomizerAudioFilter = active;
+    if (active) {
+        std::erase_if(sActive, [](const RemoteAudioEvent& event) {
+            return event.soundId == static_cast<uint32_t>(Z2SE_WL_V_LAND_DAMAGE);
+        });
+    }
 }
 
 std::vector<RemoteAudioEvent> drain_local_audio_events() {

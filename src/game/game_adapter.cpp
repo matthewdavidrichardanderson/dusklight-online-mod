@@ -4,6 +4,7 @@
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
 #include "dusklight_online/game/local_pose.hpp"
+#include "dusklight_online/game/randomizer_item_names.hpp"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
 #include "dusklight_online/game/remote_pose.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
@@ -14,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -38,6 +40,7 @@
 #include "f_pc/f_pc_deletor.h"
 #include "f_pc/f_pc_name.h"
 #include "m_Do/m_Do_controller_pad.h"
+#include "m_Do/m_Do_MemCard.h"
 #include "dusk/frame_interpolation.h"
 #include "dusk/multiplayer/remote_link_dummy.hpp"
 #include "JSystem/JParticle/JPAEmitter.h"
@@ -51,6 +54,7 @@
 #include "f_pc/f_pc_line.h"
 #include "f_pc/f_pc_line_iter.h"
 #include "mods/service.hpp"
+#include "mods/svc/item.h"
 #include "mods/svc/save.h"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.h"
@@ -202,9 +206,11 @@ std::vector<bool> sMemorySwitchWasSetStack;
 std::vector<bool> sMemorySwitchWasSetOffStack;
 std::vector<bool> sItemFirstWasOwnedStack;
 std::vector<bool> sItemFirstWasOwnedOffStack;
+std::vector<int> sStageKeyPreviousCounts;
 struct PendingMeterKeyMutation {
     bool publish = false;
     int stage = -1;
+    int previous = -1;
 };
 std::vector<PendingMeterKeyMutation> sPendingMeterKeyMutations;
 struct PendingMeterScalarMutation {
@@ -644,6 +650,34 @@ bool valid_stage(int stage) {
     return stage >= 0 && stage < dSv_save_c::STAGE_MAX;
 }
 
+std::optional<int> current_freestanding_check_flag(std::string_view checkName) {
+    constexpr std::string_view prefix = "freestanding:";
+    if (!checkName.starts_with(prefix)) return std::nullopt;
+
+    const size_t stageEnd = checkName.find(':', prefix.size());
+    if (stageEnd == std::string_view::npos) return std::nullopt;
+    const char* currentStage = dComIfGp_getStartStageName();
+    if (currentStage == nullptr ||
+        checkName.substr(prefix.size(), stageEnd - prefix.size()) != currentStage) {
+        return std::nullopt;
+    }
+
+    const std::string_view value = checkName.substr(stageEnd + 1);
+    if (value.empty()) return std::nullopt;
+    int globalBit = 0;
+    for (const char character : value) {
+        if (character < '0' || character > '9') return std::nullopt;
+        globalBit = globalBit * 10 + (character - '0');
+        if (globalBit >= dSv_info_c::MEMORY_ITEM + dSv_info_c::DAN_ITEM) {
+            return std::nullopt;
+        }
+    }
+    // ItemService names freestanding checks with the actor's global item bit.
+    // Stage memory stores the 0-based portion after MEMORY_ITEM (0x80).
+    if (globalBit < dSv_info_c::MEMORY_ITEM) return std::nullopt;
+    return globalBit - dSv_info_c::MEMORY_ITEM;
+}
+
 int current_stage_table() {
     stage_stag_info_class* info = dComIfGp_getStageStagInfo();
     return info == nullptr ? -1 : dStage_stagInfo_GetSaveTbl(info);
@@ -1071,11 +1105,27 @@ void letter_get_set_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+HookAction stage_key_num_set_pre(ModContext*, void* args, void*, void*) {
+    const int stage = mods::arg<int>(args, 0);
+    sStageKeyPreviousCounts.push_back(
+        valid_stage(stage) ? stage_bits(stage).getKeyNum() : -1);
+    return HOOK_CONTINUE;
+}
+
 void stage_key_num_set_post(ModContext*, void* args, void*, void*) {
+    int previous = -1;
+    if (!sStageKeyPreviousCounts.empty()) {
+        previous = sStageKeyPreviousCounts.back();
+        sStageKeyPreviousCounts.pop_back();
+    }
     if (sActiveAdapter == nullptr || sActiveAdapter->applying_remote()) return;
     const int stage = mods::arg<int>(args, 0);
     const int count = mods::arg<u8>(args, 1);
-    if (stage != current_stage_table() || !valid_stage(stage) || count < 0 || count > 99) return;
+    if (previous < 0 || stage != current_stage_table() || !valid_stage(stage) ||
+        count < 0 || count > 99 ||
+        (sActiveAdapter->randomizer_active() && count > previous)) {
+        return;
+    }
     // Publish only the current-stage branch. Durable off-stage maintenance is
     // save bookkeeping rather than a live key-count mutation.
     sActiveAdapter->publish_local(
@@ -1087,6 +1137,7 @@ HookAction meter_move_key_pre(ModContext*, void*, void*, void*) {
     pending.publish = sActiveAdapter != nullptr && !sActiveAdapter->applying_remote() &&
                       dComIfGp_getItemKeyNumCount() != 0;
     pending.stage = pending.publish ? current_stage_table() : -1;
+    pending.previous = pending.publish ? dComIfGs_getKeyNum() : -1;
     sPendingMeterKeyMutations.push_back(pending);
     return HOOK_CONTINUE;
 }
@@ -1099,8 +1150,10 @@ void meter_move_key_post(ModContext*, void*, void*, void*) {
     }
     if (!pending.publish || sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
         pending.stage != current_stage_table() || !valid_stage(pending.stage)) return;
+    const int count = dComIfGs_getKeyNum();
+    if (sActiveAdapter->randomizer_active() && count > pending.previous) return;
     sActiveAdapter->publish_local({
-        {"type", "key_num"}, {"stage", pending.stage}, {"count", dComIfGs_getKeyNum()},
+        {"type", "key_num"}, {"stage", pending.stage}, {"count", count},
     });
 }
 
@@ -1293,7 +1346,8 @@ void player_item_first_on_post(ModContext*, void* args, void*, void*) {
     const bool wasOwned = !sItemFirstWasOwnedStack.empty() &&
                           sItemFirstWasOwnedStack.back();
     if (!sItemFirstWasOwnedStack.empty()) sItemFirstWasOwnedStack.pop_back();
-    if (wasOwned || sActiveAdapter == nullptr || sActiveAdapter->applying_remote()) return;
+    if (wasOwned || sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
+        sActiveAdapter->randomizer_active()) return;
     const int item = mods::arg<uint8_t>(args, 1);
     if (is_synced_key_item(item)) {
         sActiveAdapter->publish_local({{"type", "item_get"}, {"item_id", item}});
@@ -1316,7 +1370,8 @@ void player_item_first_off_post(ModContext*, void* args, void*, void*) {
     const bool wasOwned = !sItemFirstWasOwnedOffStack.empty() &&
                           sItemFirstWasOwnedOffStack.back();
     if (!sItemFirstWasOwnedOffStack.empty()) sItemFirstWasOwnedOffStack.pop_back();
-    if (!wasOwned || sActiveAdapter == nullptr || sActiveAdapter->applying_remote()) return;
+    if (!wasOwned || sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
+        sActiveAdapter->randomizer_active()) return;
     const int item = mods::arg<uint8_t>(args, 1);
     if (is_synced_item_first_bit(item)) {
         sActiveAdapter->publish_local(
@@ -1329,6 +1384,7 @@ void player_collect_set_post(ModContext*, void* args, void*, void*) {
     const int item = mods::arg<uint8_t>(args, 2);
     if (type < 0 || type > 2 || item < 0 || item >= 8 ||
         sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
+        sActiveAdapter->randomizer_active() ||
         mods::arg<dSv_player_collect_c*>(args, 0) !=
             &g_dComIfG_gameInfo.info.getPlayer().getCollect() ||
         opening_or_title_active()) return;
@@ -1494,6 +1550,12 @@ void save_written(ModContext*, uint32_t, void* data) {
     static_cast<GameAdapter*>(data)->notify_local_save_written();
 }
 
+void item_given(ModContext*, const ItemGiveInfo* info, void* data) {
+    if (info != nullptr && data != nullptr) {
+        static_cast<GameAdapter*>(data)->notify_local_item_grant(*info);
+    }
+}
+
 class RemoteApplicationGuard {
 public:
     explicit RemoteApplicationGuard(bool& value) : value_(value), previous_(value) { value_ = true; }
@@ -1506,6 +1568,50 @@ private:
 }  // namespace
 
 GameAdapter::GameAdapter(net::Transport& transport) : transport_(transport) {}
+
+bool GameAdapter::randomizer_active() const {
+    // The randomizer owns the "randomizer" game mode/save namespace. Unlike
+    // the old all-in-one build, its private context is not linkable from this
+    // standalone mod, so use the host-selected save namespace only to choose
+    // randomizer packet semantics.
+    return std::string_view(g_mDoMemCd_control.mFileName) == "randomizer";
+}
+
+void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
+    if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed ||
+        !randomizer_active()) {
+        return;
+    }
+
+    const std::string checkName = info.check_name != nullptr ? info.check_name : "";
+    if (!checkName.empty() && !completedRandomizerChecks_.insert(checkName).second) {
+        svc_log->info(mod_ctx,
+            ("Ignored duplicate local randomizer check '" + checkName + "'").c_str());
+        return;
+    }
+
+    nlohmann::json packet = {
+        {"type", "rando_item_get"},
+        {"item_id", info.item},
+    };
+    if (!checkName.empty()) {
+        packet["check_name"] = checkName;
+        if (const auto flag = current_freestanding_check_flag(checkName)) {
+            const int stage = current_stage_table();
+            if (valid_stage(stage)) {
+                packet["location_stage"] = stage;
+                packet["location_flag"] = *flag;
+            }
+        }
+    }
+    publish_local(std::move(packet));
+
+    std::ostringstream log;
+    log << "Sent resolved randomizer item 0x" << std::hex << std::setw(2)
+        << std::setfill('0') << static_cast<int>(info.item);
+    if (!checkName.empty()) log << " for check '" << checkName << "'";
+    svc_log->info(mod_ctx, log.str().c_str());
+}
 
 void GameAdapter::remember_memory_item(int stage, int flag) {
     if (valid_stage(stage) && flag >= 0 && flag < dSv_info_c::DAN_ITEM) {
@@ -1587,6 +1693,7 @@ void GameAdapter::notify_local_max_life(int previous, int value) {
         if (matches) return;
     }
     if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed ||
+        randomizer_active() ||
         value <= previous) return;
     if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
     publish_local({
@@ -1597,6 +1704,7 @@ void GameAdapter::notify_local_max_life(int previous, int value) {
 
 void GameAdapter::notify_local_bottle_slots(int previous, int value) {
     if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed ||
+        randomizer_active() ||
         value <= previous) return;
     if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
     publish_local({
@@ -1664,6 +1772,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_post<DarkClearSetHook>(&dark_clear_set_post) != MOD_OK ||
         mods::hook::add_post<TransformSetHook>(&transform_set_post) != MOD_OK ||
         mods::hook::add_post<LetterGetSetHook>(&letter_get_set_post) != MOD_OK ||
+        mods::hook::add_pre<StageKeyNumSetHook>(&stage_key_num_set_pre) != MOD_OK ||
         mods::hook::add_post<StageKeyNumSetHook>(&stage_key_num_set_post) != MOD_OK ||
         mods::hook::add_pre<MeterMoveKeyHook>(&meter_move_key_pre) != MOD_OK ||
         mods::hook::add_post<MeterMoveKeyHook>(&meter_move_key_post) != MOD_OK ||
@@ -1689,6 +1798,11 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         return mods::set_error(error, MOD_UNAVAILABLE,
                                "required save lifecycle observer is unavailable");
     }
+    if (svc_item->observe_gives(mod_ctx, &item_given, this, &itemGiveObserver_) != MOD_OK) {
+        shutdown_hooks();
+        return mods::set_error(error, MOD_UNAVAILABLE,
+                               "required item grant observer is unavailable");
+    }
     dusk::multiplayer::set_remote_pvp_hit_callback(&remote_link_pvp_target_hit);
     hooksInstalled_ = true;
     return MOD_OK;
@@ -1699,6 +1813,10 @@ void GameAdapter::shutdown_hooks() {
     transport_.set_matrix_codec(nullptr, nullptr);
     dusk::multiplayer::set_remote_pvp_hit_callback(nullptr);
     // uninstall is idempotent for entries that were not fully installed.
+    if (itemGiveObserver_ != 0) {
+        svc_item->unobserve_gives(mod_ctx, itemGiveObserver_);
+        itemGiveObserver_ = 0;
+    }
     if (saveObserver_ != 0) {
         svc_save->unobserve_saves(mod_ctx, saveObserver_);
         saveObserver_ = 0;
@@ -1762,6 +1880,7 @@ void GameAdapter::shutdown_hooks() {
     sMemorySwitchWasSetOffStack.clear();
     sItemFirstWasOwnedStack.clear();
     sItemFirstWasOwnedOffStack.clear();
+    sStageKeyPreviousCounts.clear();
     sPendingMeterKeyMutations.clear();
     sPendingMeterLifeMutations.clear();
     sPendingMeterRupeeMutations.clear();
@@ -1915,6 +2034,7 @@ void GameAdapter::clear_replaced_save_progression_state() {
     // was just replaced. Keeping them can resurrect another file's item bits
     // or apply an old story mutation after the new file becomes active.
     observedMemoryItems_.clear();
+    completedRandomizerChecks_.clear();
     deferredFaronInbound_.clear();
     deferredSwitches_.clear();
     pendingDarkClears_.fill(0);
@@ -2293,6 +2413,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
     syncFlagsEnabled_ = syncFlagsEnabled;
     syncWorldEnabled_ = syncWorldEnabled;
+    set_randomizer_audio_filter(randomizer_active());
     sWorldSyncEnabled = syncWorldEnabled && transport_.status().welcomed;
     if (!syncFlagsEnabled_) {
         if (syncFlagsWereEnabled) clear_disabled_sync_flags_state();
@@ -2550,10 +2671,10 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
             return result;
         }
         case MessageDomain::OptionalRandomizer:
-            // Main TwilitRealm has no randomizer service. Retaining wire
-            // recognition while declining application is the explicit MFB
-            // exception, not a protocol drop.
-            return ApplyResult::IgnoredByPolicy;
+        {
+            RemoteApplicationGuard applying(applyingRemote_);
+            return consume_randomizer(message);
+        }
         case MessageDomain::Interaction:
             return type == "pvp_hit" ? consume_pvp_hit(message) :
                                         reject("unknown interaction message: " + type);
@@ -2572,6 +2693,84 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
     } catch (const nlohmann::json::exception& error) {
         return reject(std::string("malformed gameplay message: ") + error.what());
     }
+}
+
+ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
+    if (!randomizer_active()) return ApplyResult::IgnoredByPolicy;
+    if (!message.payload.is_object() ||
+        message.payload.value("type", std::string()) != "rando_item_get") {
+        return reject("malformed randomizer item message");
+    }
+    const auto itemValue = message.payload.find("item_id");
+    if (itemValue == message.payload.end() || !itemValue->is_number_integer()) {
+        return reject("randomizer item message is missing item_id");
+    }
+    const int itemId = itemValue->get<int>();
+    if (itemId < 0 || itemId > 0xFF) {
+        return reject("randomizer item_id is out of range");
+    }
+    const uint8_t itemToApply = static_cast<uint8_t>(itemId);
+
+    std::string checkName;
+    if (const auto check = message.payload.find("check_name");
+        check != message.payload.end()) {
+        if (!check->is_string()) return reject("randomizer check_name is not a string");
+        checkName = check->get<std::string>();
+        if (checkName.empty() || checkName.size() > 255) {
+            return reject("randomizer check_name has an invalid length");
+        }
+        if (!completedRandomizerChecks_.insert(checkName).second) {
+            svc_log->info(mod_ctx,
+                ("Ignored duplicate remote randomizer check '" + checkName + "'").c_str());
+            return ApplyResult::Applied;
+        }
+    }
+
+    // Freestanding checks normally publish their item bit at the end of the
+    // get-item demo. Carry it with the resolved reward as well, so another
+    // player cannot collect the actor during that cutscene-sized window.
+    if (!checkName.empty() && checkName.starts_with("freestanding:") &&
+        message.payload.contains("location_stage") &&
+        message.payload.contains("location_flag")) {
+        const int stage = message.payload.value("location_stage", -1);
+        const int flag = message.payload.value("location_flag", -1);
+        if (!valid_stage(stage) || flag < 0 || flag >= dSv_info_c::DAN_ITEM) {
+            completedRandomizerChecks_.erase(checkName);
+            return reject("randomizer freestanding location is out of range");
+        }
+        remember_memory_item(stage, flag);
+        stage_bits(stage).onItem(flag);
+        repair_remote_memory_item_collectible(stage, flag);
+    }
+
+    // ItemService observers report the sender's already-resolved reward.
+    // Apply that exact item, matching execResolvedItemGet in the combined
+    // implementation; never resolve the remote check a second time.
+    if (itemToApply != dItemNo_NONE_e) execute_item_get_compat(itemToApply);
+
+    const std::string localPeerId = message.ingress.mode == net::Mode::DirectHost ?
+                                        "direct" : message.ingress.clientId;
+    if (!message.peerId.empty() && message.peerId != localPeerId &&
+        itemToApply != dItemNo_HEART_e && itemToApply != dItemNo_NONE_e) {
+        const auto name = peerNames_.find(message.peerId);
+        const std::string peerName = name != peerNames_.end() ? name->second : message.peerId;
+        const auto color = peerColorSlots_.find(message.peerId);
+        const std::string notice = " found " + std::string(randomizer_item_name(itemToApply));
+        push_online_player_notification(
+            peerName, notice, color != peerColorSlots_.end() ? color->second : 0);
+    }
+
+    std::ostringstream log;
+    log << "Applied resolved randomizer item 0x" << std::hex << std::setw(2)
+        << std::setfill('0') << static_cast<int>(itemToApply);
+    if (!checkName.empty()) log << " for check '" << checkName << "'";
+    if (message.payload.contains("location_stage") &&
+        message.payload.contains("location_flag")) {
+        log << std::dec << " location_stage=" << message.payload.value("location_stage", -1)
+            << " location_flag=" << message.payload.value("location_flag", -1);
+    }
+    svc_log->info(mod_ctx, log.str().c_str());
+    return ApplyResult::Applied;
 }
 
 ApplyResult GameAdapter::consume_pvp_hit(const RoutedMessage& message) {
@@ -2839,6 +3038,7 @@ void GameAdapter::reset_session() {
     permanentPickupSequence_.clear();
     fishCatchSequence_.clear();
     appliedTearEvents_.clear();
+    completedRandomizerChecks_.clear();
     lastError_.clear();
     progressionTicks_ = 0;
     presenceTicks_ = 0;
@@ -3461,6 +3661,9 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         if (collectType < 0 || collectType > B_BUTTON_ITEM || item < 0 || item >= 8) {
             return reject("invalid collect record");
         }
+        if (randomizer_active()) {
+            return ApplyResult::IgnoredByPolicy;
+        }
         g_dComIfG_gameInfo.info.getPlayer().getCollect().setCollect(
             collectType, static_cast<u8>(item));
         return ApplyResult::Applied;
@@ -3487,6 +3690,11 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         const int count = message.value("count", -1);
         if (!valid_stage(stage) || count < 0 || count > 99) {
             return reject("invalid key_num bounds");
+        }
+        if (randomizer_active() && count > stage_bits(stage).getKeyNum()) {
+            // The reward event owns positive gains; key expenditure still
+            // travels as an absolute decrease so doors stay synchronized.
+            return ApplyResult::IgnoredByPolicy;
         }
         dComIfGs_setKeyNum(stage, static_cast<u8>(count));
         return ApplyResult::Applied;
@@ -3527,6 +3735,10 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return ApplyResult::Applied;
     }
     if (type == "max_life_update") {
+        // Randomizer Heart Pieces and Containers are authoritative through
+        // rando_item_get. Applying this live vanilla companion as well grants
+        // the same pickup twice; ignore packets from older peers too.
+        if (randomizer_active()) return ApplyResult::IgnoredByPolicy;
         const int value = message.value("value", -1);
         const int previous = message.value("previous_value", -1);
         const uint32_t sequence = message.value("event_sequence", 0U);
@@ -3566,6 +3778,9 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         const uint32_t sequence = message.value("event_sequence", 0U);
         if (count < 0 || count > 4) {
             return reject("invalid bottle_slots count");
+        }
+        if (randomizer_active()) {
+            return ApplyResult::IgnoredByPolicy;
         }
         bool newPickup = false;
         if (sequence != 0 && previous >= 0 && count > previous) {
@@ -3609,6 +3824,9 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         const uint32_t sequence = message.value("event_sequence", 0U);
         if (value < 0 || value > MAX_POH_NUM) {
             return reject("invalid poe_count value");
+        }
+        if (randomizer_active()) {
+            return ApplyResult::IgnoredByPolicy;
         }
         bool newPickup = false;
         if (sequence != 0 && previous >= 0 && value > previous) {
@@ -3690,6 +3908,9 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return ApplyResult::Applied;
     }
     if (type == "bomb_bag_slot") {
+        if (randomizer_active()) {
+            return ApplyResult::IgnoredByPolicy;
+        }
         return apply_bomb_bag_slot(message.value("bag", -1), message.value("item", -1),
                                    message.value("count", -1)) ?
                    ApplyResult::Applied : ApplyResult::IgnoredByPolicy;
@@ -4441,7 +4662,8 @@ void GameAdapter::poll_local_state(bool publish) {
         if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
         return localPermanentSequence_;
     };
-    if (state["poes"] > localObservedState_["poes"])
+    const bool randomizerActive = randomizer_active();
+    if (!randomizerActive && state["poes"] > localObservedState_["poes"])
         publish_local({{"type", "poe_count"},
             {"previous_value", localObservedState_["poes"]}, {"value", state["poes"]},
             {"event_sequence", nextPermanentSequence()}});
@@ -4449,15 +4671,17 @@ void GameAdapter::poll_local_state(bool publish) {
         if (state["fish_size"][index] != localObservedState_["fish_size"][index])
             publish_local({{"type", "fish_record"}, {"index", index},
                 {"count", state["fish_count"][index]}, {"max_size", state["fish_size"][index]}});
-    for (int bag = 0; bag < 3; ++bag) {
-        const auto& current = state["bombs"][bag];
-        const auto& previous = localObservedState_["bombs"][bag];
-        const int item = current.value("item", -1);
-        const int count = current.value("count", 0);
-        if (!current.value("rental", false) && syncable_bomb_item(item) && count > 0 &&
-            (previous.value("item", -1) != item || previous.value("count", 0) == 0)) {
-            publish_local({{"type", "bomb_bag_slot"}, {"bag", bag},
-                           {"item", item}, {"count", count}});
+    if (!randomizerActive) {
+        for (int bag = 0; bag < 3; ++bag) {
+            const auto& current = state["bombs"][bag];
+            const auto& previous = localObservedState_["bombs"][bag];
+            const int item = current.value("item", -1);
+            const int count = current.value("count", 0);
+            if (!current.value("rental", false) && syncable_bomb_item(item) && count > 0 &&
+                (previous.value("item", -1) != item || previous.value("count", 0) == 0)) {
+                publish_local({{"type", "bomb_bag_slot"}, {"bag", bag},
+                               {"item", item}, {"count", count}});
+            }
         }
     }
     if (state["ooccoo"] != localObservedState_["ooccoo"]) {

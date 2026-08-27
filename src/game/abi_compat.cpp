@@ -23,13 +23,22 @@ void* find_game_symbol(const char* windowsName, const char* unixName) {
 
 using CreateActorOld = fpc_ProcID (*)(s16, u32, const cXyz*, int, const csXyz*,
                                       const cXyz*, s8);
-using CreateActorNew = fpc_ProcID (*)(s16, u32, const cXyz*, int, const csXyz*,
-                                      const cXyz*, s8, u32);
+using CreateActorTagged = fpc_ProcID (*)(s16, u32, const cXyz*, int, const csXyz*,
+                                         const cXyz*, s8, u32);
+using CreateActorCurrent = fpc_ProcID (*)(s16, u32, const cXyz*, int, const csXyz*,
+                                          const cXyz*, s8, u32, u8);
 using ExecuteItemGetOld = void (*)(u8);
 using ExecuteItemGetNew = void (*)(u8, u32, fopAc_ac_c*);
 
-CreateActorNew create_actor_new() {
-    static const auto function = reinterpret_cast<CreateActorNew>(find_game_symbol(
+CreateActorCurrent create_actor_current() {
+    static const auto function = reinterpret_cast<CreateActorCurrent>(find_game_symbol(
+        "?fopAcM_create@@YAIFIPEBUcXyz@@HPEBVcsXyz@@0CIE@Z",
+        "_Z13fopAcM_createsjPK4cXyziPK5csXyzS1_ajh"));
+    return function;
+}
+
+CreateActorTagged create_actor_tagged() {
+    static const auto function = reinterpret_cast<CreateActorTagged>(find_game_symbol(
         "?fopAcM_create@@YAIFIPEBUcXyz@@HPEBVcsXyz@@0CI@Z",
         "_Z13fopAcM_createsjPK4cXyziPK5csXyzS1_aj"));
     return function;
@@ -58,14 +67,18 @@ ExecuteItemGetOld execute_item_get_old() {
 }  // namespace
 
 bool required_game_abi_available() {
-    return (create_actor_new() != nullptr || create_actor_old() != nullptr) &&
+    return (create_actor_current() != nullptr || create_actor_tagged() != nullptr ||
+            create_actor_old() != nullptr) &&
            (execute_item_get_new() != nullptr || execute_item_get_old() != nullptr);
 }
 
 fpc_ProcID create_actor_compat(s16 profile, u32 parameters, const cXyz* position,
                                int room, const csXyz* angle, const cXyz* scale,
                                s8 argument) {
-    if (const auto function = create_actor_new(); function != nullptr) {
+    if (const auto function = create_actor_current(); function != nullptr) {
+        return function(profile, parameters, position, room, angle, scale, argument, 0, 0xFF);
+    }
+    if (const auto function = create_actor_tagged(); function != nullptr) {
         return function(profile, parameters, position, room, angle, scale, argument, 0);
     }
     if (const auto function = create_actor_old(); function != nullptr) {

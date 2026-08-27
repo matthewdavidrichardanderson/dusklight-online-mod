@@ -4,6 +4,7 @@
 #include "dusk/multiplayer/multiplayer.hpp"
 
 #include <mods/api.h>
+#include <mods/svc/item.h>
 #include <mods/svc/save.h>
 
 #include <cstdint>
@@ -41,6 +42,7 @@ public:
     void publish_local(nlohmann::json message);
     bool request_manual_sync(std::string_view peerId, bool flagsOnly, std::string* error = nullptr);
     [[nodiscard]] bool applying_remote() const;
+    [[nodiscard]] bool randomizer_active() const;
 
     [[nodiscard]] bool stage_ready() const override;
     [[nodiscard]] bool allow_stage_unready(const RoutedMessage& message) const override;
@@ -63,6 +65,7 @@ public:
     void notify_local_max_life(int previous, int value);
     void notify_local_bottle_slots(int previous, int value);
     void notify_local_rupees(int value);
+    void notify_local_item_grant(const ItemGiveInfo& info);
 
     void reset_session();
     [[nodiscard]] const std::string& last_error() const;
@@ -84,6 +87,10 @@ private:
     std::map<std::string, uint32_t> permanentPickupSequence_;
     std::map<std::string, uint32_t> fishCatchSequence_;
     std::map<int, std::set<int>> observedMemoryItems_;
+    // A randomized location may legitimately contain the same item as many
+    // other locations. Deduplicate by ItemService check identity, never by the
+    // resolved item byte.
+    std::set<std::string> completedRandomizerChecks_;
     std::map<std::string, bool> appliedTearEvents_;
     std::string lastError_;
     uint32_t progressionTicks_ = 0;
@@ -100,6 +107,7 @@ private:
     bool syncWorldEnabled_ = false;
     bool hooksInstalled_ = false;
     SaveObserverHandle saveObserver_ = 0;
+    ItemGiveHandle itemGiveObserver_ = 0;
     uint8_t localColorSlot_ = 0;
     bool sharedOoccooAuthoritative_ = false;
     bool sharedOoccooBoundToSave_ = false;
@@ -173,6 +181,7 @@ private:
     uint32_t manualSyncWaitTicks_ = 0;
 
     ApplyResult consume_progression(const RoutedMessage& message);
+    ApplyResult consume_randomizer(const RoutedMessage& message);
     ApplyResult consume_pvp_hit(const RoutedMessage& message);
     nlohmann::json make_save_snapshot();
     ApplyResult apply_save_snapshot(const RoutedMessage& message);
