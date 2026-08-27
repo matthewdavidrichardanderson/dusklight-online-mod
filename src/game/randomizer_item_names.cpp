@@ -152,7 +152,7 @@ std::string_view randomizer_item_name(uint8_t itemId) {
         names[0xF5] = "Ordon Cheese";
         names[0xF6] = "Snowpeak Ruins Bedroom Key";
         names[0xF9] = "Goron Mines Key Shard";
-        names[0xFE] = "Coro Key";
+        names[0xFE] = "Faron Woods Coro Key";
 
         // items.yaml lists progressive rewards under one logical pool ID, but
         // ItemService reports the concrete tier selected by
