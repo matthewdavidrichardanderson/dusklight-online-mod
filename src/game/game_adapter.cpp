@@ -2466,7 +2466,11 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                        float(kProgressionPromptHoldTicks), 0.0f, 1.0f) : 0.0f;
     const bool remoteGameplayReady = remote_link_gameplay_ready(
         manualTransitionActive_ || ordonReloadTransitionActive_);
-    update_visual_overlays(status.welcomed, remoteGameplayReady, nameLabelsEnabled,
+    // A direct host is already an active session while listening, before any
+    // peer has completed the welcome handshake. Passive local UI such as the
+    // player list should work in that state; remote visuals remain separately
+    // guarded by remoteGameplayReady.
+    update_visual_overlays(status.enabled, remoteGameplayReady, nameLabelsEnabled,
                            remoteModelEnabled, playerListEnabled, status.room,
                            (status.mode == net::Mode::DirectHost || status.isOwner) ?
                                "hosting" : "connected",

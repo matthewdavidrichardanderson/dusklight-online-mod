@@ -248,7 +248,7 @@ target_link_libraries(dusklight_online PRIVATE
     ${CMAKE_DL_LIBS}
 )
 if (WIN32)
-    target_link_libraries(dusklight_online PRIVATE ws2_32)
+    target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
     # MSVC otherwise records the absolute build-machine PDB path in mod.dll's
     # PE debug directory. Keep distributed .dusk packages free of usernames
     # and local workspace paths while retaining a useful PDB basename.

@@ -11,9 +11,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstring>
 #include <sstream>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace dusklight_online {
 namespace {
@@ -37,7 +43,8 @@ void add_bound_control(UiElementHandle pane, UiControlKind kind, const char* lab
                        ConfigVarHandle variable, int64_t minimum = 0,
                        int64_t maximum = 0, int64_t step = 1,
                        int32_t maxLength = 0, UiPredicateFn isDisabled = nullptr,
-                       void* userData = nullptr) {
+                       void* userData = nullptr, const char* styleClass = nullptr,
+                       const char* layoutClass = nullptr) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = kind;
     control.label = label;
@@ -49,7 +56,14 @@ void add_bound_control(UiElementHandle pane, UiControlKind kind, const char* lab
     control.max_length = maxLength;
     control.is_disabled = isDisabled;
     control.user_data = userData;
-    svc_ui->pane_add_control(mod_ctx, pane, &control, nullptr);
+    UiElementHandle element = 0;
+    if (svc_ui->pane_add_control(mod_ctx, pane, &control, &element) == MOD_OK &&
+        element != 0 && styleClass != nullptr) {
+        svc_ui->elem_set_class(mod_ctx, element, styleClass, true);
+    }
+    if (element != 0 && layoutClass != nullptr) {
+        svc_ui->elem_set_class(mod_ctx, element, layoutClass, true);
+    }
 }
 
 void add_session_toggle(UiElementHandle pane, const char* label,
@@ -65,16 +79,297 @@ void add_session_toggle(UiElementHandle pane, const char* label,
     svc_ui->pane_add_control(mod_ctx, pane, &control, nullptr);
 }
 
+void add_form_string(UiElementHandle pane, const char* label, ConfigVarHandle variable,
+                     int32_t maxLength, const char* layoutClass = nullptr) {
+    add_bound_control(pane, UI_CONTROL_STRING, label, variable, 0, 0, 1, maxLength,
+                      nullptr, nullptr, "online-form-field", layoutClass);
+}
+
 void add_button(UiElementHandle pane, const char* label, UiPressedFn callback,
-                OnlineApp* app, bool disableWhileActive = false) {
+                void* userData, UiPredicateFn isDisabled = nullptr,
+                UiPredicateFn isModified = nullptr, const char* styleClass = nullptr) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_BUTTON;
     control.label = label;
     control.on_pressed = callback;
-    control.user_data = app;
-    control.is_disabled = disableWhileActive ? &OnlineApp::session_active : nullptr;
-    svc_ui->pane_add_control(mod_ctx, pane, &control, nullptr);
+    control.user_data = userData;
+    control.is_disabled = isDisabled;
+    control.is_modified = isModified;
+    UiElementHandle element = 0;
+    if (svc_ui->pane_add_control(mod_ctx, pane, &control, &element) == MOD_OK &&
+        element != 0 && styleClass != nullptr) {
+        svc_ui->elem_set_class(mod_ctx, element, styleClass, true);
+    }
 }
+
+void add_code_control(UiElementHandle pane, const char* label, UiControlGetFn get,
+                      UiControlSetFn set, OnlineApp* app) {
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_STRING;
+    control.label = label;
+    control.get = get;
+    control.set = set;
+    control.user_data = app;
+    control.max_length = 2048;
+    UiElementHandle element = 0;
+    if (svc_ui->pane_add_control(mod_ctx, pane, &control, &element) == MOD_OK && element != 0) {
+        svc_ui->elem_set_class(mod_ctx, element, "online-code", true);
+        svc_ui->elem_set_class(mod_ctx, element, "online-form-field", true);
+        svc_ui->elem_set_class(mod_ctx, element, "online-code-row", true);
+    }
+}
+
+std::string rml_escape(std::string_view text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (const char character : text) {
+        switch (character) {
+        case '&': escaped += "&amp;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        case '"': escaped += "&quot;"; break;
+        default: escaped += character; break;
+        }
+    }
+    return escaped;
+}
+
+std::string trim_clipboard_text(std::string text) {
+    const size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const size_t last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::string friendly_status_text(std::string text) {
+    std::replace(text.begin(), text.end(), '_', ' ');
+    if (!text.empty()) text.front() = static_cast<char>(std::toupper(
+        static_cast<unsigned char>(text.front())));
+    return text;
+}
+
+bool write_clipboard(std::string_view text) {
+#ifdef _WIN32
+    if (text.empty() || !OpenClipboard(nullptr)) return false;
+    const HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
+    if (memory == nullptr) {
+        CloseClipboard();
+        return false;
+    }
+    void* const bytes = GlobalLock(memory);
+    if (bytes == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(bytes, text.data(), text.size());
+    static_cast<char*>(bytes)[text.size()] = '\0';
+    GlobalUnlock(memory);
+    EmptyClipboard();
+    if (SetClipboardData(CF_TEXT, memory) == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+#else
+    (void)text;
+    return false;
+#endif
+}
+
+std::string read_clipboard() {
+#ifdef _WIN32
+    if (!OpenClipboard(nullptr)) return {};
+    const HANDLE handle = GetClipboardData(CF_TEXT);
+    if (handle == nullptr) {
+        CloseClipboard();
+        return {};
+    }
+    const char* const bytes = static_cast<const char*>(GlobalLock(handle));
+    if (bytes == nullptr) {
+        CloseClipboard();
+        return {};
+    }
+    std::string text(bytes);
+    GlobalUnlock(handle);
+    CloseClipboard();
+    return trim_clipboard_text(std::move(text));
+#else
+    return {};
+#endif
+}
+
+void push_clipboard_toast(const char* message, bool warning = false) {
+    UiToastDesc toast = UI_TOAST_DESC_INIT;
+    toast.type = warning ? "warning" : nullptr;
+    toast.body_rml = message;
+    toast.duration_ms = 2500;
+    svc_ui->push_toast(mod_ctx, &toast);
+}
+
+constexpr const char* kOnlineWindowRcss = R"RCSS(
+window content pane:last-of-type > div {
+    line-height: 1.2;
+}
+window content pane.online-form-pane {
+    flex-flow: row wrap;
+    align-content: flex-start;
+}
+window content pane.online-form-pane > div {
+    flex: 0 0 100%;
+}
+.online-state {
+    display: block;
+    padding: 14dp 16dp;
+    margin-bottom: 6dp;
+    border: 1dp rgba(146, 135, 91, 55%);
+    border-radius: 8dp;
+    background-color: rgba(224, 219, 200, 5%);
+}
+.online-state-title {
+    display: block;
+    font-family: "Fira Sans Condensed";
+    font-weight: bold;
+    font-size: 22dp;
+    color: #e0dbc8;
+}
+.online-state-detail {
+    display: block;
+    margin-top: 4dp;
+    font-size: 16dp;
+    color: rgba(224, 219, 200, 70%);
+}
+.online-detail-row {
+    display: flex;
+    margin-bottom: 3dp;
+}
+.online-detail-label {
+    display: block;
+    flex: 0 0 116dp;
+    width: 116dp;
+    font-family: "Fira Sans Condensed";
+    font-weight: bold;
+    color: rgba(224, 219, 200, 55%);
+}
+.online-detail-value {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+select-button.online-code {
+    min-width: 0;
+}
+select-button.online-form-field {
+    display: block;
+    position: relative;
+    flex: 1 1 100%;
+    height: 57dp;
+    min-width: 0;
+    padding: 0dp;
+    border-radius: 10dp;
+    background-color: rgba(17, 16, 10, 32%);
+}
+select-button.online-form-field.online-half-field {
+    flex: 1 1 100%;
+}
+select-button.online-code-row {
+    flex: 1 1 100%;
+}
+select-button.online-form-field key {
+    display: block;
+    position: absolute;
+    top: 7dp;
+    left: 12dp;
+    right: 12dp;
+    height: 17dp;
+    margin: 0dp;
+    font-size: 15dp;
+    line-height: 17dp;
+    opacity: 0.72;
+}
+select-button.online-form-field value {
+    display: block;
+    position: absolute;
+    top: 29dp;
+    left: 12dp;
+    right: 12dp;
+    width: auto;
+    height: 22dp;
+    min-width: 0;
+    text-align: left;
+    font-size: 20dp;
+    line-height: 22dp;
+}
+select-button.online-form-field input {
+    position: absolute;
+    top: 28dp;
+    left: 12dp;
+    right: 12dp;
+    width: auto;
+    height: 24dp;
+    min-width: 0;
+    text-align: left;
+    font-size: 20dp;
+    line-height: 22dp;
+}
+select-button.online-code value {
+    display: block;
+    right: auto;
+    width: 92%;
+    min-width: 0;
+    max-width: 92%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+select-button.online-code input {
+    min-width: 0;
+}
+button.online-copy-action {
+    display: block;
+    flex: 1 1 100%;
+    height: 40dp;
+    align-self: center;
+    padding: 0dp 12dp;
+    line-height: 40dp;
+    text-align: center;
+    font-size: 17dp;
+    font-weight: normal;
+    color: rgba(204, 184, 119, 92%);
+    box-shadow: rgba(146, 135, 91, 25%) 0 0 0 1dp;
+}
+button.online-primary-action {
+    color: #d4b83f;
+    box-shadow: rgba(194, 164, 45, 65%) 0 0 0 1dp;
+    font-family: "Fira Sans Condensed";
+    font-weight: bold;
+}
+button.online-danger-action {
+    color: #e2534d;
+    box-shadow: rgba(226, 83, 77, 65%) 0 0 0 1dp;
+    font-family: "Fira Sans Condensed";
+    font-weight: bold;
+}
+select-button.online-wide-control {
+    flex: 1 1 100%;
+}
+window content pane.online-form-pane > button.online-primary-action,
+window content pane.online-form-pane > button.online-danger-action {
+    flex: 1 1 100%;
+}
+button.online-primary-action:disabled,
+button.online-danger-action:disabled,
+button.online-copy-action:disabled {
+    display: none;
+}
+window content pane.online-form-pane > button:not(:disabled):selected,
+window content pane.online-form-pane > select-button:not(:disabled):selected {
+    opacity: 0.9;
+    background-color: rgba(17, 16, 10, 20%);
+}
+)RCSS";
 
 const char* mode_text(net::Mode mode) {
     switch (mode) {
@@ -94,10 +389,11 @@ const char* state_text(net::State state) {
     }
 }
 
-bool room_settings_host_controlled(const net::Status& status) {
-    return status.enabled &&
-        (status.mode == net::Mode::DirectJoin ||
-         (status.mode == net::Mode::Relay && status.welcomed && !status.isOwner));
+bool room_settings_locked(const net::Status& status, bool relayHostIntent) {
+    if (!status.enabled) return false;
+    if (status.mode == net::Mode::DirectJoin) return true;
+    if (status.mode == net::Mode::Relay) return !relayHostIntent && !status.isOwner;
+    return false;
 }
 
 }  // namespace
@@ -149,7 +445,14 @@ void OnlineApp::update() {
             livePublishInitialized_ = false;
             break;
         case net::EventKind::Disconnected:
-            statusMessage_ = "Disconnected: " + event.detail;
+            if (event.detail == "user requested" && !requestedDisconnectStatus_.empty()) {
+                statusMessage_ = requestedDisconnectStatus_;
+            } else {
+                statusMessage_ = event.detail.empty() ? "Disconnected" :
+                    "Disconnected: " + event.detail;
+            }
+            requestedDisconnectStatus_.clear();
+            relayHostIntent_ = false;
             if (router_ != nullptr) {
                 router_->clear();
             }
@@ -369,6 +672,50 @@ std::string OnlineApp::status_text() const {
     return text.str();
 }
 
+std::string OnlineApp::dashboard_rml() const {
+    const net::Status status = transport_.status();
+    const auto detail_row = [](std::string_view label, std::string_view value) {
+        return "<div class=\"online-detail-row\"><span class=\"online-detail-label\">" +
+            rml_escape(label) + "</span><span class=\"online-detail-value\">" +
+            rml_escape(value) + "</span></div>";
+    };
+
+    std::string activity = "Not connected";
+    std::string connection = "—";
+    std::string session = "—";
+    std::string health = "Disconnected";
+    if (status.enabled) {
+        const bool hosting = status.mode == net::Mode::DirectHost ||
+            (status.mode == net::Mode::Relay && (relayHostIntent_ || status.isOwner));
+        activity = hosting ? "Hosting" : "Joining";
+        connection = status.mode == net::Mode::Relay ? "Relay" : "Direct";
+        const size_t playerCount = transport_.peers().size() + 1u;
+        session = (status.room.empty() ? std::string("Unnamed lobby") : status.room) +
+            " — " + std::to_string(playerCount) + (playerCount == 1 ? " player" : " players");
+        if (!status.error.empty()) {
+            health = "Error — " + friendly_status_text(status.error);
+        } else {
+            switch (status.state) {
+            case net::State::Connected: health = "Connected"; break;
+            case net::State::Connecting: health = "Connecting"; break;
+            case net::State::Listening: health = "Ready — waiting for players"; break;
+            default: health = "Disconnected"; break;
+            }
+        }
+    } else if (!status.error.empty()) {
+        health = "Error — " + friendly_status_text(status.error);
+    } else if (!statusMessage_.empty() && statusMessage_ != "Not connected") {
+        health = friendly_status_text(statusMessage_);
+    }
+
+    std::string rml;
+    rml += detail_row("Activity", activity);
+    rml += detail_row("Connection", connection);
+    rml += detail_row("Session", session);
+    rml += detail_row("Status", health);
+    return rml;
+}
+
 void OnlineApp::open_window() {
     if (window_ != 0) {
         return;
@@ -391,6 +738,7 @@ void OnlineApp::open_window() {
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = tabs;
     desc.tab_count = std::size(tabs);
+    desc.rcss = kOnlineWindowRcss;
     desc.on_closed = &OnlineApp::window_closed;
     desc.user_data = this;
     svc_ui->window_push(mod_ctx, &desc, &window_);
@@ -402,12 +750,15 @@ void OnlineApp::refresh_manual_peer_choices() {
             manualPeerIds_[selectedManualPeer_] : std::string();
     manualPeerIds_.clear();
     manualPeerLabels_.clear();
-    manualPeerOptionPtrs_.clear();
+    manualPeerButtonContexts_.clear();
     for (const auto& [id, name] : transport_.peers()) {
         manualPeerIds_.push_back(id);
         manualPeerLabels_.push_back(name + " [" + id + "]");
     }
-    for (const std::string& label : manualPeerLabels_) manualPeerOptionPtrs_.push_back(label.c_str());
+    manualPeerButtonContexts_.reserve(manualPeerIds_.size());
+    for (int64_t i = 0; i < static_cast<int64_t>(manualPeerIds_.size()); ++i) {
+        manualPeerButtonContexts_.push_back({this, i});
+    }
     selectedManualPeer_ = 0;
     if (!selectedId.empty()) {
         const auto selected = std::find(manualPeerIds_.begin(), manualPeerIds_.end(), selectedId);
@@ -495,6 +846,7 @@ void OnlineApp::join_direct() {
 }
 
 void OnlineApp::host_relay() {
+    relayHostIntent_ = false;
     net::RelayConfig config;
     config.name = string_value(config_.playerName);
     config.room = string_value(config_.relayRoom);
@@ -518,6 +870,7 @@ void OnlineApp::host_relay() {
     if (!transport_.start_relay(config, &error)) {
         statusMessage_ = "Relay host failed: " + error;
     } else {
+        relayHostIntent_ = true;
         activeCode_ = code;
         statusMessage_ = useLocalRelay
             ? "Creating relay lobby using the relay on this PC"
@@ -526,6 +879,7 @@ void OnlineApp::host_relay() {
 }
 
 void OnlineApp::join_relay() {
+    relayHostIntent_ = false;
     const std::string code = string_value(config_.relayCode);
     std::string error;
     const auto endpoint = dusk::multiplayer::decode_invite_code(code, &error);
@@ -549,6 +903,7 @@ void OnlineApp::join_relay() {
     if (!transport_.start_relay(config, &error)) {
         statusMessage_ = "Relay join failed: " + error;
     } else {
+        relayHostIntent_ = false;
         activeCode_ = code;
         statusMessage_ = useLocalRelay
             ? "Joining relay lobby using the relay on this PC"
@@ -557,6 +912,7 @@ void OnlineApp::join_relay() {
 }
 
 void OnlineApp::disconnect() {
+    if (requestedDisconnectStatus_.empty()) requestedDisconnectStatus_ = "Disconnected";
     transport_.disconnect();
     if (router_ != nullptr) {
         router_->clear();
@@ -564,8 +920,9 @@ void OnlineApp::disconnect() {
     if (game_ != nullptr) {
         game_->reset_session();
     }
-    statusMessage_ = "Disconnected";
+    statusMessage_ = requestedDisconnectStatus_;
     activeCode_.clear();
+    relayHostIntent_ = false;
     livePublishInitialized_ = false;
 }
 
@@ -624,89 +981,137 @@ ModResult OnlineApp::update_panel(ModContext*, void* data, ModError*) {
 }
 
 ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHandle left,
-                                       UiElementHandle, void* data, ModError*) {
+                                       UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.windowStatus_ = 0;
-    svc_ui->pane_add_section(mod_ctx, left, "Current session");
-    const std::string status = app.status_text();
-    svc_ui->pane_add_text(mod_ctx, left, status.c_str(), &app.windowStatus_);
+    svc_ui->pane_add_section(mod_ctx, left, "Session overview");
+    const std::string status = app.dashboard_rml();
+    svc_ui->pane_add_rml(mod_ctx, left, status.c_str(), &app.windowStatus_);
     app.windowRenderedStatus_ = status;
-    add_session_toggle(left, "Remote Link model", &OnlineApp::dummy_model_get,
+
+    svc_ui->pane_add_section(mod_ctx, left, "Connected players");
+    if (!app.manualPeerButtonContexts_.empty()) {
+        for (size_t i = 0; i < app.manualPeerButtonContexts_.size(); ++i) {
+            add_button(left, app.manualPeerLabels_[i].c_str(), &OnlineApp::manual_peer_pressed,
+                       &app.manualPeerButtonContexts_[i], nullptr,
+                       &OnlineApp::manual_peer_selected);
+        }
+        svc_ui->pane_add_section(mod_ctx, left, "Sync from selected player");
+        add_button(left, "Sync flags", &OnlineApp::manual_sync_flags_pressed, &app,
+                   &OnlineApp::manual_sync_unavailable);
+        add_button(left, "Sync and warp", &OnlineApp::manual_sync_warp_pressed, &app,
+                   &OnlineApp::manual_sync_unavailable);
+    } else {
+        svc_ui->pane_add_text(mod_ctx, left, "No other players are connected.", nullptr);
+    }
+    add_button(left, "Refresh players", &OnlineApp::refresh_peers_pressed, &app);
+
+    svc_ui->pane_add_section(mod_ctx, right, "Host controls");
+    add_session_toggle(right, "Remote Link model", &OnlineApp::dummy_model_get,
                        &OnlineApp::dummy_model_set, &OnlineApp::room_setting_locked, &app);
-    add_bound_control(left, UI_CONTROL_TOGGLE, "Name labels", app.config_.nameLabels);
-    add_bound_control(left, UI_CONTROL_TOGGLE, "Player list overlay", app.config_.playerList);
-    add_session_toggle(left, "Sync flags", &OnlineApp::sync_flags_get,
+    add_session_toggle(right, "Sync flags", &OnlineApp::sync_flags_get,
                        &OnlineApp::sync_flags_set, &OnlineApp::room_setting_locked, &app);
-    add_session_toggle(left, "Sync world", &OnlineApp::sync_world_get,
+    add_session_toggle(right, "Sync world", &OnlineApp::sync_world_get,
                        &OnlineApp::sync_world_set, &OnlineApp::room_setting_locked, &app);
-    add_session_toggle(left, "Remote collision", &OnlineApp::remote_collision_get,
+    add_session_toggle(right, "Remote collision", &OnlineApp::remote_collision_get,
                        &OnlineApp::remote_collision_set,
                        &OnlineApp::remote_collision_setting_locked, &app);
-    add_session_toggle(left, "PvP", &OnlineApp::pvp_get, &OnlineApp::pvp_set,
+    add_session_toggle(right, "PvP", &OnlineApp::pvp_get, &OnlineApp::pvp_set,
                        &OnlineApp::pvp_setting_locked, &app);
-    svc_ui->pane_add_section(mod_ctx, left, "Manual peer sync");
-    if (!app.manualPeerOptionPtrs_.empty()) {
-        UiControlDesc peer = UI_CONTROL_DESC_INIT;
-        peer.kind = UI_CONTROL_SELECT;
-        peer.label = "Sync from peer";
-        peer.get = &OnlineApp::manual_peer_get;
-        peer.set = &OnlineApp::manual_peer_set;
-        peer.user_data = &app;
-        peer.options = app.manualPeerOptionPtrs_.data();
-        peer.option_count = app.manualPeerOptionPtrs_.size();
-        svc_ui->pane_add_control(mod_ctx, left, &peer, nullptr);
-        add_button(left, "Sync flags", &OnlineApp::manual_sync_flags_pressed, &app);
-        add_button(left, "Sync and warp", &OnlineApp::manual_sync_warp_pressed, &app);
-    } else {
-        svc_ui->pane_add_text(mod_ctx, left,
-            "No connected peers are available for manual sync.",
-            nullptr);
-    }
-    add_button(left, "Refresh connected peers", &OnlineApp::refresh_peers_pressed, &app);
-    add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app);
+    svc_ui->pane_add_section(mod_ctx, right, "Display");
+    add_bound_control(right, UI_CONTROL_TOGGLE, "Name labels", app.config_.nameLabels);
+    add_bound_control(right, UI_CONTROL_TOGGLE, "Player list overlay", app.config_.playerList);
+    svc_ui->pane_add_section(mod_ctx, right, "Session actions");
+    add_button(right, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+               &OnlineApp::host_inactive, nullptr, "online-danger-action");
+    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+               &OnlineApp::joiner_inactive, nullptr, "online-danger-action");
     return MOD_OK;
 }
 
 ModResult OnlineApp::build_direct_tab(ModContext*, UiWindowHandle, UiElementHandle left,
-                                      UiElementHandle, void* data, ModError*) {
+                                      UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     // Activating any tab destroys the previous tab's elements.
     app.windowStatus_ = 0;
-    svc_ui->pane_add_section(mod_ctx, left, "Direct host / join");
-    add_bound_control(left, UI_CONTROL_STRING, "Player name", app.config_.playerName, 0, 0, 1, 32);
-    add_bound_control(left, UI_CONTROL_STRING, "Lobby name", app.config_.directRoom, 0, 0, 1, 64);
-    add_bound_control(left, UI_CONTROL_STRING, "Bind host", app.config_.bindHost, 0, 0, 1, 255);
-    add_bound_control(left, UI_CONTROL_STRING, "Public host", app.config_.publicHost, 0, 0, 1, 255);
-    add_bound_control(left, UI_CONTROL_NUMBER, "Port", app.config_.port, 1, 65535, 1);
-    add_button(left, "Host direct lobby", &OnlineApp::host_direct_pressed, &app, true);
-    add_bound_control(left, UI_CONTROL_STRING, "Invite code", app.config_.directInvite, 0, 0, 1, 2048);
-    add_button(left, "Join direct lobby", &OnlineApp::join_direct_pressed, &app, true);
+    svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
+    svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Host direct");
+    add_form_string(left, "Player name", app.config_.playerName, 32);
+    add_form_string(left, "Lobby name", app.config_.directRoom, 64, "online-half-field");
+    add_bound_control(left, UI_CONTROL_NUMBER, "Port", app.config_.port, 1, 65535, 1,
+                      0, nullptr, nullptr, "online-form-field", "online-half-field");
+    add_form_string(left, "Bind host", app.config_.bindHost, 255, "online-half-field");
+    add_form_string(left, "Public host", app.config_.publicHost, 255, "online-half-field");
+    add_code_control(left, "Invite code", &OnlineApp::direct_code_get,
+                     &OnlineApp::direct_code_set, &app);
+    add_button(left, "Copy", &OnlineApp::copy_direct_code_pressed, &app,
+               nullptr, nullptr, "online-copy-action");
+    add_button(left, "Host direct lobby", &OnlineApp::host_direct_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+               &OnlineApp::direct_host_inactive, nullptr, "online-danger-action");
+
+    svc_ui->pane_add_section(mod_ctx, right, "Join direct");
+    add_form_string(right, "Player name", app.config_.playerName, 32);
+    add_code_control(right, "Invite code", &OnlineApp::direct_code_get,
+                     &OnlineApp::direct_code_set, &app);
+    add_button(right, "Paste", &OnlineApp::paste_direct_code_pressed, &app,
+               nullptr, nullptr, "online-copy-action");
+    add_button(right, "Join direct lobby", &OnlineApp::join_direct_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+               &OnlineApp::direct_join_inactive, nullptr, "online-danger-action");
     return MOD_OK;
 }
 
 ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandle left,
-                                     UiElementHandle, void* data, ModError*) {
+                                     UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     // Activating any tab destroys the previous tab's elements.
     app.windowStatus_ = 0;
-    svc_ui->pane_add_section(mod_ctx, left, "Relay host / join");
-    add_bound_control(left, UI_CONTROL_STRING, "Player name", app.config_.playerName, 0, 0, 1, 32);
-    add_bound_control(left, UI_CONTROL_STRING, "Relay code", app.config_.relayCode, 0, 0, 1, 2048);
-    add_bound_control(left, UI_CONTROL_STRING, "Lobby name", app.config_.relayRoom, 0, 0, 1, 64);
-    add_bound_control(left, UI_CONTROL_STRING, "Password", app.config_.relayPassword, 0, 0, 1, 128);
+    svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
+    svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Host relay");
+    add_form_string(left, "Player name", app.config_.playerName, 32);
+    add_code_control(left, "Relay code", &OnlineApp::relay_code_get,
+                     &OnlineApp::relay_code_set, &app);
+    add_button(left, "Copy", &OnlineApp::copy_relay_code_pressed, &app,
+               nullptr, nullptr, "online-copy-action");
+    add_form_string(left, "Lobby name", app.config_.relayRoom, 64, "online-half-field");
+    add_form_string(left, "Password", app.config_.relayPassword, 128, "online-half-field");
     add_bound_control(left, UI_CONTROL_TOGGLE,
-                      "Use relay on this PC (ignores code address)", app.config_.relayLocal);
-    add_button(left, "Host relay lobby", &OnlineApp::host_relay_pressed, &app, true);
-    add_button(left, "Join relay lobby", &OnlineApp::join_relay_pressed, &app, true);
+                      "Use relay on this PC", app.config_.relayLocal,
+                      0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
+    add_button(left, "Host relay lobby", &OnlineApp::host_relay_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+               &OnlineApp::relay_host_inactive, nullptr, "online-danger-action");
+
+    svc_ui->pane_add_section(mod_ctx, right, "Join relay");
+    add_form_string(right, "Player name", app.config_.playerName, 32);
+    add_code_control(right, "Relay code", &OnlineApp::relay_code_get,
+                     &OnlineApp::relay_code_set, &app);
+    add_button(right, "Paste", &OnlineApp::paste_relay_code_pressed, &app,
+               nullptr, nullptr, "online-copy-action");
+    add_form_string(right, "Lobby name", app.config_.relayRoom, 64, "online-half-field");
+    add_form_string(right, "Password", app.config_.relayPassword, 128, "online-half-field");
+    add_bound_control(right, UI_CONTROL_TOGGLE,
+                      "Use relay on this PC", app.config_.relayLocal,
+                      0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
+    add_button(right, "Join relay lobby", &OnlineApp::join_relay_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+               &OnlineApp::relay_join_inactive, nullptr, "online-danger-action");
     return MOD_OK;
 }
 
 ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     if (app.windowStatus_ != 0) {
-        const std::string status = app.status_text();
+        const std::string status = app.dashboard_rml();
         if (status != app.windowRenderedStatus_ &&
-            svc_ui->elem_set_text(mod_ctx, app.windowStatus_, status.c_str()) != MOD_OK) {
+            svc_ui->elem_set_rml(mod_ctx, app.windowStatus_, status.c_str()) != MOD_OK) {
             // A tab rebuild invalidates every element handle from its prior
             // generation. Stop immediately if the host rebuilt underneath us.
             app.windowStatus_ = 0;
@@ -725,19 +1130,87 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
 void OnlineApp::open_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }
 void OnlineApp::menu_selected(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }
 void OnlineApp::disconnect_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->disconnect(); }
+void OnlineApp::stop_hosting_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.requestedDisconnectStatus_ = "Not connected";
+    app.disconnect();
+}
 void OnlineApp::host_direct_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->host_direct(); }
 void OnlineApp::join_direct_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->join_direct(); }
 void OnlineApp::host_relay_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->host_relay(); }
 void OnlineApp::join_relay_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->join_relay(); }
-void OnlineApp::manual_peer_get(ModContext*, void* data, UiControlValue* value) {
-    value->int_value = static_cast<OnlineApp*>(data)->selectedManualPeer_;
-}
-void OnlineApp::manual_peer_set(ModContext*, void* data, const UiControlValue* value) {
+void OnlineApp::direct_code_get(ModContext*, void* data, UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
-    if (value->int_value >= 0 &&
-        value->int_value < static_cast<int64_t>(app.manualPeerIds_.size())) {
-        app.selectedManualPeer_ = value->int_value;
+    app.directCodeDisplay_ = app.string_value(app.config_.directInvite);
+    value->string_value = app.directCodeDisplay_.c_str();
+}
+void OnlineApp::direct_code_set(ModContext*, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const std::string entered = value->string_value != nullptr ? value->string_value : "";
+    if (entered != app.directCodeDisplay_) {
+        svc_config->set_string(mod_ctx, app.config_.directInvite,
+                               trim_clipboard_text(entered).c_str());
     }
+}
+void OnlineApp::relay_code_get(ModContext*, void* data, UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.relayCodeDisplay_ = app.string_value(app.config_.relayCode);
+    value->string_value = app.relayCodeDisplay_.c_str();
+}
+void OnlineApp::relay_code_set(ModContext*, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const std::string entered = value->string_value != nullptr ? value->string_value : "";
+    if (entered != app.relayCodeDisplay_) {
+        svc_config->set_string(mod_ctx, app.config_.relayCode,
+                               trim_clipboard_text(entered).c_str());
+    }
+}
+void OnlineApp::copy_direct_code_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const std::string code = !app.activeCode_.empty() ? app.activeCode_ :
+        app.string_value(app.config_.directInvite);
+    const bool copied = write_clipboard(code);
+    push_clipboard_toast(copied ? "Direct invite code copied" :
+        "Could not copy the direct invite code", !copied);
+}
+void OnlineApp::paste_direct_code_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const std::string code = read_clipboard();
+    if (code.empty()) {
+        push_clipboard_toast("Clipboard does not contain a code", true);
+        return;
+    }
+    svc_config->set_string(mod_ctx, app.config_.directInvite, code.c_str());
+    push_clipboard_toast("Direct invite code pasted");
+}
+void OnlineApp::copy_relay_code_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const std::string code = !app.activeCode_.empty() ? app.activeCode_ :
+        app.string_value(app.config_.relayCode);
+    const bool copied = write_clipboard(code);
+    push_clipboard_toast(copied ? "Relay code copied" :
+        "Could not copy the relay code", !copied);
+}
+void OnlineApp::paste_relay_code_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const std::string code = read_clipboard();
+    if (code.empty()) {
+        push_clipboard_toast("Clipboard does not contain a code", true);
+        return;
+    }
+    svc_config->set_string(mod_ctx, app.config_.relayCode, code.c_str());
+    push_clipboard_toast("Relay code pasted");
+}
+void OnlineApp::manual_peer_pressed(ModContext*, void* data) {
+    const auto& context = *static_cast<ManualPeerButtonContext*>(data);
+    if (context.app != nullptr && context.index >= 0 &&
+        context.index < static_cast<int64_t>(context.app->manualPeerIds_.size())) {
+        context.app->selectedManualPeer_ = context.index;
+    }
+}
+bool OnlineApp::manual_peer_selected(ModContext*, void* data) {
+    const auto& context = *static_cast<ManualPeerButtonContext*>(data);
+    return context.app != nullptr && context.app->selectedManualPeer_ == context.index;
 }
 void OnlineApp::manual_sync_warp_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->request_manual_sync(false);
@@ -757,14 +1230,47 @@ bool OnlineApp::manual_sync_unavailable(ModContext*, void* data) {
 bool OnlineApp::session_active(ModContext*, void* data) {
     return static_cast<OnlineApp*>(data)->transport_.status().enabled;
 }
-bool OnlineApp::room_setting_locked(ModContext*, void* data) {
+bool OnlineApp::host_inactive(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    return !status.enabled ||
+        (status.mode != net::Mode::DirectHost &&
+         !(status.mode == net::Mode::Relay && (app.relayHostIntent_ || status.isOwner)));
+}
+bool OnlineApp::joiner_inactive(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    return !status.enabled || status.mode == net::Mode::DirectHost ||
+        (status.mode == net::Mode::Relay && (app.relayHostIntent_ || status.isOwner));
+}
+bool OnlineApp::direct_host_inactive(ModContext*, void* data) {
     const net::Status status = static_cast<OnlineApp*>(data)->transport_.status();
-    return room_settings_host_controlled(status);
+    return !status.enabled || status.mode != net::Mode::DirectHost;
+}
+bool OnlineApp::direct_join_inactive(ModContext*, void* data) {
+    const net::Status status = static_cast<OnlineApp*>(data)->transport_.status();
+    return !status.enabled || status.mode != net::Mode::DirectJoin;
+}
+bool OnlineApp::relay_host_inactive(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    return !status.enabled || status.mode != net::Mode::Relay ||
+        (!app.relayHostIntent_ && !status.isOwner);
+}
+bool OnlineApp::relay_join_inactive(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    return !status.enabled || status.mode != net::Mode::Relay ||
+        app.relayHostIntent_ || status.isOwner;
+}
+bool OnlineApp::room_setting_locked(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    return room_settings_locked(app.transport_.status(), app.relayHostIntent_);
 }
 bool OnlineApp::remote_collision_setting_locked(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
-    const bool roomLocked = room_settings_host_controlled(status);
+    const bool roomLocked = room_settings_locked(status, app.relayHostIntent_);
     const bool modelEnabled = status.enabled ? status.settings.dummyModel :
                                                app.bool_value(app.config_.dummyModel, true);
     return roomLocked || !modelEnabled;
@@ -772,7 +1278,7 @@ bool OnlineApp::remote_collision_setting_locked(ModContext*, void* data) {
 bool OnlineApp::pvp_setting_locked(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
-    const bool roomLocked = room_settings_host_controlled(status);
+    const bool roomLocked = room_settings_locked(status, app.relayHostIntent_);
     // The raw room collision option controls this UI lock. The remote-model
     // option participates only in effective runtime PvP.
     const bool collisionEnabled = status.enabled ? status.settings.remoteCollision :
@@ -786,8 +1292,9 @@ void OnlineApp::dummy_model_get(ModContext*, void* data, UiControlValue* value) 
 
 void OnlineApp::dummy_model_set(ModContext*, void* data, const UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
-    svc_config->set_bool(mod_ctx, app.config_.dummyModel, value->bool_value);
     const net::Status status = app.transport_.status();
+    if (room_settings_locked(status, app.relayHostIntent_)) return;
+    svc_config->set_bool(mod_ctx, app.config_.dummyModel, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
          (status.mode == net::Mode::Relay && status.isOwner))) {
@@ -803,8 +1310,9 @@ void OnlineApp::sync_flags_get(ModContext*, void* data, UiControlValue* value) {
 
 void OnlineApp::sync_flags_set(ModContext*, void* data, const UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
-    svc_config->set_bool(mod_ctx, app.config_.syncFlags, value->bool_value);
     const net::Status status = app.transport_.status();
+    if (room_settings_locked(status, app.relayHostIntent_)) return;
+    svc_config->set_bool(mod_ctx, app.config_.syncFlags, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
          (status.mode == net::Mode::Relay && status.isOwner))) {
@@ -820,8 +1328,9 @@ void OnlineApp::sync_world_get(ModContext*, void* data, UiControlValue* value) {
 
 void OnlineApp::sync_world_set(ModContext*, void* data, const UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
-    svc_config->set_bool(mod_ctx, app.config_.syncWorld, value->bool_value);
     const net::Status status = app.transport_.status();
+    if (room_settings_locked(status, app.relayHostIntent_)) return;
+    svc_config->set_bool(mod_ctx, app.config_.syncWorld, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
          (status.mode == net::Mode::Relay && status.isOwner))) {
@@ -837,9 +1346,10 @@ void OnlineApp::remote_collision_get(ModContext*, void* data, UiControlValue* va
 
 void OnlineApp::remote_collision_set(ModContext*, void* data, const UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    if (room_settings_locked(status, app.relayHostIntent_)) return;
     svc_config->set_bool(mod_ctx, app.config_.remoteCollision, value->bool_value);
     if (!value->bool_value) svc_config->set_bool(mod_ctx, app.config_.pvp, false);
-    const net::Status status = app.transport_.status();
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
          (status.mode == net::Mode::Relay && status.isOwner))) {
@@ -857,8 +1367,9 @@ void OnlineApp::pvp_get(ModContext*, void* data, UiControlValue* value) {
 
 void OnlineApp::pvp_set(ModContext*, void* data, const UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
-    svc_config->set_bool(mod_ctx, app.config_.pvp, value->bool_value);
     const net::Status status = app.transport_.status();
+    if (room_settings_locked(status, app.relayHostIntent_)) return;
+    svc_config->set_bool(mod_ctx, app.config_.pvp, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
          (status.mode == net::Mode::Relay && status.isOwner))) {
