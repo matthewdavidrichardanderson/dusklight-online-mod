@@ -70,7 +70,7 @@ int main() {
         {"rupee_count",Domain::Progression,false,true}, {"poe_count",Domain::Progression,false,true},
         {"malo_fundraising",Domain::Progression,false,true}, {"charlo_offering",Domain::Progression,false,true},
         {"fish_record",Domain::Progression,false,true},
-        {"rando_item_get",Domain::OptionalRandomizer,true,true},
+        {"rando_item_get",Domain::OptionalRandomizer,false,true},
         {"pose",Domain::Visual,false,false}, {"midna_pose",Domain::Visual,false,false},
         {"pvp_hit",Domain::Interaction,false,false},
         {"ganondorf_owner_claim",Domain::Ganondorf,false,true}, {"ganondorf_owner",Domain::Ganondorf,false,true},
@@ -88,6 +88,7 @@ int main() {
     assert(ProtocolRouter::classify("save_snapshot").stageDependent);
     assert(ProtocolRouter::classify("rando_item_get").domain ==
            MessageDomain::OptionalRandomizer);
+    assert(!ProtocolRouter::classify("rando_item_get").stageDependent);
     assert(ProtocolRouter::classify("ganondorf_state").domain == MessageDomain::Ganondorf);
     assert(!ProtocolRouter::is_known_type("future_unreviewed_lane"));
 
@@ -100,8 +101,15 @@ int main() {
     assert(router.stats().pendingMessages == 0);
     assert(consumer.types.size() == 1 && consumer.types.front() == "save_snapshot");
 
+    // Match the AIO: a resolved randomizer reward is never queued behind its
+    // non-stage-dependent absolute companion counter.
+    consumer.ready = false;
+    assert(router.route(message("rando_item_get"), true) == ApplyResult::Applied);
+    assert(router.stats().pendingMessages == 0);
+    assert(consumer.types.size() == 2 && consumer.types.back() == "rando_item_get");
+
     assert(router.route(message("event_bit"), false) == ApplyResult::IgnoredByPolicy);
-    assert(consumer.types.size() == 1);
+    assert(consumer.types.size() == 2);
     assert(router.route(message("future_unreviewed_lane"), true) == ApplyResult::Unsupported);
 
     Event malformed;

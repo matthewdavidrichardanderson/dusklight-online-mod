@@ -89,9 +89,10 @@ void add_form_string(UiElementHandle pane, const char* label, ConfigVarHandle va
                       nullptr, nullptr, "online-form-field", layoutClass);
 }
 
-void add_button(UiElementHandle pane, const char* label, UiPressedFn callback,
-                void* userData, UiPredicateFn isDisabled = nullptr,
-                UiPredicateFn isModified = nullptr, const char* styleClass = nullptr) {
+UiElementHandle add_button(UiElementHandle pane, const char* label, UiPressedFn callback,
+                           void* userData, UiPredicateFn isDisabled = nullptr,
+                           UiPredicateFn isModified = nullptr,
+                           const char* styleClass = nullptr) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_BUTTON;
     control.label = label;
@@ -104,6 +105,7 @@ void add_button(UiElementHandle pane, const char* label, UiPressedFn callback,
         element != 0 && styleClass != nullptr) {
         svc_ui->elem_set_class(mod_ctx, element, styleClass, true);
     }
+    return element;
 }
 
 void add_code_control(UiElementHandle pane, const char* label, UiControlGetFn get,
@@ -262,6 +264,11 @@ window content pane.online-form-pane > div {
     display: block;
     flex: 1 1 auto;
     min-width: 0;
+}
+button.online-peer-selected {
+    color: #e0dbc8;
+    background-color: rgba(194, 164, 45, 24%);
+    box-shadow: #d4b83f 0 0 0 1dp;
 }
 select-button.online-code {
     min-width: 0;
@@ -1010,6 +1017,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                                        UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.windowStatus_ = 0;
+    app.manualPeerButtonElements_.clear();
     app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
     svc_ui->pane_add_section(mod_ctx, left, "Status");
@@ -1020,9 +1028,13 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     svc_ui->pane_add_section(mod_ctx, left, "Connected players");
     if (!app.manualPeerButtonContexts_.empty()) {
         for (size_t i = 0; i < app.manualPeerButtonContexts_.size(); ++i) {
-            add_button(left, app.manualPeerLabels_[i].c_str(), &OnlineApp::manual_peer_pressed,
-                       &app.manualPeerButtonContexts_[i], nullptr,
-                       &OnlineApp::manual_peer_selected);
+            const UiElementHandle button = add_button(
+                left, app.manualPeerLabels_[i].c_str(), &OnlineApp::manual_peer_pressed,
+                &app.manualPeerButtonContexts_[i]);
+            app.manualPeerButtonElements_.push_back(button);
+            if (button != 0 && app.selectedManualPeer_ == static_cast<int64_t>(i)) {
+                svc_ui->elem_set_class(mod_ctx, button, "online-peer-selected", true);
+            }
         }
         svc_ui->pane_add_section(mod_ctx, left, "Sync from selected player");
         add_button(left, "Sync flags", &OnlineApp::manual_sync_flags_pressed, &app,
@@ -1172,6 +1184,7 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.window_ = 0;
     app.windowStatus_ = 0;
+    app.manualPeerButtonElements_.clear();
     app.sessionActionsHeading_ = 0;
 }
 
@@ -1254,6 +1267,13 @@ void OnlineApp::manual_peer_pressed(ModContext*, void* data) {
     if (context.app != nullptr && context.index >= 0 &&
         context.index < static_cast<int64_t>(context.app->manualPeerIds_.size())) {
         context.app->selectedManualPeer_ = context.index;
+        for (size_t i = 0; i < context.app->manualPeerButtonElements_.size(); ++i) {
+            const UiElementHandle button = context.app->manualPeerButtonElements_[i];
+            if (button != 0) {
+                svc_ui->elem_set_class(mod_ctx, button, "online-peer-selected",
+                                       static_cast<int64_t>(i) == context.index);
+            }
+        }
     }
 }
 bool OnlineApp::manual_peer_selected(ModContext*, void* data) {

@@ -76,6 +76,7 @@ private:
     bool lastWantMidna_ = false;
     std::vector<std::string> manualPeerIds_;
     std::vector<std::string> manualPeerLabels_;
+    std::vector<UiElementHandle> manualPeerButtonElements_;
     struct ManualPeerButtonContext {
         OnlineApp* app = nullptr;
         int64_t index = 0;
