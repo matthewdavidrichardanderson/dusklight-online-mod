@@ -39,6 +39,8 @@ ModResult add_config(const char* name, ConfigVarType type, const char* defaultSt
     return MOD_OK;
 }
 
+bool never_modified(ModContext*, void*) { return false; }
+
 void add_bound_control(UiElementHandle pane, UiControlKind kind, const char* label,
                        ConfigVarHandle variable, int64_t minimum = 0,
                        int64_t maximum = 0, int64_t step = 1,
@@ -55,6 +57,7 @@ void add_bound_control(UiElementHandle pane, UiControlKind kind, const char* lab
     control.step = step;
     control.max_length = maxLength;
     control.is_disabled = isDisabled;
+    control.is_modified = &never_modified;
     control.user_data = userData;
     UiElementHandle element = 0;
     if (svc_ui->pane_add_control(mod_ctx, pane, &control, &element) == MOD_OK &&
@@ -75,6 +78,7 @@ void add_session_toggle(UiElementHandle pane, const char* label,
     control.get = get;
     control.set = set;
     control.is_disabled = isDisabled;
+    control.is_modified = &never_modified;
     control.user_data = app;
     svc_ui->pane_add_control(mod_ctx, pane, &control, nullptr);
 }
@@ -109,6 +113,7 @@ void add_code_control(UiElementHandle pane, const char* label, UiControlGetFn ge
     control.label = label;
     control.get = get;
     control.set = set;
+    control.is_modified = &never_modified;
     control.user_data = app;
     control.max_length = 2048;
     UiElementHandle element = 0;
@@ -330,10 +335,11 @@ select-button.online-code input {
 button.online-copy-action {
     display: block;
     flex: 1 1 100%;
-    height: 40dp;
+    height: 32dp;
+    min-height: 32dp;
     align-self: center;
     padding: 0dp 12dp;
-    line-height: 40dp;
+    line-height: 32dp;
     text-align: center;
     font-size: 17dp;
     font-weight: normal;
@@ -364,10 +370,21 @@ button.online-danger-action:disabled,
 button.online-copy-action:disabled {
     display: none;
 }
-window content pane.online-form-pane > button:not(:disabled):selected,
-window content pane.online-form-pane > select-button:not(:disabled):selected {
+.online-session-actions-hidden {
+    display: none;
+}
+window content pane.online-form-pane > button.online-primary-action:not(:disabled):focus-visible,
+window content pane.online-form-pane > button.online-primary-action:not(:disabled):active,
+window content pane.online-form-pane > button.online-danger-action:not(:disabled):focus-visible,
+window content pane.online-form-pane > button.online-danger-action:not(:disabled):active {
     opacity: 0.9;
     background-color: rgba(17, 16, 10, 20%);
+}
+window content pane.online-form-pane > button:not(:disabled):selected,
+window content pane.online-form-pane > select-button:not(:disabled):selected,
+window content pane.online-session-pane > button:not(:disabled):selected {
+    opacity: 1;
+    background-color: rgba(17, 16, 10, 0%);
 }
 )RCSS";
 
@@ -395,6 +412,7 @@ bool room_settings_locked(const net::Status& status, bool relayHostIntent) {
     if (status.mode == net::Mode::Relay) return !relayHostIntent && !status.isOwner;
     return false;
 }
+
 
 }  // namespace
 
@@ -638,38 +656,46 @@ net::RoomSettings OnlineApp::displayed_settings() const {
 
 std::string OnlineApp::status_text() const {
     const net::Status status = transport_.status();
-    std::ostringstream text;
-    text << statusMessage_ << "\nMode: " << mode_text(status.mode)
-         << "\nState: " << state_text(status.state);
+    std::string activity = "Not connected";
+    std::string connection = "—";
+    std::string session = "—";
+    std::string health = "Disconnected";
     if (status.enabled) {
-        text << "\nPlayer: " << status.name << "\nLobby: " << status.room
-             << "\nPeers: " << transport_.peers().size();
-        if (!status.host.empty() && status.port != 0) {
-            text << "\nServer: " << status.host << ':' << status.port;
+        const bool hosting = status.mode == net::Mode::DirectHost ||
+            (status.mode == net::Mode::Relay && (relayHostIntent_ || status.isOwner));
+        activity = hosting ? "Hosting" : "Joining";
+        connection = status.mode == net::Mode::Relay ? "Relay" : "Direct";
+        const size_t playerCount = transport_.peers().size() + 1u;
+        session = (status.room.empty() ? std::string("Unnamed lobby") : status.room) +
+            " — " + std::to_string(playerCount) + (playerCount == 1 ? " player" : " players");
+        if (!status.error.empty()) {
+            health = "Error — " + friendly_status_text(status.error);
+        } else {
+            switch (status.state) {
+            case net::State::Connected: health = "Connected"; break;
+            case net::State::Connecting: health = "Connecting"; break;
+            case net::State::Listening: health = "Ready — waiting for players"; break;
+            default: health = "Disconnected"; break;
+            }
         }
-        for (const auto& [id, name] : transport_.peers()) {
-            text << "\n  " << name << " [" << id << ']';
-        }
-        if (status.mode == net::Mode::Relay) {
-            text << "\nOwner: " << (status.isOwner ? "you" : status.ownerClientId)
-                 << "\nUDP: " << (status.udpReady ? "ready" : "registering");
-        }
-        text << "\nRoom settings: flags=" << (status.settings.syncFlags ? "on" : "off")
-             << ", world=" << (status.settings.syncWorld ? "on" : "off")
-             << ", collision=" << (status.settings.remoteCollision ? "on" : "off")
-             << ", PvP=" << (net::effective_pvp(status.settings) ? "on" : "off");
+    } else if (!status.error.empty()) {
+        health = "Error — " + friendly_status_text(status.error);
+    } else if (!statusMessage_.empty() && statusMessage_ != "Not connected") {
+        health = friendly_status_text(statusMessage_);
     }
-    if (!activeCode_.empty()) {
-        text << "\nInvite/relay code: " << activeCode_;
-    }
-    if (!status.error.empty()) {
-        text << "\nLast error: " << status.error;
-    }
-    if (game_ != nullptr) {
-        const std::string manual = game_->manual_sync_status_text();
-        if (!manual.empty()) text << "\nManual sync: " << manual;
-    }
-    return text.str();
+
+    const auto summary_row = [](std::string_view label, std::string_view value) {
+        return "<div style=\"display: flex; margin-bottom: 3dp;\">"
+            "<span style=\"display: block; flex: 0 0 116dp; width: 116dp; "
+            "font-family: 'Fira Sans Condensed'; font-weight: bold; "
+            "color: rgba(224, 219, 200, 55%);\">" + rml_escape(label) +
+            "</span><span style=\"display: block; flex: 1 1 auto; min-width: 0;\">" +
+            rml_escape(value) + "</span></div>";
+    };
+    return summary_row("Activity", activity) +
+        summary_row("Connection", connection) +
+        summary_row("Session", session) +
+        summary_row("Status", health);
 }
 
 std::string OnlineApp::dashboard_rml() const {
@@ -753,7 +779,7 @@ void OnlineApp::refresh_manual_peer_choices() {
     manualPeerButtonContexts_.clear();
     for (const auto& [id, name] : transport_.peers()) {
         manualPeerIds_.push_back(id);
-        manualPeerLabels_.push_back(name + " [" + id + "]");
+        manualPeerLabels_.push_back(name.empty() ? "Player" : name);
     }
     manualPeerButtonContexts_.reserve(manualPeerIds_.size());
     for (int64_t i = 0; i < static_cast<int64_t>(manualPeerIds_.size()); ++i) {
@@ -957,9 +983,9 @@ void OnlineApp::publish_live_options() {
 ModResult OnlineApp::build_panel(ModContext*, UiElementHandle panel, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.panelStatus_ = 0;
-    svc_ui->pane_add_section(mod_ctx, panel, "Online");
+    svc_ui->pane_add_section(mod_ctx, panel, "Status");
     const std::string status = app.status_text();
-    svc_ui->pane_add_text(mod_ctx, panel, status.c_str(), &app.panelStatus_);
+    svc_ui->pane_add_rml(mod_ctx, panel, status.c_str(), &app.panelStatus_);
     app.panelRenderedStatus_ = status;
     add_button(panel, "Open Online", &OnlineApp::open_pressed, &app);
     return MOD_OK;
@@ -970,7 +996,7 @@ ModResult OnlineApp::update_panel(ModContext*, void* data, ModError*) {
     if (app.panelStatus_ != 0) {
         const std::string status = app.status_text();
         if (status != app.panelRenderedStatus_ &&
-            svc_ui->elem_set_text(mod_ctx, app.panelStatus_, status.c_str()) != MOD_OK) {
+            svc_ui->elem_set_rml(mod_ctx, app.panelStatus_, status.c_str()) != MOD_OK) {
             // Panel contents are rebuilt on host-tab changes; never poll a
             // generation-checked element after its owning content is gone.
             app.panelStatus_ = 0;
@@ -984,7 +1010,9 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                                        UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.windowStatus_ = 0;
-    svc_ui->pane_add_section(mod_ctx, left, "Session overview");
+    app.sessionActionsHeading_ = 0;
+    svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Status");
     const std::string status = app.dashboard_rml();
     svc_ui->pane_add_rml(mod_ctx, left, status.c_str(), &app.windowStatus_);
     app.windowRenderedStatus_ = status;
@@ -1021,7 +1049,15 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     svc_ui->pane_add_section(mod_ctx, right, "Display");
     add_bound_control(right, UI_CONTROL_TOGGLE, "Name labels", app.config_.nameLabels);
     add_bound_control(right, UI_CONTROL_TOGGLE, "Player list overlay", app.config_.playerList);
-    svc_ui->pane_add_section(mod_ctx, right, "Session actions");
+    svc_ui->pane_add_rml(mod_ctx, right,
+                         "<div class=\"section-heading\">Session actions</div>",
+                         &app.sessionActionsHeading_);
+    app.sessionActionsVisible_ = app.transport_.status().enabled;
+    if (app.sessionActionsHeading_ != 0) {
+        svc_ui->elem_set_class(mod_ctx, app.sessionActionsHeading_,
+                               "online-session-actions-hidden",
+                               !app.sessionActionsVisible_);
+    }
     add_button(right, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
                &OnlineApp::host_inactive, nullptr, "online-danger-action");
     add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
@@ -1034,9 +1070,14 @@ ModResult OnlineApp::build_direct_tab(ModContext*, UiWindowHandle, UiElementHand
     auto& app = *static_cast<OnlineApp*>(data);
     // Activating any tab destroys the previous tab's elements.
     app.windowStatus_ = 0;
+    app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
     svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
     svc_ui->pane_add_section(mod_ctx, left, "Host direct");
+    add_button(left, "Host direct lobby", &OnlineApp::host_direct_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+               &OnlineApp::direct_host_inactive, nullptr, "online-danger-action");
     add_form_string(left, "Player name", app.config_.playerName, 32);
     add_form_string(left, "Lobby name", app.config_.directRoom, 64, "online-half-field");
     add_bound_control(left, UI_CONTROL_NUMBER, "Port", app.config_.port, 1, 65535, 1,
@@ -1047,21 +1088,16 @@ ModResult OnlineApp::build_direct_tab(ModContext*, UiWindowHandle, UiElementHand
                      &OnlineApp::direct_code_set, &app);
     add_button(left, "Copy", &OnlineApp::copy_direct_code_pressed, &app,
                nullptr, nullptr, "online-copy-action");
-    add_button(left, "Host direct lobby", &OnlineApp::host_direct_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
-               &OnlineApp::direct_host_inactive, nullptr, "online-danger-action");
-
     svc_ui->pane_add_section(mod_ctx, right, "Join direct");
+    add_button(right, "Join direct lobby", &OnlineApp::join_direct_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+               &OnlineApp::direct_join_inactive, nullptr, "online-danger-action");
     add_form_string(right, "Player name", app.config_.playerName, 32);
     add_code_control(right, "Invite code", &OnlineApp::direct_code_get,
                      &OnlineApp::direct_code_set, &app);
     add_button(right, "Paste", &OnlineApp::paste_direct_code_pressed, &app,
                nullptr, nullptr, "online-copy-action");
-    add_button(right, "Join direct lobby", &OnlineApp::join_direct_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
-               &OnlineApp::direct_join_inactive, nullptr, "online-danger-action");
     return MOD_OK;
 }
 
@@ -1070,9 +1106,14 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     auto& app = *static_cast<OnlineApp*>(data);
     // Activating any tab destroys the previous tab's elements.
     app.windowStatus_ = 0;
+    app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
     svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
     svc_ui->pane_add_section(mod_ctx, left, "Host relay");
+    add_button(left, "Host relay lobby", &OnlineApp::host_relay_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+               &OnlineApp::relay_host_inactive, nullptr, "online-danger-action");
     add_form_string(left, "Player name", app.config_.playerName, 32);
     add_code_control(left, "Relay code", &OnlineApp::relay_code_get,
                      &OnlineApp::relay_code_set, &app);
@@ -1083,12 +1124,11 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     add_bound_control(left, UI_CONTROL_TOGGLE,
                       "Use relay on this PC", app.config_.relayLocal,
                       0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
-    add_button(left, "Host relay lobby", &OnlineApp::host_relay_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
-               &OnlineApp::relay_host_inactive, nullptr, "online-danger-action");
-
     svc_ui->pane_add_section(mod_ctx, right, "Join relay");
+    add_button(right, "Join relay lobby", &OnlineApp::join_relay_pressed, &app,
+               &OnlineApp::session_active, nullptr, "online-primary-action");
+    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+               &OnlineApp::relay_join_inactive, nullptr, "online-danger-action");
     add_form_string(right, "Player name", app.config_.playerName, 32);
     add_code_control(right, "Relay code", &OnlineApp::relay_code_get,
                      &OnlineApp::relay_code_set, &app);
@@ -1099,10 +1139,6 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     add_bound_control(right, UI_CONTROL_TOGGLE,
                       "Use relay on this PC", app.config_.relayLocal,
                       0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
-    add_button(right, "Join relay lobby", &OnlineApp::join_relay_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
-               &OnlineApp::relay_join_inactive, nullptr, "online-danger-action");
     return MOD_OK;
 }
 
@@ -1118,6 +1154,17 @@ ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
         }
         app.windowRenderedStatus_ = status;
     }
+    if (app.sessionActionsHeading_ != 0) {
+        const bool visible = app.transport_.status().enabled;
+        if (visible != app.sessionActionsVisible_) {
+            if (svc_ui->elem_set_class(mod_ctx, app.sessionActionsHeading_,
+                                       "online-session-actions-hidden", !visible) != MOD_OK) {
+                app.sessionActionsHeading_ = 0;
+            } else {
+                app.sessionActionsVisible_ = visible;
+            }
+        }
+    }
     return MOD_OK;
 }
 
@@ -1125,6 +1172,7 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.window_ = 0;
     app.windowStatus_ = 0;
+    app.sessionActionsHeading_ = 0;
 }
 
 void OnlineApp::open_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }

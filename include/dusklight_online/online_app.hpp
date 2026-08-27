@@ -60,11 +60,13 @@ private:
     UiMenuTabHandle menuTab_ = 0;
     UiElementHandle panelStatus_ = 0;
     UiElementHandle windowStatus_ = 0;
+    UiElementHandle sessionActionsHeading_ = 0;
     std::string panelRenderedStatus_;
     std::string windowRenderedStatus_;
     std::string directCodeDisplay_;
     std::string relayCodeDisplay_;
     bool reopenWindowPending_ = false;
+    bool sessionActionsVisible_ = false;
     std::string statusMessage_ = "Not connected";
     std::string requestedDisconnectStatus_;
     std::string activeCode_;
