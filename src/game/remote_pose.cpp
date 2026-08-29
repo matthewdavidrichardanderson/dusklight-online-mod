@@ -726,6 +726,8 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         parse_i16_array(state, "arm_ik_angles", pose.armIkAngles);
         parse_i16_array(state, "arm_rot_a", pose.armRotA);
         parse_i16_array(state, "arm_rot_b", pose.armRotB);
+        parse_i16_array(state, "fishing_arm_1", pose.fishingArm1Angle);
+        parse_i16_array(state, "fishing_arm_2", pose.fishingArm2Angle);
         pose.isWolf = state.value("is_wolf", false);
         pose.isTransforming = state.value("is_transforming", false);
         pose.transformFromWolf = state.value("transform_from_wolf", pose.isWolf);

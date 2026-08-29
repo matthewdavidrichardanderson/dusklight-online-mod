@@ -198,6 +198,8 @@ struct PeerPoseSnapshot {
     std::array<int16_t, 6> armIkAngles{};
     std::array<int16_t, 6> armRotA{};
     std::array<int16_t, 6> armRotB{};
+    std::array<int16_t, 3> fishingArm1Angle{};
+    std::array<int16_t, 3> fishingArm2Angle{};
     bool isWolf = false;
     bool isTransforming = false;
     bool transformFromWolf = false;

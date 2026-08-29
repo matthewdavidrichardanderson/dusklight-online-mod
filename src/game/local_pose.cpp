@@ -204,6 +204,10 @@ json csxyz_pair_array(const csXyz* values) {
     return out;
 }
 
+json csxyz_array(const csXyz& value) {
+    return json::array({int(value.x), int(value.y), int(value.z)});
+}
+
 bool matrices_nearly_equal(MtxP lhs, MtxP rhs) {
     if (lhs == nullptr || rhs == nullptr) return false;
     for (int row = 0; row < 3; ++row) {
@@ -430,6 +434,11 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"arm_ik_angles", link_ik_array(link->mFootData2)},
         {"arm_rot_a", csxyz_pair_array(link->field_0x312a)},
         {"arm_rot_b", csxyz_pair_array(link->field_0x3136)},
+        // The fishing-rod actor writes these procedural rotations after the
+        // BCK pose is selected. Matrix streaming carried them implicitly;
+        // semantic animation needs the two joint corrections explicitly.
+        {"fishing_arm_1", csxyz_array(link->mFishingArm1Angle)},
+        {"fishing_arm_2", csxyz_array(link->field_0x3160)},
         {"is_wolf", wolf}, {"is_transforming", transforming},
         {"transform_from_wolf", transformFromWolf},
         {"transform_to_wolf", transformToWolf},

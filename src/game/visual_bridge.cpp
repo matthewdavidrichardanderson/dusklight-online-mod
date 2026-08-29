@@ -116,6 +116,32 @@ PlayerColor color_for_peer(const std::string& peerId) {
     return color_for_slot(it == sColorSlots.end() ? 7 : it->second);
 }
 
+bool host_projection_is_mirrored() {
+    camera_process_class* camera = dComIfGp_getCamera(0);
+    if (camera == nullptr) return false;
+
+    Mtx invView;
+    if (!MTXInverse(j3dSys.getViewMtx(), invView)) return false;
+
+    // mDoLib_project is part of the long-standing game ABI and already applies
+    // Dusk's mirror-mode setting. Compare the camera center with a point along
+    // camera-right: mirror mode reverses their projected X ordering. This keeps
+    // the mod independent of Dusk's private settings layout and adds no host
+    // entry point requirement.
+    cXyz center = camera->view.lookat.center;
+    cXyz cameraRight(invView[0][0], invView[1][0], invView[2][0]);
+    cXyz rightPoint = center + cameraRight * 100.0f;
+    cXyz centerScreen;
+    cXyz rightScreen;
+    mDoLib_project(&center, &centerScreen);
+    mDoLib_project(&rightPoint, &rightScreen);
+    if (!std::isfinite(centerScreen.x) || !std::isfinite(rightScreen.x) ||
+        std::fabs(rightScreen.x - centerScreen.x) < 0.01f) {
+        return false;
+    }
+    return rightScreen.x < centerScreen.x;
+}
+
 std::vector<MinimapMarker> collect_minimap_markers() {
     std::vector<MinimapMarker> markers;
     const char* localStage = dComIfGp_getStartStageName();
@@ -149,7 +175,7 @@ bool map_world_to_screen(dMap_c* map, const Vec& mapPos, f32 drawX, f32 drawY, f
     const f32 texelPerCm = map->getTexelPerCm();
     const f32 mapDeltaX = (mapPos.x - map->mCenterX) * texelPerCm;
     const f32 texX = f32(map->mTexSizeX) * 0.5f +
-                     (dComIfGp_isMirrorMode() ? -mapDeltaX : mapDeltaX);
+                     (host_projection_is_mirrored() ? -mapDeltaX : mapDeltaX);
     const f32 texY = f32(map->getTexSizeY()) * 0.5f +
                      (mapPos.z - map->getCenterZ()) * texelPerCm;
     if (texX < 0.0f || texY < 0.0f || texX > map->mTexSizeX || texY > map->getTexSizeY()) {
@@ -229,7 +255,7 @@ void draw_minimap_markers(dMeterMap_c* meter) {
         }
         draw_minimap_arrow(x, y, angle, marker.color, meter->mMapAlpha,
                            map->getPlayerCursorSize(),
-                           dComIfGp_isMirrorMode() ? -scaleX : scaleX, scaleY);
+                           host_projection_is_mirrored() ? -scaleX : scaleX, scaleY);
     }
 }
 
@@ -595,7 +621,7 @@ void draw_world_text(NameLabelFontAtlas& atlas, const cXyz& worldPos,
     Mtx invView;
     if (visibleGlyphs == 0 || !MTXInverse(j3dSys.getViewMtx(), invView)) return;
     cXyz right(invView[0][0], invView[1][0], invView[2][0]);
-    if (dComIfGp_isMirrorMode()) right *= -1.0f;
+    if (host_projection_is_mirrored()) right *= -1.0f;
     const cXyz up(invView[0][1], invView[1][1], invView[2][1]);
     constexpr f32 kScale = 0.34f;
     constexpr f32 kOutlineOffset = 2.35f;

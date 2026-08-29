@@ -746,6 +746,8 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteArmIkAngles(),
       mRemoteArmRotA(),
       mRemoteArmRotB(),
+      mRemoteFishingArm1Angle(),
+      mRemoteFishingArm2Angle(),
       mRemoteAnimationFrameCorrectionPending(false),
       mRemoteHatRotA(),
       mRemoteHatRotB(),
@@ -2293,6 +2295,22 @@ int daRemoteLink_c::bodyModelCallBack(int i_jointNo) {
         setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(16), 0,
                                     -mRemoteLowerJointZ, mRemoteLowerJointX);
         mDoMtx_copy(mpBodyModel->getAnmMtx(16), J3DSys::mCurrentMtx);
+    } else if (i_jointNo == 12 || i_jointNo == 13) {
+        // Fishing is not a separate motion archive. The fishing-rod actor
+        // procedurally rotates Link's right upper/lower arm after sampling the
+        // BCK. Reapply the same local Y/X/Z concatenation used by
+        // daAlink_c::jointControll so moving the rod changes the remote pose.
+        const std::array<int16_t, 3>& angle =
+            i_jointNo == 12 ? mRemoteFishingArm1Angle : mRemoteFishingArm2Angle;
+        if (angle[0] != 0 || angle[1] != 0 || angle[2] != 0) {
+            MtxP jointMtx = mpBodyModel->getAnmMtx(i_jointNo);
+            mDoMtx_stack_c::copy(jointMtx);
+            mDoMtx_stack_c::YrotM(angle[1]);
+            mDoMtx_stack_c::XrotM(angle[0]);
+            mDoMtx_stack_c::ZrotM(angle[2]);
+            mDoMtx_copy(mDoMtx_stack_c::get(), jointMtx);
+            mDoMtx_copy(jointMtx, J3DSys::mCurrentMtx);
+        }
     } else if (i_jointNo == 26) {
         applyRemoteFootMatrix();
         applyRemoteArmMatrix();
@@ -4576,7 +4594,9 @@ void daRemoteLink_c::setRemoteBodyState(
     const std::array<int16_t, 6>& i_legIkAngles,
     const std::array<int16_t, 6>& i_armIkAngles,
     const std::array<int16_t, 6>& i_armRotA,
-    const std::array<int16_t, 6>& i_armRotB) {
+    const std::array<int16_t, 6>& i_armRotB,
+    const std::array<int16_t, 3>& i_fishingArm1Angle,
+    const std::array<int16_t, 3>& i_fishingArm2Angle) {
     mRemoteShapeX = i_shapeX;
     mRemoteShapeZ = i_shapeZ;
     mRemoteBodyAngleX = i_bodyX;
@@ -4605,6 +4625,8 @@ void daRemoteLink_c::setRemoteBodyState(
     mRemoteArmIkAngles = i_armIkAngles;
     mRemoteArmRotA = i_armRotA;
     mRemoteArmRotB = i_armRotB;
+    mRemoteFishingArm1Angle = i_fishingArm1Angle;
+    mRemoteFishingArm2Angle = i_fishingArm2Angle;
 }
 
 void daRemoteLink_c::drawModel(J3DModel* i_model) {

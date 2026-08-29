@@ -66,16 +66,29 @@ int main() {
         return 1;
     }
 
+    // Fishing rod movement is a pair of procedural arm rotations rather than
+    // a BCK slot. Preserve it independently of the (optional) rod model.
+    json fishing = pose_message(2, "semantic_gameplay");
+    fishing["state"]["fishing_arm_1"] = json::array({100, -200, 300});
+    fishing["state"]["fishing_arm_2"] = json::array({-400, 500, -600});
+    PeerPoseSnapshot fishingPose;
+    if (!decode_and_enforce(fishing, &pose, fishingPose, error) ||
+        fishingPose.fishingArm1Angle != std::array<int16_t, 3>{100, -200, 300} ||
+        fishingPose.fishingArm2Angle != std::array<int16_t, 3>{-400, 500, -600}) {
+        std::cerr << "fishing arm state was not decoded: " << error << '\n';
+        return 1;
+    }
+
     // Even malformed/malicious type-7 input cannot restore body matrix
     // streaming. Legitimate attachment slots survive the representation gate.
-    json injected = pose_message(2, "semantic_gameplay");
+    json injected = pose_message(3, "semantic_gameplay");
     injected["state"]["link_matrices"] = {
         {"body", identity_model()},
         {"sword", identity_model()},
         {"midna", identity_model()},
     };
     PeerPoseSnapshot injectedPose;
-    if (!decode_and_enforce(injected, &pose, injectedPose, error) ||
+    if (!decode_and_enforce(injected, &fishingPose, injectedPose, error) ||
         injectedPose.linkMatrices.body.valid ||
         !injectedPose.linkMatrices.sword.valid ||
         injectedPose.linkMatrices.midna.valid) {
@@ -85,7 +98,7 @@ int main() {
 
     // Hidden means no presentation payload at all, including cached matrices
     // hydrated from an earlier pose.
-    json hidden = pose_message(3, "hidden_unsupported");
+    json hidden = pose_message(4, "hidden_unsupported");
     hidden["state"]["visual_unsupported_reasons"] = 1;
     PeerPoseSnapshot hiddenPose;
     if (!decode_and_enforce(hidden, &injectedPose, hiddenPose, error) ||
@@ -95,7 +108,7 @@ int main() {
     }
 
     // Type-7 packets must identify their representation explicitly.
-    json unknown = pose_message(4, "");
+    json unknown = pose_message(5, "");
     PeerPoseSnapshot unknownPose;
     if (decode_and_enforce(unknown, &hiddenPose, unknownPose, error) || error.empty()) {
         std::cerr << "semantic pose without visual mode was accepted\n";
@@ -104,7 +117,7 @@ int main() {
 
     // Existing global sequence ordering remains authoritative across visual
     // representation transitions.
-    json stale = pose_message(3, "semantic_gameplay");
+    json stale = pose_message(4, "semantic_gameplay");
     PeerPoseSnapshot stalePose;
     if (dusklight_online::game::decode_peer_pose(stale, "peer", &hiddenPose,
                                                   stalePose, error) ||

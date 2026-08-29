@@ -74,7 +74,9 @@ public:
                             const std::array<int16_t, 6>& i_legIkAngles,
                             const std::array<int16_t, 6>& i_armIkAngles,
                             const std::array<int16_t, 6>& i_armRotA,
-                            const std::array<int16_t, 6>& i_armRotB);
+                            const std::array<int16_t, 6>& i_armRotB,
+                            const std::array<int16_t, 3>& i_fishingArm1Angle,
+                            const std::array<int16_t, 3>& i_fishingArm2Angle);
     void applyRemoteBodyMatrixInterpolationForPresentation();
     bool getNameLabelPosition(cXyz* o_pos) const;
     void playRemoteSound(const dusk::multiplayer::RemoteAudioEvent& i_event);
@@ -355,6 +357,8 @@ private:
     std::array<int16_t, 6> mRemoteArmIkAngles;
     std::array<int16_t, 6> mRemoteArmRotA;
     std::array<int16_t, 6> mRemoteArmRotB;
+    std::array<int16_t, 3> mRemoteFishingArm1Angle;
+    std::array<int16_t, 3> mRemoteFishingArm2Angle;
     bool mRemoteAnimationFrameCorrectionPending;
     std::array<int16_t, 10> mRemoteHatRotA;
     std::array<int16_t, 10> mRemoteHatRotB;

@@ -841,7 +841,8 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             static_cast<s16>(pose.lowerJointZ), static_cast<s16>(pose.rootJointX),
             static_cast<s16>(pose.rootJointZ), static_cast<u8>(pose.blendMode),
             pose.upperSavedRatio, pose.bodyRootValid, presentedBodyRoot, pose.legIkAngles,
-            pose.armIkAngles, pose.armRotA, pose.armRotB);
+            pose.armIkAngles, pose.armRotA, pose.armRotB, pose.fishingArm1Angle,
+            pose.fishingArm2Angle);
         actor->setRemoteHatState(*presentedHatRotA, *presentedHatRotB, *presentedHatSwing,
                                  presentedHatShapeY);
         if (presentationMode == ReceiverPresentationMode::SemanticGameplay) {
