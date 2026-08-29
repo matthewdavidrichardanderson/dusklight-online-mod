@@ -103,13 +103,13 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "DF614CB5577963BF66B13E0C724D26CD978362D4328AFB23BBFF6EF6B89AA759")
+    "D45F2AB17BBFEBAF04D0C80CBD9D94B06EF4A766ADBD1595F50BE22F2782C7FB")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
     "73ECAE48402D68F8F2B8938CECFE9F14D785952616EAC6A065E27AD4EA45C321")
 dusklight_remote_link_require_sha256(
     "src/dusk/multiplayer/remote_link_dummy.cpp"
-    "AB7C32414B9FC0F66ED341357568EDDBDB00D6703F5A6916FA5E77BF1D0FBB6C")
+    "9C829A33C073C6BF788E4CEC1873C0653764AF5D1CE0682F0550D7AA66993197")
 dusklight_remote_link_require_sha256(
     "include/dusk/multiplayer/remote_link_dummy.hpp"
     "0B5041A924C629747CDE888F126850B83A30C496AD1DFD633C22B0032E6BE28E")

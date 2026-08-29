@@ -468,7 +468,9 @@ void apply_remote_body_push(const PeerPoseSnapshot& pose, fopAc_ac_c* playerActo
 }
 
 void update_actor_dummy_collision(const std::string& peerId, const PeerPoseSnapshot& pose) {
-    if (!remote_collision_enabled()) {
+    const bool remoteDead = pose.procId == daAlink_c::PROC_DEAD ||
+                            pose.procId == daAlink_c::PROC_FOG_DEAD;
+    if (!remote_collision_enabled() || remoteDead) {
         sBodyCollision.erase(peerId);
         return;
     }

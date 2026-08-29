@@ -219,7 +219,7 @@ static bool isRemotePvpKnockdownProc(int i_procId) {
 }
 
 static bool isRemoteDeadProc(int i_procId) {
-    return i_procId == daAlink_c::PROC_DEAD;
+    return i_procId == daAlink_c::PROC_DEAD || i_procId == daAlink_c::PROC_FOG_DEAD;
 }
 
 static bool isRemoteLinkSceneUnsafe() {
