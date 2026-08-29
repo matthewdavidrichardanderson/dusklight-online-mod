@@ -533,7 +533,7 @@ void OnlineApp::update() {
         const bool semanticRenderingEnabled = currentStatus.enabled ?
             currentStatus.settings.performanceMode &&
                 currentStatus.semanticVisualsReady :
-            bool_value(config_.semanticRenderingExperiment, false);
+            bool_value(config_.semanticRenderingExperiment, true);
         game_->update(syncFlagsEnabled, syncWorldEnabled, remoteModelEnabled,
                       bool_value(config_.nameLabels, true), false,
                       semanticRenderingEnabled,
@@ -596,7 +596,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"sync-flags", true, &config_.syncFlags},
         BoolVar{"sync-world", false, &config_.syncWorld},
         BoolVar{"display-midna", false, &config_.displayMidna},
-        BoolVar{"semantic-rendering-experiment", false,
+        BoolVar{"semantic-rendering-experiment", true,
                 &config_.semanticRenderingExperiment},
         BoolVar{"remote-collision", true, &config_.remoteCollision},
         BoolVar{"pvp", false, &config_.pvp},
@@ -658,7 +658,7 @@ net::RoomSettings OnlineApp::configured_settings() const {
     settings.dummyModel = bool_value(config_.dummyModel, true);
     settings.syncFlags = bool_value(config_.syncFlags, true);
     settings.syncWorld = bool_value(config_.syncWorld, false);
-    settings.performanceMode = bool_value(config_.semanticRenderingExperiment, false);
+    settings.performanceMode = bool_value(config_.semanticRenderingExperiment, true);
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
     settings.pvp = bool_value(config_.pvp, false) && settings.remoteCollision;
     return settings;
