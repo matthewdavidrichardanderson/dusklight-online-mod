@@ -103,16 +103,16 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "8CEE4667C4D77F1E92C9791DA8DCC0E7A3BC0E8BDB043693AA6CEE76697F306A")
+    "DF614CB5577963BF66B13E0C724D26CD978362D4328AFB23BBFF6EF6B89AA759")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
-    "E15643ACF03D0A6578A0703184C7FA0C5D9C5AAB7A86F9065BEBEE647BA78506")
+    "73ECAE48402D68F8F2B8938CECFE9F14D785952616EAC6A065E27AD4EA45C321")
 dusklight_remote_link_require_sha256(
     "src/dusk/multiplayer/remote_link_dummy.cpp"
-    "F4C6F011D655509812B05EEE5AA2E2DB9E00276E7F740F36E31DEF30C9D69742")
+    "AB7C32414B9FC0F66ED341357568EDDBDB00D6703F5A6916FA5E77BF1D0FBB6C")
 dusklight_remote_link_require_sha256(
     "include/dusk/multiplayer/remote_link_dummy.hpp"
-    "6A21876BAC92EF0C0386AE34389A7E7D0D6A7AD69BBD00661E7CF0148247C6A4")
+    "0B5041A924C629747CDE888F126850B83A30C496AD1DFD633C22B0032E6BE28E")
 dusklight_remote_link_require_sha256(
     "res/AlegreyaSC-Bold.ttf"
     "F0EDAF1F289B7EB1B94BA9290146D57E5B413364BCF723CD0196779FAA557AFA")
@@ -292,6 +292,15 @@ if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQ
 
     if (WIN32)
         target_link_libraries(dusklight_online_relay PRIVATE ws2_32)
+        if (MSVC)
+            # The relay is distributed as a single operator executable. Avoid
+            # requiring a matching VC redistributable and do not expose the
+            # build machine's absolute PDB path in the PE debug directory.
+            set_property(TARGET dusklight_online_relay PROPERTY
+                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+            target_link_options(dusklight_online_relay PRIVATE
+                "/PDBALTPATH:dusklight_online_relay.pdb")
+        endif ()
         add_executable(dusklight_online_relay_launcher WIN32
             tools/multiplayer_relay/launcher.cpp
             ${ONLINE_INVITE_SOURCES}
@@ -302,6 +311,12 @@ if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQ
             nlohmann_json::nlohmann_json
             ws2_32
         )
+        if (MSVC)
+            set_property(TARGET dusklight_online_relay_launcher PROPERTY
+                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+            target_link_options(dusklight_online_relay_launcher PRIVATE
+                "/PDBALTPATH:dusklight_online_relay_launcher.pdb")
+        endif ()
     endif ()
 endif ()
 
@@ -363,6 +378,17 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_randomizer_item_names_test PRIVATE include)
     add_test(NAME dusklight_online_randomizer_item_names
              COMMAND dusklight_online_randomizer_item_names_test)
+
+    add_executable(dusklight_online_remote_pose_test
+        tests/remote_pose_test.cpp
+        src/game/remote_pose.cpp
+    )
+    target_compile_features(dusklight_online_remote_pose_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_remote_pose_test PRIVATE include src)
+    target_link_libraries(dusklight_online_remote_pose_test PRIVATE
+        nlohmann_json::nlohmann_json
+    )
+    add_test(NAME dusklight_online_remote_pose COMMAND dusklight_online_remote_pose_test)
 
     add_executable(dusklight_online_relay_transport_client_test
         tests/relay_transport_client_test.cpp

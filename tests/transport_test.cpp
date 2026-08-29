@@ -130,6 +130,7 @@ int main() {
     hostConfig.publicHost = "127.0.0.1";
     hostConfig.port = port;
     hostConfig.settings.syncWorld = true;
+    hostConfig.settings.performanceMode = true;
     hostConfig.settings.pvp = true;
 
     std::string error;
@@ -148,6 +149,9 @@ int main() {
 
     DirectJoinConfig bobConfig = aliceConfig;
     bobConfig.name = "Bob";
+    // A missing capability is the legacy-client case. The host preference may
+    // remain enabled, but semantic visuals must not become effective room-wide.
+    bobConfig.supportsSemanticVisuals = false;
     if (!bob.start_direct_join(bobConfig, &error)) {
         fail("Bob start: " + error);
     }
@@ -156,8 +160,13 @@ int main() {
     if (!alice.status().welcomed || !bob.status().welcomed || host.peers().size() != 2) {
         fail("three-way direct handshake did not complete");
     }
-    if (!alice.status().settings.syncWorld || !alice.status().settings.pvp) {
+    if (!alice.status().settings.syncWorld ||
+        !alice.status().settings.performanceMode || !alice.status().settings.pvp) {
         fail("host room settings were not applied by joiner");
+    }
+    if (host.status().semanticVisualsReady || alice.status().semanticVisualsReady ||
+        bob.status().semanticVisualsReady) {
+        fail("legacy direct peer did not disable semantic visual negotiation");
     }
 
     while (host.has_events()) host.pop_event();
@@ -186,6 +195,27 @@ int main() {
         udpPose.value("client_id", "") != alice.status().clientId ||
         udpPose.value("state", nlohmann::json::object()).value("x", 0.0f) != 9.5f) {
         fail("direct UDP pose was not routed through the host");
+    }
+
+    if (!host.send_visual({{"type", "pose"}, {"sequence", 3},
+                           {"state", {{"stage", "F_SP103"},
+                                      {"matrix_scope", "attachments"}}}},
+                          dusklight_online::net::udp::PacketType::SemanticPoseMsgpack)) {
+        fail("host semantic UDP pose send failed");
+    }
+    const auto semanticStats = host.last_visual_send_stats();
+    if (semanticStats.sequence != 3 ||
+        semanticStats.type != dusklight_online::net::udp::PacketType::SemanticPoseMsgpack ||
+        semanticStats.recipients != 1 || semanticStats.datagrams == 0 ||
+        semanticStats.wireBytes == 0) {
+        fail("semantic UDP wire statistics did not describe the capable recipient send");
+    }
+    pump(host, alice, bob, 60);
+    if (!drain_udp_for_sequence(alice, 3)) {
+        fail("semantic UDP pose did not reach capable direct peer");
+    }
+    if (drain_udp_for_sequence(bob, 3)) {
+        fail("semantic UDP pose reached legacy direct peer");
     }
 
     dusklight_online::net::udp::RemoteObjectPacket object;
@@ -230,26 +260,31 @@ int main() {
     }
 
     dusklight_online::net::RoomSettings changed = host.status().settings;
+    changed.performanceMode = false;
     changed.remoteCollision = false;
     changed.pvp = true;
     if (!host.publish_room_settings(changed)) {
         fail("host room settings publish failed");
     }
     pump(host, alice, bob, 30);
-    if (alice.status().settings.remoteCollision || alice.status().settings.pvp) {
+    if (alice.status().settings.performanceMode ||
+        alice.status().settings.remoteCollision || alice.status().settings.pvp) {
         fail("joiner did not apply direct settings messages");
     }
     if (host.status().settings.pvp || bob.status().settings.pvp) {
         fail("PvP was not forced off with remote collision");
     }
 
-    alice.disconnect();
+    bob.disconnect();
     pump(host, alice, bob, 30);
-    if (!drain_for_type(bob, "peer_left")) {
+    if (!drain_for_type(alice, "peer_left")) {
         fail("peer disconnect was not broadcast");
     }
+    if (!host.status().semanticVisualsReady || !alice.status().semanticVisualsReady) {
+        fail("semantic visual negotiation did not recover after legacy peer left");
+    }
 
-    bob.disconnect();
+    alice.disconnect();
     host.disconnect();
     std::cout << "transport test passed\n";
     return 0;

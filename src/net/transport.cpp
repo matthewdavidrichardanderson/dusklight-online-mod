@@ -164,6 +164,7 @@ json settings_json(const RoomSettings& settings) {
         {"dummy_model", settings.dummyModel},
         {"sync_flags", settings.syncFlags},
         {"sync_world", settings.syncWorld},
+        {"performance_mode", settings.performanceMode},
         {"remote_collision", settings.remoteCollision},
         {"pvp", effective_pvp(settings)},
     };
@@ -176,9 +177,20 @@ RoomSettings parse_settings(const json& value, RoomSettings fallback) {
     fallback.dummyModel = value.value("dummy_model", fallback.dummyModel);
     fallback.syncFlags = value.value("sync_flags", fallback.syncFlags);
     fallback.syncWorld = value.value("sync_world", fallback.syncWorld);
+    fallback.performanceMode = value.value("performance_mode", fallback.performanceMode);
     fallback.remoteCollision = value.value("remote_collision", fallback.remoteCollision);
     fallback.pvp = value.value("pvp", fallback.pvp) && fallback.remoteCollision;
     return fallback;
+}
+
+constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
+
+bool has_semantic_visual_capability(const json& message) {
+    const auto capabilities = message.find("capabilities");
+    if (capabilities == message.end() || !capabilities->is_object()) return false;
+    const auto capability = capabilities->find(kSemanticVisualCapability);
+    return capability != capabilities->end() && capability->is_boolean() &&
+           capability->get<bool>();
 }
 
 bool should_forward_direct(const std::string& type) {
@@ -199,6 +211,7 @@ struct Transport::Impl {
         bool udpAddressKnown = false;
         bool wantPuppet = true;
         bool wantMidna = false;
+        bool supportsSemanticVisuals = false;
     };
 
     struct PeerPresence {
@@ -213,6 +226,7 @@ struct Transport::Impl {
     };
 
     Status status;
+    VisualSendStats lastVisualSend;
     socket_t socket = kInvalidSocket;
     socket_t listenSocket = kInvalidSocket;
     socket_t udpSocket = kInvalidSocket;
@@ -234,6 +248,7 @@ struct Transport::Impl {
     bool handshakeRejected = false;
     bool wantPuppet = true;
     bool wantMidna = false;
+    bool supportsSemanticVisuals = true;
     std::string password;
     std::string sessionId;
     std::string sessionKey;
@@ -264,7 +279,7 @@ struct Transport::Impl {
     bool push_event(Event event) {
         event.ingress = {
             connectionEpoch, status.mode, status.welcomed,
-            status.settings, status.clientId,
+            status.semanticVisualsReady, status.settings, status.clientId,
         };
         if (event.kind == EventKind::UdpMessage) {
             for (auto it = events.rbegin(); it != events.rend(); ++it) {
@@ -327,6 +342,7 @@ struct Transport::Impl {
 
     static bool is_paced_visual_type(udp::PacketType type) {
         return type == udp::PacketType::PoseMsgpack ||
+               type == udp::PacketType::SemanticPoseMsgpack ||
                type == udp::PacketType::MidnaMsgpack;
     }
 
@@ -538,6 +554,7 @@ struct Transport::Impl {
         status.udpReady = false;
         status.welcomed = false;
         status.isOwner = false;
+        status.semanticVisualsReady = false;
         status.state = State::Disconnected;
         nextDirectPeerId = 1;
         reconnectTicks = 0;
@@ -626,9 +643,16 @@ struct Transport::Impl {
         peerNames.erase(peerId);
         peerStages.erase(peerId);
         peerPoseStages.erase(peerId);
+        status.welcomed = std::any_of(directPeers.begin(), directPeers.end(),
+                                     [](const auto& item) { return item.second.welcomed; });
+        status.semanticVisualsReady = status.welcomed && direct_semantic_visuals_ready();
+        const json left = {
+            {"type", "peer_left"},
+            {"client_id", peerId},
+            {"semantic_visuals_ready", status.semanticVisualsReady},
+        };
         emit(EventKind::PeerLeft, peerId, reason,
-             {{"type", "peer_left"}, {"client_id", peerId}});
-        const json left = {{"type", "peer_left"}, {"client_id", peerId}};
+             left);
         std::vector<std::string> failed;
         for (auto& [id, peer] : directPeers) {
             if (peer.welcomed && !queue_peer(peer, left)) {
@@ -640,8 +664,6 @@ struct Transport::Impl {
             // reached while that map is being iterated.
             close_socket(directPeers.at(id).socket);
         }
-        status.welcomed = std::any_of(directPeers.begin(), directPeers.end(),
-                                     [](const auto& item) { return item.second.welcomed; });
     }
 
     bool broadcast(const json& message, const std::string& excluded = {}) {
@@ -675,10 +697,22 @@ struct Transport::Impl {
         return peers;
     }
 
+    bool direct_semantic_visuals_ready(const Peer* pendingPeer = nullptr) const {
+        if (!supportsSemanticVisuals) return false;
+        for (const auto& [id, peer] : directPeers) {
+            (void)id;
+            if ((peer.welcomed || &peer == pendingPeer) && !peer.supportsSemanticVisuals) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void welcome_direct_peer(Peer& peer) {
         if (peer.welcomed) {
             return;
         }
+        const bool semanticVisualsReady = direct_semantic_visuals_ready(&peer);
         const json welcome = {
             {"type", "welcome"},
             {"protocol_version", 1},
@@ -688,14 +722,17 @@ struct Transport::Impl {
             {"dummy_model", status.settings.dummyModel},
             {"sync_flags", status.settings.syncFlags},
             {"sync_world", status.settings.syncWorld},
+            {"performance_mode", status.settings.performanceMode},
             {"remote_collision", status.settings.remoteCollision},
             {"pvp", status.settings.pvp && status.settings.remoteCollision},
+            {"semantic_visuals_ready", semanticVisualsReady},
             {"want_puppet", status.settings.dummyModel},
             {"want_midna", wantMidna},
             {"peers", direct_peer_list(peer.id)},
         };
         peer.welcomed = queue_peer(peer, welcome);
         status.welcomed = status.welcomed || peer.welcomed;
+        status.semanticVisualsReady = status.welcomed && direct_semantic_visuals_ready();
     }
 
     void send_hello() {
@@ -711,6 +748,7 @@ struct Transport::Impl {
             {"name", status.name},
             {"want_puppet", wantPuppet},
             {"want_midna", wantMidna},
+            {"capabilities", {{kSemanticVisualCapability, supportsSemanticVisuals}}},
         };
         if (status.mode == Mode::Relay) {
             hello["action"] = relayCreateRoom ? "create" : "join";
@@ -894,6 +932,8 @@ struct Transport::Impl {
         for (auto& [id, peer] : directPeers) {
             if (id == excluded || !peer.welcomed || !peer.udpAddressKnown ||
                 !peer.wantPuppet || (type == udp::PacketType::MidnaMsgpack && !peer.wantMidna) ||
+                (type == udp::PacketType::SemanticPoseMsgpack &&
+                 !peer.supportsSemanticVisuals) ||
                 !stages_match(message, id, senderId)) {
                 continue;
             }
@@ -914,6 +954,13 @@ struct Transport::Impl {
             }
             const bool peerOk = enqueue_udp_tx_datagrams(
                 peer.udpAddress, datagrams, senderId, id, type);
+            if (peerOk) {
+                ++lastVisualSend.recipients;
+                lastVisualSend.datagrams += static_cast<uint32_t>(datagrams.size());
+                for (const auto& datagram : datagrams) {
+                    lastVisualSend.wireBytes += datagram.bytes.size();
+                }
+            }
             sentAny = peerOk || sentAny;
         }
         return sentAny || directPeers.empty();
@@ -1006,6 +1053,7 @@ struct Transport::Impl {
             }
             udpDecoder.commit_message(decoded.messageToken);
             if (decoded.type == udp::PacketType::PoseMsgpack ||
+                decoded.type == udp::PacketType::SemanticPoseMsgpack ||
                 decoded.type == udp::PacketType::MidnaMsgpack) {
                 send_udp_datagram(from, udp::encode_ack(local_udp_sender_id(), decoded.senderId,
                                                         decoded.type, decoded.sequence,
@@ -1163,10 +1211,12 @@ struct Transport::Impl {
             sender.name = input.value("name", sender.name);
             sender.wantPuppet = input.value("want_puppet", sender.wantPuppet);
             sender.wantMidna = false;
+            sender.supportsSemanticVisuals = has_semantic_visual_capability(input);
             peerNames[sender.id] = sender.name;
             welcome_direct_peer(sender);
             const json joined = {
-                {"type", "peer_joined"}, {"client_id", sender.id}, {"name", sender.name}};
+                {"type", "peer_joined"}, {"client_id", sender.id}, {"name", sender.name},
+                {"semantic_visuals_ready", status.semanticVisualsReady}};
             broadcast(joined, sender.id);
             emit(EventKind::PeerJoined, sender.id, sender.name, joined);
             return;
@@ -1234,6 +1284,8 @@ struct Transport::Impl {
             status.ownerClientId = message.value("owner_client_id", "");
             status.udpToken = message.value("udp_token", "");
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
+            status.semanticVisualsReady =
+                message.value("semantic_visuals_ready", false);
             if (status.mode == Mode::Relay) {
                 if (relayCreateRoom) {
                     relayMayRecreateRoom = true;
@@ -1246,6 +1298,8 @@ struct Transport::Impl {
                 status.settings.dummyModel = message.value("dummy_model", status.settings.dummyModel);
                 status.settings.syncFlags = message.value("sync_flags", status.settings.syncFlags);
                 status.settings.syncWorld = message.value("sync_world", status.settings.syncWorld);
+                status.settings.performanceMode =
+                    message.value("performance_mode", status.settings.performanceMode);
                 status.settings.remoteCollision =
                     message.value("remote_collision", status.settings.remoteCollision);
                 status.settings.pvp = message.value("pvp", status.settings.pvp) &&
@@ -1274,12 +1328,16 @@ struct Transport::Impl {
             if (!id.empty()) {
                 peerNames[id] = message.value("name", id);
             }
+            status.semanticVisualsReady =
+                message.value("semantic_visuals_ready", false);
             emit(EventKind::PeerJoined, id, message.value("name", id), message);
         } else if (type == "peer_left") {
             const std::string id = message.value("client_id", "");
             peerNames.erase(id);
             peerStages.erase(id);
             peerPoseStages.erase(id);
+            status.semanticVisualsReady =
+                message.value("semantic_visuals_ready", false);
             emit(EventKind::PeerLeft, id, {}, message);
         } else if (type == "owner_changed") {
             status.ownerClientId = message.value("owner_client_id", "");
@@ -1290,6 +1348,8 @@ struct Transport::Impl {
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
             status.settings = parse_settings(message.value("settings", json::object()),
                                              status.settings);
+            status.semanticVisualsReady =
+                message.value("semantic_visuals_ready", status.semanticVisualsReady);
             emit(EventKind::Message, {}, {}, message);
         } else if (type == "udp_ready") {
             status.udpReady = true;
@@ -1302,6 +1362,10 @@ struct Transport::Impl {
             emit(EventKind::Message, {}, {}, message);
         } else if (status.mode == Mode::DirectJoin && type == "sync_world") {
             status.settings.syncWorld = message.value("enabled", status.settings.syncWorld);
+            emit(EventKind::Message, {}, {}, message);
+        } else if (status.mode == Mode::DirectJoin && type == "performance_mode") {
+            status.settings.performanceMode =
+                message.value("enabled", status.settings.performanceMode);
             emit(EventKind::Message, {}, {}, message);
         } else if (status.mode == Mode::DirectJoin && type == "remote_collision") {
             status.settings.remoteCollision =
@@ -1493,6 +1557,7 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
     impl_->sessionKey = config.sessionKey;
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
+    impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
     impl_->automaticReconnect = true;
     if (!impl_->begin_host()) {
         impl_->status.enabled = false;
@@ -1527,6 +1592,7 @@ bool Transport::start_direct_join(const DirectJoinConfig& config, std::string* e
     impl_->sessionKey = config.sessionKey;
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
+    impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
     impl_->automaticReconnect = true;
     if (!impl_->begin_connect() && impl_->status.state == State::Disconnected) {
         if (error != nullptr) {
@@ -1569,6 +1635,7 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
     impl_->relayMayRecreateRoom = false;
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
+    impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
     impl_->automaticReconnect = true;
     if (!impl_->begin_connect() && impl_->status.state == State::Disconnected) {
         if (error != nullptr) {
@@ -1620,9 +1687,13 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
     if (!impl_->status.enabled || !impl_->status.welcomed || !message.is_object() ||
         type == udp::PacketType::MidnaMsgpack ||
         (type != udp::PacketType::PoseJson && type != udp::PacketType::PoseMsgpack &&
+         type != udp::PacketType::SemanticPoseMsgpack &&
          type != udp::PacketType::MidnaMsgpack)) {
         return false;
     }
+    impl_->lastVisualSend = {};
+    impl_->lastVisualSend.type = type;
+    impl_->lastVisualSend.sequence = message.value("sequence", 0U);
     if (impl_->status.mode == Mode::DirectHost) {
         return impl_->send_visual_to_direct_peers(message, impl_->local_udp_sender_id(), type);
     }
@@ -1646,8 +1717,16 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
         impl_->emit(EventKind::Error, {}, error);
         return false;
     }
-    return impl_->enqueue_udp_tx_datagrams(impl_->udpRemoteAddress, datagrams,
-                                           senderId, receiverId, type);
+    const bool queued = impl_->enqueue_udp_tx_datagrams(impl_->udpRemoteAddress, datagrams,
+                                                        senderId, receiverId, type);
+    if (queued) {
+        impl_->lastVisualSend.recipients = 1;
+        impl_->lastVisualSend.datagrams = static_cast<uint32_t>(datagrams.size());
+        for (const auto& datagram : datagrams) {
+            impl_->lastVisualSend.wireBytes += datagram.bytes.size();
+        }
+    }
+    return queued;
 }
 
 bool Transport::send_remote_object(const udp::RemoteObjectPacket& object) {
@@ -1675,6 +1754,10 @@ void Transport::disconnect() {
 
 Status Transport::status() const {
     return impl_->status;
+}
+
+VisualSendStats Transport::last_visual_send_stats() const {
+    return impl_->lastVisualSend;
 }
 
 const std::map<std::string, std::string>& Transport::peers() const {
@@ -1720,6 +1803,10 @@ bool Transport::publish_room_settings(const RoomSettings& settings) {
     if (previous.syncWorld != impl_->status.settings.syncWorld) {
         ok &= send({{"type", "sync_world"},
                     {"enabled", impl_->status.settings.syncWorld}});
+    }
+    if (previous.performanceMode != impl_->status.settings.performanceMode) {
+        ok &= send({{"type", "performance_mode"},
+                    {"enabled", impl_->status.settings.performanceMode}});
     }
     const bool collisionChanged =
         previous.remoteCollision != impl_->status.settings.remoteCollision;

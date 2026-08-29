@@ -1,5 +1,6 @@
 #include "dusk/multiplayer/remote_link_dummy.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -22,6 +23,12 @@
 namespace dusk::multiplayer {
 namespace {
 
+enum class ReceiverPresentationMode : uint8_t {
+    FullMatrices,
+    SemanticGameplay,
+    HiddenUnsupported,
+};
+
 struct RemoteLinkActorDummy {
     fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
     uint32_t logCount = 0;
@@ -43,6 +50,33 @@ struct RemoteLinkActorDummy {
     uint32_t traceRepeatCount = 0;
     uint32_t traceMaxSeqDelta = 0;
     uint32_t traceMaxAge = 0;
+    RemoteLinkMatrixSnapshot retainedMatrices;
+    uint32_t retainedMatrixSequence = 0;
+    ReceiverPresentationMode presentationMode = ReceiverPresentationMode::FullMatrices;
+    bool semanticPresentationValid = false;
+    uint32_t semanticSourceSequence = 0;
+    uint32_t semanticTicksSinceSample = 0;
+    uint32_t semanticBlendDurationTicks = 1;
+    uint32_t semanticActionSequence = 0;
+    int semanticRoom = -1;
+    cXyz semanticStartPos;
+    cXyz semanticTargetPos;
+    cXyz semanticPresentedPos;
+    s16 semanticStartYaw = 0;
+    s16 semanticTargetYaw = 0;
+    s16 semanticPresentedYaw = 0;
+    std::array<int16_t, 10> semanticStartHatRotA{};
+    std::array<int16_t, 10> semanticTargetHatRotA{};
+    std::array<int16_t, 10> semanticPresentedHatRotA{};
+    std::array<int16_t, 10> semanticStartHatRotB{};
+    std::array<int16_t, 10> semanticTargetHatRotB{};
+    std::array<int16_t, 10> semanticPresentedHatRotB{};
+    std::array<int16_t, 3> semanticStartHatSwing{};
+    std::array<int16_t, 3> semanticTargetHatSwing{};
+    std::array<int16_t, 3> semanticPresentedHatSwing{};
+    s16 semanticStartHatShapeY = 0;
+    s16 semanticTargetHatShapeY = 0;
+    s16 semanticPresentedHatShapeY = 0;
 };
 
 struct RemoteBodyCollision {
@@ -69,6 +103,197 @@ bool dummy_trace_enabled() {
            !(std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 ||
              std::strcmp(value, "FALSE") == 0 || std::strcmp(value, "off") == 0 ||
              std::strcmp(value, "OFF") == 0);
+}
+
+bool semantic_animation_slot_supported(int bck, int arc, f32 ratio) {
+    if (ratio < 0.0f || ratio > 1.0f) return false;
+    if (ratio <= 0.001f) return true;
+    return bck > 0 && bck != 0xFFFF && arc == 0xFFFF;
+}
+
+bool phase3_semantic_pose_supported(const PeerPoseSnapshot& pose) {
+    if (pose.visualMode == PeerPoseSnapshot::VisualMode::HiddenUnsupported) return false;
+    return pose.valid && pose.transformClothesWait == 0 &&
+           (pose.itemActorKind == REMOTE_ITEM_ACTOR_NONE ||
+            pose.itemActorKind == REMOTE_ITEM_ACTOR_BOOMERANG) &&
+           (pose.rideActorKind == REMOTE_RIDE_ACTOR_NONE ||
+            pose.rideActorKind == REMOTE_RIDE_ACTOR_SPINNER) &&
+           semantic_animation_slot_supported(pose.underBck0, pose.underBckArc0,
+                                             pose.underRatio0) &&
+           semantic_animation_slot_supported(pose.underBck1, pose.underBckArc1,
+                                             pose.underRatio1) &&
+           semantic_animation_slot_supported(pose.underBck2, pose.underBckArc2,
+                                             pose.underRatio2) &&
+           semantic_animation_slot_supported(pose.upperBck0, pose.upperBckArc0,
+                                             pose.upperRatio0) &&
+           semantic_animation_slot_supported(pose.upperBck1, pose.upperBckArc1,
+                                             pose.upperRatio1) &&
+           semantic_animation_slot_supported(pose.upperBck2, pose.upperBckArc2,
+                                             pose.upperRatio2);
+}
+
+ReceiverPresentationMode choose_presentation_mode(const PeerPoseSnapshot& pose) {
+    if (!semantic_rendering_experiment_enabled()) {
+        return ReceiverPresentationMode::FullMatrices;
+    }
+    return phase3_semantic_pose_supported(pose) ?
+               ReceiverPresentationMode::SemanticGameplay :
+               ReceiverPresentationMode::HiddenUnsupported;
+}
+
+s16 interpolate_angle(s16 start, s16 target, f32 step) {
+    const s16 delta = static_cast<s16>(target - start);
+    return static_cast<s16>(start + static_cast<s16>(static_cast<f32>(delta) * step));
+}
+
+template <size_t N>
+void interpolate_angle_array(const std::array<int16_t, N>& start,
+                             const std::array<int16_t, N>& target, f32 step,
+                             std::array<int16_t, N>* output) {
+    for (size_t i = 0; i < N; ++i) {
+        (*output)[i] = interpolate_angle(start[i], target[i], step);
+    }
+}
+
+void reset_semantic_presentation(RemoteLinkActorDummy& dummy,
+                                 const PeerPoseSnapshot& pose, const cXyz& targetPos) {
+    dummy.semanticPresentationValid = true;
+    dummy.semanticSourceSequence = pose.sequence;
+    dummy.semanticTicksSinceSample = 0;
+    dummy.semanticBlendDurationTicks = 1;
+    dummy.semanticRoom = pose.room;
+    dummy.semanticStartPos = targetPos;
+    dummy.semanticTargetPos = targetPos;
+    dummy.semanticPresentedPos = targetPos;
+    dummy.semanticStartYaw = static_cast<s16>(pose.angleY);
+    dummy.semanticTargetYaw = dummy.semanticStartYaw;
+    dummy.semanticPresentedYaw = dummy.semanticStartYaw;
+    dummy.semanticStartHatRotA = pose.hatRotA;
+    dummy.semanticTargetHatRotA = pose.hatRotA;
+    dummy.semanticPresentedHatRotA = pose.hatRotA;
+    dummy.semanticStartHatRotB = pose.hatRotB;
+    dummy.semanticTargetHatRotB = pose.hatRotB;
+    dummy.semanticPresentedHatRotB = pose.hatRotB;
+    dummy.semanticStartHatSwing = pose.hatSwing;
+    dummy.semanticTargetHatSwing = pose.hatSwing;
+    dummy.semanticPresentedHatSwing = pose.hatSwing;
+    dummy.semanticStartHatShapeY = static_cast<s16>(pose.hatShapeY);
+    dummy.semanticTargetHatShapeY = dummy.semanticStartHatShapeY;
+    dummy.semanticPresentedHatShapeY = dummy.semanticStartHatShapeY;
+}
+
+void update_semantic_presentation(RemoteLinkActorDummy& dummy,
+                                  const PeerPoseSnapshot& pose, const cXyz& targetPos) {
+    const f32 dx = targetPos.x - dummy.semanticPresentedPos.x;
+    const f32 dy = targetPos.y - dummy.semanticPresentedPos.y;
+    const f32 dz = targetPos.z - dummy.semanticPresentedPos.z;
+    const bool discontinuity = dummy.semanticRoom != pose.room ||
+                               dx * dx + dy * dy + dz * dz > 600.0f * 600.0f;
+    if (!dummy.semanticPresentationValid || discontinuity) {
+        reset_semantic_presentation(dummy, pose, targetPos);
+        return;
+    }
+
+    if (pose.sequence != dummy.semanticSourceSequence) {
+        dummy.semanticStartPos = dummy.semanticPresentedPos;
+        dummy.semanticTargetPos = targetPos;
+        dummy.semanticStartYaw = dummy.semanticPresentedYaw;
+        dummy.semanticTargetYaw = static_cast<s16>(pose.angleY);
+        dummy.semanticStartHatRotA = dummy.semanticPresentedHatRotA;
+        dummy.semanticTargetHatRotA = pose.hatRotA;
+        dummy.semanticStartHatRotB = dummy.semanticPresentedHatRotB;
+        dummy.semanticTargetHatRotB = pose.hatRotB;
+        dummy.semanticStartHatSwing = dummy.semanticPresentedHatSwing;
+        dummy.semanticTargetHatSwing = pose.hatSwing;
+        dummy.semanticStartHatShapeY = dummy.semanticPresentedHatShapeY;
+        dummy.semanticTargetHatShapeY = static_cast<s16>(pose.hatShapeY);
+        dummy.semanticBlendDurationTicks =
+            std::clamp(dummy.semanticTicksSinceSample + 1, uint32_t{1}, uint32_t{4});
+        dummy.semanticTicksSinceSample = 0;
+        dummy.semanticSourceSequence = pose.sequence;
+        dummy.semanticRoom = pose.room;
+    }
+
+    if (dummy.semanticTicksSinceSample < dummy.semanticBlendDurationTicks) {
+        ++dummy.semanticTicksSinceSample;
+    }
+    const f32 step = std::clamp(
+        static_cast<f32>(dummy.semanticTicksSinceSample) /
+            static_cast<f32>(dummy.semanticBlendDurationTicks),
+        0.0f, 1.0f);
+    dummy.semanticPresentedPos.x =
+        dummy.semanticStartPos.x + (dummy.semanticTargetPos.x - dummy.semanticStartPos.x) * step;
+    dummy.semanticPresentedPos.y =
+        dummy.semanticStartPos.y + (dummy.semanticTargetPos.y - dummy.semanticStartPos.y) * step;
+    dummy.semanticPresentedPos.z =
+        dummy.semanticStartPos.z + (dummy.semanticTargetPos.z - dummy.semanticStartPos.z) * step;
+    dummy.semanticPresentedYaw =
+        interpolate_angle(dummy.semanticStartYaw, dummy.semanticTargetYaw, step);
+    interpolate_angle_array(dummy.semanticStartHatRotA, dummy.semanticTargetHatRotA, step,
+                            &dummy.semanticPresentedHatRotA);
+    interpolate_angle_array(dummy.semanticStartHatRotB, dummy.semanticTargetHatRotB, step,
+                            &dummy.semanticPresentedHatRotB);
+    interpolate_angle_array(dummy.semanticStartHatSwing, dummy.semanticTargetHatSwing, step,
+                            &dummy.semanticPresentedHatSwing);
+    dummy.semanticPresentedHatShapeY = interpolate_angle(
+        dummy.semanticStartHatShapeY, dummy.semanticTargetHatShapeY, step);
+}
+
+void rebase_matrix(float* matrix, const cXyz& sourcePos, const cXyz& presentedPos,
+                   s16 yawDelta) {
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const f32 oldRow0[4] = {matrix[0], matrix[1], matrix[2], matrix[3]};
+    const f32 oldRow2[4] = {matrix[8], matrix[9], matrix[10], matrix[11]};
+    for (int column = 0; column < 3; ++column) {
+        matrix[column] = cosine * oldRow0[column] + sine * oldRow2[column];
+        matrix[8 + column] = -sine * oldRow0[column] + cosine * oldRow2[column];
+    }
+    const f32 relativeX = oldRow0[3] - sourcePos.x;
+    const f32 relativeZ = oldRow2[3] - sourcePos.z;
+    matrix[3] = presentedPos.x + cosine * relativeX + sine * relativeZ;
+    matrix[7] += presentedPos.y - sourcePos.y;
+    matrix[11] = presentedPos.z - sine * relativeX + cosine * relativeZ;
+}
+
+void rebase_model(RemoteModelMatrixSnapshot& model, const cXyz& sourcePos,
+                  const cXyz& presentedPos, s16 yawDelta) {
+    if (!model.valid) return;
+    rebase_matrix(model.base.data(), sourcePos, presentedPos, yawDelta);
+    for (size_t offset = 0; offset + 12 <= model.joints.size(); offset += 12) {
+        rebase_matrix(model.joints.data() + offset, sourcePos, presentedPos, yawDelta);
+    }
+    for (size_t offset = 0; offset + 12 <= model.weights.size(); offset += 12) {
+        rebase_matrix(model.weights.data() + offset, sourcePos, presentedPos, yawDelta);
+    }
+}
+
+cXyz rebase_point(const cXyz& point, const cXyz& sourcePos, const cXyz& presentedPos,
+                  s16 yawDelta) {
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const f32 relativeX = point.x - sourcePos.x;
+    const f32 relativeZ = point.z - sourcePos.z;
+    return cXyz(presentedPos.x + cosine * relativeX + sine * relativeZ,
+                point.y + presentedPos.y - sourcePos.y,
+                presentedPos.z - sine * relativeX + cosine * relativeZ);
+}
+
+RemoteLinkMatrixSnapshot rebase_semantic_attachments(
+    const RemoteLinkMatrixSnapshot& source, const cXyz& sourcePos, s16 sourceYaw,
+    const cXyz& presentedPos, s16 presentedYaw) {
+    RemoteLinkMatrixSnapshot rebased = source;
+    const s16 yawDelta = static_cast<s16>(presentedYaw - sourceYaw);
+    RemoteModelMatrixSnapshot* attachments[] = {
+        &rebased.sword, &rebased.sheath, &rebased.shield, &rebased.heldItem,
+        &rebased.hookTip, &rebased.hookSubItem, &rebased.hookSubTip,
+        &rebased.arrow, &rebased.kantera, &rebased.kanteraGlow,
+        &rebased.itemActor, &rebased.rideActor,
+    };
+    for (RemoteModelMatrixSnapshot* model : attachments) {
+        rebase_model(*model, sourcePos, presentedPos, yawDelta);
+    }
+    return rebased;
 }
 
 f32 clamp_f32(f32 value, f32 min, f32 max) {
@@ -351,7 +576,9 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                                dComIfGp_roomControl_checkRoomDisp(pose.room);
         if (!supported) {
             auto existing = sActorDummies.find(peerId);
-            if (pose.valid && pose.isTransforming && existing != sActorDummies.end()) {
+            if (pose.valid && pose.isTransforming && existing != sActorDummies.end() &&
+                choose_presentation_mode(pose) !=
+                    ReceiverPresentationMode::HiddenUnsupported) {
                 update_actor_dummy_collision(peerId, pose);
                 continue;
             }
@@ -364,8 +591,27 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             ++dummy.visibleStableTicks;
         }
         daRemoteLink_c* actor = find_remote_link_actor(dummy);
+        const ReceiverPresentationMode presentationMode = choose_presentation_mode(pose);
+        if (presentationMode == ReceiverPresentationMode::HiddenUnsupported) {
+            sBodyCollision.erase(peerId);
+            if (actor != nullptr) {
+                actor->setRemotePresentationVisible(false);
+            }
+            dummy.presentationMode = presentationMode;
+            dummy.semanticPresentationValid = false;
+            dummy.semanticActionSequence = 0;
+            for (const RemoteAudioEvent& event : pose.audioEvents) {
+                dummy.lastAudioEventSequence =
+                    std::max(dummy.lastAudioEventSequence, event.sequence);
+            }
+            continue;
+        }
+        const bool semanticTransform =
+            presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+            pose.isTransforming;
         const bool anchorWolfToHumanTransform =
-            pose.isTransforming && pose.transformFromWolf && !pose.transformToWolf;
+            !semanticTransform && pose.isTransforming && pose.transformFromWolf &&
+            !pose.transformToWolf;
         if (anchorWolfToHumanTransform && !dummy.transformAnchorValid) {
             dummy.transformAnchorPos.set(pose.x, pose.y, pose.z);
             dummy.transformAnchorValid = true;
@@ -379,10 +625,11 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             dummy.transformAnchorValid = false;
         }
 
+        const cXyz sourceActorPos(pose.x, pose.y, pose.z);
         const cXyz actorPos =
             anchorWolfToHumanTransform && dummy.transformAnchorValid
                 ? dummy.transformAnchorPos
-                : cXyz(pose.x, pose.y, pose.z);
+                : sourceActorPos;
         if (dummy.clothesVariant != -1 &&
             (dummy.clothesVariant != pose.clothesVariant || dummy.isWolf != pose.isWolf))
         {
@@ -432,6 +679,9 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             dummy.pendingIsWolf = false;
             dummy.recreateDelayTicks = 0;
             dummy.recreatePending = false;
+            dummy.presentationMode = ReceiverPresentationMode::FullMatrices;
+            dummy.semanticPresentationValid = false;
+            dummy.semanticActionSequence = 0;
             const u32 actorParams =
                 static_cast<u32>(pose.clothesVariant & 0xFF) | (pose.isWolf ? 0x100 : 0);
             cXyz spawnPos = actorPos;
@@ -462,7 +712,16 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         }
 
         update_actor_dummy_collision(peerId, pose);
-        if (!pose.linkMatricesFresh) {
+        if (pose.linkMatricesFresh && pose.linkMatrices.valid &&
+            dummy.retainedMatrixSequence != pose.sequence) {
+            dummy.retainedMatrices = pose.linkMatrices;
+            dummy.retainedMatrixSequence = pose.sequence;
+        }
+        actor->setRemotePresentationVisible(true);
+        const bool matricesRequired =
+            presentationMode == ReceiverPresentationMode::FullMatrices;
+        if (matricesRequired &&
+            (!pose.linkMatricesFresh || !pose.linkMatrices.body.valid)) {
             if (dummy_trace_enabled()) {
                 const uint32_t sequenceDelta =
                     dummy.lastTraceSequence != 0 ? pose.sequence - dummy.lastTraceSequence : 0;
@@ -500,27 +759,106 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             }
             continue;
         }
-        actor->setRemotePose(actorPos, static_cast<s16>(pose.angleY), static_cast<s8>(pose.room));
-        const bool displayMidna = display_remote_midna_enabled();
-        actor->setRemoteActionState(pose.procId, pose.procVar0, pose.procVar1, pose.procVar2,
-                                    pose.procVar3, pose.procVar5, pose.underFrame,
-                                    static_cast<u16>(pose.underBck0), pose.underFrame0,
-                                    pose.underRate0, static_cast<u16>(pose.upperBck2),
-                                    pose.upperFrame2, pose.upperRate2, pose.equipItem,
-                                    pose.swordVariant, pose.shieldVariant, pose.swordDraw,
-                                    pose.shieldDraw, pose.shieldGuardActive, pose.swordOut,
-                                    pose.heavyBoots,
-                                    pose.itemDraw, pose.kanteraDraw,
-                                    displayMidna && pose.midnaDraw,
-                                    displayMidna && pose.midnaMaskDraw,
-                                    displayMidna && pose.midnaHandDraw,
-                                    displayMidna && pose.midnaHairDraw,
-                                    displayMidna && pose.midnaShadowForm, pose.itemActorKind,
-                                    pose.itemActorBombExTime, pose.itemActorBombFlash,
-                                    pose.rideActorKind);
-        actor->setRemoteHatState(pose.hatRotA, pose.hatRotB, pose.hatSwing,
-                                 static_cast<s16>(pose.hatShapeY));
-        actor->setRemoteMatrices(pose.linkMatrices);
+        cXyz presentedActorPos = actorPos;
+        s16 presentedAngleY = static_cast<s16>(pose.angleY);
+        const std::array<int16_t, 10>* presentedHatRotA = &pose.hatRotA;
+        const std::array<int16_t, 10>* presentedHatRotB = &pose.hatRotB;
+        const std::array<int16_t, 3>* presentedHatSwing = &pose.hatSwing;
+        s16 presentedHatShapeY = static_cast<s16>(pose.hatShapeY);
+        if (presentationMode == ReceiverPresentationMode::SemanticGameplay) {
+            if (semanticTransform) {
+                // Vanilla deliberately shifts current.pos when the model swaps between the
+                // wolf and human phases while keeping joint zero visually continuous. The
+                // old matrix renderer anchored the actor during wolf->human because its
+                // streamed matrices were already world-space. Interpolating or anchoring
+                // that actor-position correction in semantic mode applies it a second time
+                // when bodyRoot is rebased, producing the large forward/backward jump.
+                reset_semantic_presentation(dummy, pose, actorPos);
+            } else {
+                update_semantic_presentation(dummy, pose, actorPos);
+            }
+            presentedActorPos = dummy.semanticPresentedPos;
+            presentedAngleY = dummy.semanticPresentedYaw;
+            presentedHatRotA = &dummy.semanticPresentedHatRotA;
+            presentedHatRotB = &dummy.semanticPresentedHatRotB;
+            presentedHatSwing = &dummy.semanticPresentedHatSwing;
+            presentedHatShapeY = dummy.semanticPresentedHatShapeY;
+        } else {
+            dummy.semanticPresentationValid = false;
+            dummy.semanticActionSequence = 0;
+        }
+        actor->setRemotePose(presentedActorPos, presentedAngleY, static_cast<s8>(pose.room));
+        const bool applyActionState =
+            presentationMode != ReceiverPresentationMode::SemanticGameplay ||
+            dummy.semanticActionSequence != pose.sequence;
+        if (applyActionState) {
+            actor->setRemoteActionState(pose.procId, pose.procVar0, pose.procVar1, pose.procVar2,
+                                        pose.procVar3, pose.procVar5, pose.underFrame,
+                                        static_cast<u16>(pose.underBck0), pose.underFrame0,
+                                        pose.underRate0, pose.underRatio0,
+                                        static_cast<u16>(pose.underBck1), pose.underFrame1,
+                                        pose.underRate1, pose.underRatio1,
+                                        static_cast<u16>(pose.underBck2), pose.underFrame2,
+                                        pose.underRate2, pose.underRatio2,
+                                        static_cast<u16>(pose.upperBck0), pose.upperFrame0,
+                                        pose.upperRate0, pose.upperRatio0,
+                                        static_cast<u16>(pose.upperBck1), pose.upperFrame1,
+                                        pose.upperRate1, pose.upperRatio1,
+                                        static_cast<u16>(pose.upperBck2), pose.upperFrame2,
+                                        pose.upperRate2, pose.upperRatio2, pose.equipItem,
+                                        pose.swordVariant, pose.shieldVariant, pose.swordDraw,
+                                        pose.shieldDraw, pose.shieldGuardActive,
+                                        pose.swordHandAttached, pose.shieldHandAttached,
+                                        pose.swordOut,
+                                        pose.heavyBoots, pose.itemDraw, pose.kanteraDraw,
+                                        false, false, false, false, false, pose.itemActorKind,
+                                        pose.itemActorBombExTime, pose.itemActorBombFlash,
+                                        pose.rideActorKind);
+            actor->setRemoteAnimationSourceState(
+                static_cast<u16>(pose.underBckArc0), static_cast<u16>(pose.underBckArc1),
+                static_cast<u16>(pose.underBckArc2), static_cast<u16>(pose.upperBckArc0),
+                static_cast<u16>(pose.upperBckArc1), static_cast<u16>(pose.upperBckArc2));
+            if (presentationMode == ReceiverPresentationMode::SemanticGameplay) {
+                dummy.semanticActionSequence = pose.sequence;
+            }
+        }
+        // Animation resources/frames change only with a new received sample, but
+        // the semantic presentation position keeps advancing between samples.
+        // Rebase and apply the body root every tick so root-motion animations
+        // cannot drift ahead of the interpolated actor and snap back on exit.
+        const cXyz presentedBodyRoot = rebase_point(
+            cXyz(pose.bodyRootX, pose.bodyRootY, pose.bodyRootZ), sourceActorPos,
+            presentedActorPos,
+            static_cast<s16>(presentedAngleY - static_cast<s16>(pose.angleY)));
+        actor->setRemoteBodyState(
+            static_cast<s16>(pose.shapeAngleX), static_cast<s16>(pose.shapeAngleZ),
+            static_cast<s16>(pose.bodyAngleX), static_cast<s16>(pose.bodyAngleY),
+            static_cast<s16>(pose.bodyAngleZ), static_cast<s16>(pose.bodyTwistY),
+            static_cast<s16>(pose.neckJointX), static_cast<s16>(pose.neckJointY),
+            static_cast<s16>(pose.neckJointZ), static_cast<s16>(pose.lowerJointX),
+            static_cast<s16>(pose.lowerJointZ), static_cast<s16>(pose.rootJointX),
+            static_cast<s16>(pose.rootJointZ), static_cast<u8>(pose.blendMode),
+            pose.upperSavedRatio, pose.bodyRootValid, presentedBodyRoot, pose.legIkAngles,
+            pose.armIkAngles, pose.armRotA, pose.armRotB);
+        actor->setRemoteHatState(*presentedHatRotA, *presentedHatRotB, *presentedHatSwing,
+                                 presentedHatShapeY);
+        if (presentationMode == ReceiverPresentationMode::SemanticGameplay) {
+            if (dummy.presentationMode != ReceiverPresentationMode::SemanticGameplay) {
+                // Clearing MatrixValid hands model calculation back to the remote actor.
+                // The last complete snapshot remains cached above for one-tick fallback.
+                actor->setRemoteMatrices(RemoteLinkMatrixSnapshot{});
+            }
+            if (pose.linkMatrices.valid) {
+                actor->setRemoteAttachmentMatrices(rebase_semantic_attachments(
+                    pose.linkMatrices, sourceActorPos, static_cast<s16>(pose.angleY),
+                    presentedActorPos, presentedAngleY));
+            }
+        } else if (pose.linkMatricesFresh) {
+            actor->setRemoteMatrices(pose.linkMatrices);
+        } else {
+            actor->setRemoteMatrices(dummy.retainedMatrices);
+        }
+        dummy.presentationMode = presentationMode;
         RemoteBombObjectSnapshot bombObject;
         if (get_remote_bomb_object_for_peer(peerId, &bombObject)) {
             actor->setRemoteBombObjectState(bombObject);
@@ -589,6 +927,16 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
     }
 }
 
+bool is_remote_link_dummy_visible(const std::string& peerId) {
+    auto it = sActorDummies.find(peerId);
+    if (it == sActorDummies.end()) {
+        return false;
+    }
+
+    daRemoteLink_c* actor = find_remote_link_actor(it->second);
+    return actor != nullptr && actor->isRemotePresentationVisible();
+}
+
 bool get_remote_link_dummy_label_position(const std::string& peerId, cXyz* outPos) {
     auto it = sActorDummies.find(peerId);
     if (it == sActorDummies.end()) {
@@ -596,11 +944,17 @@ bool get_remote_link_dummy_label_position(const std::string& peerId, cXyz* outPo
     }
 
     daRemoteLink_c* actor = find_remote_link_actor(it->second);
-    return actor != nullptr && actor->getNameLabelPosition(outPos);
+    return actor != nullptr && actor->isRemotePresentationVisible() &&
+           actor->getNameLabelPosition(outPos);
 }
 
 bool get_remote_link_dummy_peer_id_for_actor(fopAc_ac_c* actor, std::string* outPeerId) {
     if (actor == nullptr || outPeerId == nullptr || fopAcM_GetName(actor) != fpcNm_REMOTE_LINK_e) {
+        return false;
+    }
+
+    auto* remoteLink = static_cast<daRemoteLink_c*>(actor);
+    if (!remoteLink->isRemotePresentationVisible()) {
         return false;
     }
 
@@ -629,8 +983,12 @@ void destroy_all_remote_link_dummies() {
 }
 
 void draw_remote_link_dummy(const std::string& peerId, const PeerPoseSnapshot& pose) {
-    if (pose.valid && sActorDummies.find(peerId) != sActorDummies.end()) {
+    const auto dummy = sActorDummies.find(peerId);
+    if (pose.valid && dummy != sActorDummies.end() &&
+        dummy->second.presentationMode != ReceiverPresentationMode::HiddenUnsupported) {
         update_actor_dummy_collision(peerId, pose);
+    } else {
+        sBodyCollision.erase(peerId);
     }
 }
 

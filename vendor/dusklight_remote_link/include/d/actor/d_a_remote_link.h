@@ -39,24 +39,48 @@ public:
     void setRemoteActionState(int i_procId, int i_procVar0, int i_procVar1, int i_procVar2,
                               int i_procVar3, int i_procVar5, f32 i_underFrame,
                               u16 i_underBck0, f32 i_underFrame0, f32 i_underRate0,
-                              u16 i_upperBck2, f32 i_upperFrame2, f32 i_upperRate2,
+                              f32 i_underRatio0, u16 i_underBck1, f32 i_underFrame1,
+                              f32 i_underRate1, f32 i_underRatio1, u16 i_underBck2,
+                              f32 i_underFrame2, f32 i_underRate2, f32 i_underRatio2,
+                              u16 i_upperBck0, f32 i_upperFrame0, f32 i_upperRate0,
+                              f32 i_upperRatio0, u16 i_upperBck1, f32 i_upperFrame1,
+                              f32 i_upperRate1, f32 i_upperRatio1, u16 i_upperBck2,
+                              f32 i_upperFrame2, f32 i_upperRate2, f32 i_upperRatio2,
                               u16 i_equipItem, int i_swordVariant, int i_shieldVariant,
                               bool i_swordDraw, bool i_shieldDraw, bool i_shieldGuardActive,
+                              bool i_swordHandAttached, bool i_shieldHandAttached,
                               bool i_swordOut,
                               bool i_heavyBoots, bool i_itemDraw, bool i_kanteraDraw,
                               bool i_midnaDraw, bool i_midnaMaskDraw, bool i_midnaHandDraw,
                               bool i_midnaHairDraw, bool i_midnaShadowForm, int i_itemActorKind,
                               int i_itemActorBombExTime, int i_itemActorBombFlash, int i_rideActorKind);
+    void setRemoteAnimationSourceState(u16 i_underArc0, u16 i_underArc1, u16 i_underArc2,
+                                       u16 i_upperArc0, u16 i_upperArc1, u16 i_upperArc2);
     void setRemoteMatrices(const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
+    void setRemoteAttachmentMatrices(
+        const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
+    void setRemotePresentationVisible(bool i_visible);
+    bool isRemotePresentationVisible() const { return mRemotePresentationVisible; }
     void setRemoteBombObjectState(const dusk::multiplayer::RemoteBombObjectSnapshot& i_bomb);
     void setRemoteHatState(const std::array<int16_t, 10>& i_rotA,
                            const std::array<int16_t, 10>& i_rotB,
                            const std::array<int16_t, 3>& i_swing, s16 i_shapeY);
+    void setRemoteBodyState(s16 i_shapeX, s16 i_shapeZ, s16 i_bodyX, s16 i_bodyY,
+                            s16 i_bodyZ, s16 i_twistY, s16 i_neckJointX,
+                            s16 i_neckJointY, s16 i_neckJointZ, s16 i_lowerJointX,
+                            s16 i_lowerJointZ, s16 i_rootJointX, s16 i_rootJointZ,
+                            u8 i_blendMode, f32 i_upperSavedRatio, bool i_bodyRootValid,
+                            const cXyz& i_bodyRoot,
+                            const std::array<int16_t, 6>& i_legIkAngles,
+                            const std::array<int16_t, 6>& i_armIkAngles,
+                            const std::array<int16_t, 6>& i_armRotA,
+                            const std::array<int16_t, 6>& i_armRotB);
     void applyRemoteBodyMatrixInterpolationForPresentation();
     bool getNameLabelPosition(cXyz* o_pos) const;
     void playRemoteSound(const dusk::multiplayer::RemoteAudioEvent& i_event);
     void syncRemoteActiveSounds(const std::vector<dusk::multiplayer::RemoteAudioEvent>& i_events);
     int headModelCallBack(int i_jointNo);
+    int bodyModelCallBack(int i_jointNo);
 
     static int createHeapCallBack(fopAc_ac_c* i_this);
     static bool canReserveSlot();
@@ -73,6 +97,7 @@ private:
 
     struct BckCacheEntry {
         u16 resId;
+        u8* buffer;
         J3DAnmTransform* bck;
     };
 
@@ -135,8 +160,15 @@ private:
     void setupSwordMaterialAnm(J3DModel* i_model, int i_swordVariant);
     void applySwordShapeVisibility();
     void setupMotionAnimation();
-    J3DAnmTransform* loadMotionBck(u16 i_resId);
+    bool setupBlendAnimation();
+    bool configureBlendSlot(int i_slot, u16 i_bck, f32 i_frame, f32 i_rate, f32 i_ratio);
+    void applyRemoteChangeBlendRate(int i_jointNo);
+    void applyRemoteFootMatrix();
+    void applyRemoteArmMatrix();
+    J3DAnmTransform* loadMotionBck(u16 i_resId, u8** o_buffer);
+    void releaseBckCacheEntry(BckCacheEntry& i_entry);
     J3DAnmTransform* getMotionBck(u16 i_resId);
+    J3DAnmTransform* getBlendSlotBck(int i_slot, u16 i_resId);
     u16 selectActionBck(f32* o_speed);
     void updateMotionAnimation();
     bool setMotionBck(u16 i_resId, f32 i_speed);
@@ -160,6 +192,8 @@ private:
     void* getArchiveObjectRes(OwnedArchiveSlot& i_slot, s32 i_index);
     bool copyRemoteModelMatrices(J3DModel* i_model,
                                  const dusk::multiplayer::RemoteModelMatrixSnapshot& i_source);
+    void applyRemoteAttachmentMatrices();
+    void applyHumanEquipmentMatrices(bool i_presentation);
     void captureRemoteModelMatrixSnapshot(
         J3DModel* i_model, const dusk::multiplayer::RemoteModelMatrixSnapshot& i_source,
         RemoteModelMatrixInterpState& io_state);
@@ -193,7 +227,9 @@ private:
     void setupDrawHands();
     void setupHeavyBootModels();
     void applyHeavyBootMatrices();
-    void applyWolfEquipmentMatrices();
+    void applyWolfEquipmentMatrices(bool i_presentation = false);
+    void alignSemanticBodyRootToRemoteRoot();
+    void alignSemanticBodyRootForPresentation();
 
     /* 0x568 */ request_of_phase_process_class mPhase;
     /* 0x570 */ JKRExpHeap* mpArcHeap;
@@ -240,7 +276,22 @@ private:
     /* 0xA0C */ J3DAnmTevRegKey* mpMagicArmorBodyBrk;
     /* 0xA10 */ J3DAnmTevRegKey* mpMagicArmorHeadBrk;
     /* 0xA14 */ mDoExt_bckAnm* mpMotionBck;
+    mDoExt_MtxCalcAnmBlendTbl* mpBlendMtxCalc;
+    mDoExt_MtxCalcAnmBlendTbl* mpUpperBlendMtxCalc;
+    mDoExt_MtxCalcOldFrame* mpOldFrameCalc;
+    J3DTransformInfo mOldFrameTransInfo[40];
+    Quaternion mOldFrameQuats[40];
+    mDoExt_AnmRatioPack mBlendAnmPacks[6];
+    u16 mBlendSlotBck[6];
+    f32 mBlendSlotFrame[6];
+    bool mBlendSlotFrameValid[6];
+    f32 mBlendSlotPresentedRatio[6];
+    bool mBlendSignatureValid;
+    int mLastBlendProcId;
+    u16 mLastBlendUnderBck[3];
+    u16 mLastBlendUpperBck[3];
     /* 0xA18 */ BckCacheEntry mBckCache[48];
+    BckCacheEntry mBlendBckCache[6];
     /* 0xB98 */ u16 mMotionBckResId;
     /* 0xB8C */ f32 mRemoteMoveSpeed;
     /* 0xB90 */ cXyz mLastRemotePos;
@@ -252,11 +303,59 @@ private:
     /* 0xBB0 */ int mRemoteProcVar5;
     /* 0xBB4 */ f32 mRemoteUnderFrame;
     /* 0xBB8 */ u16 mRemoteUnderBck0;
+    u16 mRemoteUnderBckArc0;
     /* 0xBBC */ f32 mRemoteUnderFrame0;
     /* 0xBC0 */ f32 mRemoteUnderRate0;
+    f32 mRemoteUnderRatio0;
+    u16 mRemoteUnderBck1;
+    u16 mRemoteUnderBckArc1;
+    f32 mRemoteUnderFrame1;
+    f32 mRemoteUnderRate1;
+    f32 mRemoteUnderRatio1;
+    u16 mRemoteUnderBck2;
+    u16 mRemoteUnderBckArc2;
+    f32 mRemoteUnderFrame2;
+    f32 mRemoteUnderRate2;
+    f32 mRemoteUnderRatio2;
+    u16 mRemoteUpperBck0;
+    u16 mRemoteUpperBckArc0;
+    f32 mRemoteUpperFrame0;
+    f32 mRemoteUpperRate0;
+    f32 mRemoteUpperRatio0;
+    u16 mRemoteUpperBck1;
+    u16 mRemoteUpperBckArc1;
+    f32 mRemoteUpperFrame1;
+    f32 mRemoteUpperRate1;
+    f32 mRemoteUpperRatio1;
     /* 0xBC4 */ u16 mRemoteUpperBck2;
+    u16 mRemoteUpperBckArc2;
     /* 0xBC8 */ f32 mRemoteUpperFrame2;
     /* 0xBCC */ f32 mRemoteUpperRate2;
+    f32 mRemoteUpperRatio2;
+    s16 mRemoteShapeX;
+    s16 mRemoteShapeZ;
+    s16 mRemoteBodyAngleX;
+    s16 mRemoteBodyAngleY;
+    s16 mRemoteBodyAngleZ;
+    s16 mRemoteBodyTwistY;
+    s16 mRemoteNeckJointX;
+    s16 mRemoteNeckJointY;
+    s16 mRemoteNeckJointZ;
+    s16 mRemoteLowerJointX;
+    s16 mRemoteLowerJointZ;
+    s16 mRemoteRootJointX;
+    s16 mRemoteRootJointZ;
+    u8 mRemoteBlendMode;
+    f32 mRemoteUpperSavedRatio;
+    bool mPrevRemoteBodyRootValid;
+    cXyz mPrevRemoteBodyRoot;
+    bool mRemoteBodyRootValid;
+    cXyz mRemoteBodyRoot;
+    std::array<int16_t, 6> mRemoteLegIkAngles;
+    std::array<int16_t, 6> mRemoteArmIkAngles;
+    std::array<int16_t, 6> mRemoteArmRotA;
+    std::array<int16_t, 6> mRemoteArmRotB;
+    bool mRemoteAnimationFrameCorrectionPending;
     std::array<int16_t, 10> mRemoteHatRotA;
     std::array<int16_t, 10> mRemoteHatRotB;
     std::array<int16_t, 3> mRemoteHatSwing;
@@ -272,6 +371,8 @@ private:
     /* 0xBEE */ bool mRemoteSwordDraw;
     /* 0xBEF */ bool mRemoteShieldDraw;
     bool mRemoteShieldGuardActive;
+    bool mRemoteSwordHandAttached;
+    bool mRemoteShieldHandAttached;
     /* 0xBF0 */ bool mRemoteSwordOut;
     /* 0xBF1 */ bool mRemoteHeavyBoots;
     /* 0xBF2 */ bool mRemoteMidnaDraw;
@@ -300,6 +401,8 @@ private:
     /* 0xC05 */ bool mRemoteKanteraDraw;
     /* 0xC06 */ bool mHasRemotePose;
     /* 0xC07 */ bool mHasRemoteMatrices;
+    bool mHasRemoteAttachmentMatrices;
+    dusk::multiplayer::RemoteLinkMatrixSnapshot mRemoteAttachmentMatrices;
     /* 0xC14 */ int mClothesVariant;
     /* 0xC08 */ J3DShape* mpLeftBodyHandShape;
     /* 0xC0C */ J3DShape* mpRightBodyHandShape;
@@ -328,6 +431,15 @@ private:
     RemoteModelMatrixInterpState mSwordMatrixInterp;
     RemoteModelMatrixInterpState mSheathMatrixInterp;
     RemoteModelMatrixInterpState mShieldMatrixInterp;
+    RemoteModelMatrixInterpState mHeldItemMatrixInterp;
+    RemoteModelMatrixInterpState mHookTipMatrixInterp;
+    RemoteModelMatrixInterpState mHookSubItemMatrixInterp;
+    RemoteModelMatrixInterpState mHookSubTipMatrixInterp;
+    RemoteModelMatrixInterpState mArrowMatrixInterp;
+    RemoteModelMatrixInterpState mKanteraMatrixInterp;
+    RemoteModelMatrixInterpState mKanteraGlowMatrixInterp;
+    RemoteModelMatrixInterpState mItemActorMatrixInterp;
+    RemoteModelMatrixInterpState mRideActorMatrixInterp;
     RemoteModelMatrixInterpState mMidnaMatrixInterp;
     RemoteModelMatrixInterpState mMidnaMaskMatrixInterp;
     RemoteModelMatrixInterpState mMidnaHandMatrixInterp;
@@ -336,6 +448,7 @@ private:
     dCcD_Stts mPvpTargetStts;
     dCcD_Cyl mPvpTargetCyl;
     bool mPvpTargetCollisionInitialized;
+    bool mRemotePresentationVisible;
     s16 mPvpShieldFrontAngle;
     std::array<u32, 3> mPvpMidnaBindIds;
     bool mPvpMidnaBindActive;

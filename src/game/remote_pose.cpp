@@ -506,7 +506,8 @@ RemoteLinkMatrixSnapshot parse_matrices(const json& source) {
     const bool omit = format == "qrot16_trans32_womit_v1" ||
         format == "qrot16_trans32_womit_bin_v1" ||
         format == "f32_pack_womit_v1" || format == "f32_pack_womit_bin_v1";
-    if (quantized || safe || floating) {
+    const bool packedFormat = quantized || safe || floating;
+    if (packedFormat) {
         std::string packed;
         if (!packed_bytes(source, packed)) return out;
         size_t cursor = 0;
@@ -515,11 +516,13 @@ RemoteLinkMatrixSnapshot parse_matrices(const json& source) {
         if (!read_bytes(packed, cursor, magic, 4) || std::memcmp(magic, "DMPM", 4) != 0 ||
             !read_value(packed, cursor, version) || !read_value(packed, cursor, count) ||
             version != 1 || count != 21) return {};
+        RemoteModelMatrixSnapshot ignoredMidna[5];
         RemoteModelMatrixSnapshot* slots[] = {
             &out.body, &out.hat, &out.face, &out.hand, &out.sword, &out.sheath,
             &out.shield, &out.heldItem, &out.hookTip, &out.hookSubItem, &out.hookSubTip,
             &out.arrow, &out.kantera, &out.kanteraGlow, &out.itemActor, &out.rideActor,
-            &out.midna, &out.midnaMask, &out.midnaHand, &out.midnaHair, &out.midnaGlow,
+            &ignoredMidna[0], &ignoredMidna[1], &ignoredMidna[2], &ignoredMidna[3],
+            &ignoredMidna[4],
         };
         for (auto* slot : slots)
             if (!read_model(packed, cursor, *slot, quantized, safe, omit)) return {};
@@ -541,14 +544,12 @@ RemoteLinkMatrixSnapshot parse_matrices(const json& source) {
         out.kanteraGlow = parse_json_model(source.value("kantera_glow", json::object()));
         out.itemActor = parse_json_model(source.value("item_actor", json::object()));
         out.rideActor = parse_json_model(source.value("ride_actor", json::object()));
-        out.midna = parse_json_model(source.value("midna", json::object()));
-        out.midnaMask = parse_json_model(source.value("midna_mask", json::object()));
-        out.midnaHand = parse_json_model(source.value("midna_hand", json::object()));
-        out.midnaHair = parse_json_model(source.value("midna_hair", json::object()));
-        out.midnaGlow = parse_json_model(source.value("midna_glow", json::object()));
     }
-    out.midnaHairShape = std::clamp(source.value("midna_hair_shape", 0), 0, 2);
-    out.valid = out.body.valid;
+    out.midnaHairShape = 0;
+    // A packed semantic pose may intentionally contain only small attachment
+    // slots, or all-absent slots to explicitly clear old props. Successful
+    // container decoding is therefore valid independently of the body slot.
+    out.valid = packedFormat || out.body.valid;
     return out;
 }
 
@@ -568,14 +569,12 @@ void hydrate_matrices(RemoteLinkMatrixSnapshot& value,
         &value.body, &value.hat, &value.face, &value.hand, &value.sword, &value.sheath,
         &value.shield, &value.heldItem, &value.hookTip, &value.hookSubItem, &value.hookSubTip,
         &value.arrow, &value.kantera, &value.kanteraGlow, &value.itemActor, &value.rideActor,
-        &value.midna, &value.midnaMask, &value.midnaHand, &value.midnaHair, &value.midnaGlow,
     };
     const RemoteModelMatrixSnapshot* old[] = {
         &previous.body, &previous.hat, &previous.face, &previous.hand, &previous.sword,
         &previous.sheath, &previous.shield, &previous.heldItem, &previous.hookTip,
         &previous.hookSubItem, &previous.hookSubTip, &previous.arrow, &previous.kantera,
-        &previous.kanteraGlow, &previous.itemActor, &previous.rideActor, &previous.midna,
-        &previous.midnaMask, &previous.midnaHand, &previous.midnaHair, &previous.midnaGlow,
+        &previous.kanteraGlow, &previous.itemActor, &previous.rideActor,
     };
     for (size_t i = 0; i < std::size(current); ++i) hydrate_model(*current[i], *old[i]);
 }
@@ -626,6 +625,15 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.valid = true;
         pose.peerId = peerId;
         pose.sequence = message.value("sequence", 0U);
+        const std::string visualMode = state.value("visual_mode", "");
+        if (visualMode == "semantic_gameplay") {
+            pose.visualMode = PeerPoseSnapshot::VisualMode::SemanticGameplay;
+        } else if (visualMode == "hidden_unsupported") {
+            pose.visualMode = PeerPoseSnapshot::VisualMode::HiddenUnsupported;
+        } else {
+            pose.visualMode = PeerPoseSnapshot::VisualMode::Unknown;
+        }
+        pose.visualUnsupportedReasons = state.value("visual_unsupported_reasons", 0U);
         pose.stage = state.value("stage", "");
         pose.room = state.value("room", -1);
         pose.layer = state.value("layer", -1);
@@ -643,14 +651,44 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.manualSyncReady = state.value("manual_sync_ready", false);
         pose.underFrame = state.value("under_frame", 0.0f);
         pose.underBck0 = state.value("under_bck0", 0);
+        pose.underBckArc0 = state.value("under_arc0", 0xFFFF);
         pose.underFrame0 = state.value("under_frame0", pose.underFrame);
         pose.underRate0 = state.value("under_rate0", 1.0f);
+        pose.underRatio0 = state.value("under_ratio0", 1.0f);
+        pose.underBck1 = state.value("under_bck1", 0);
+        pose.underBckArc1 = state.value("under_arc1", 0xFFFF);
+        pose.underFrame1 = state.value("under_frame1", 0.0f);
+        pose.underRate1 = state.value("under_rate1", 1.0f);
+        pose.underRatio1 = state.value("under_ratio1", 0.0f);
+        pose.underBck2 = state.value("under_bck2", 0);
+        pose.underBckArc2 = state.value("under_arc2", 0xFFFF);
+        pose.underFrame2 = state.value("under_frame2", 0.0f);
+        pose.underRate2 = state.value("under_rate2", 1.0f);
+        pose.underRatio2 = state.value("under_ratio2", 0.0f);
+        pose.upperBck0 = state.value("upper_bck0", 0);
+        pose.upperBckArc0 = state.value("upper_arc0", 0xFFFF);
+        pose.upperFrame0 = state.value("upper_frame0", 0.0f);
+        pose.upperRate0 = state.value("upper_rate0", 1.0f);
+        pose.upperRatio0 = state.value("upper_ratio0", 1.0f);
+        pose.upperBck1 = state.value("upper_bck1", 0);
+        pose.upperBckArc1 = state.value("upper_arc1", 0xFFFF);
+        pose.upperFrame1 = state.value("upper_frame1", 0.0f);
+        pose.upperRate1 = state.value("upper_rate1", 1.0f);
+        pose.upperRatio1 = state.value("upper_ratio1", 0.0f);
         pose.upperBck2 = state.value("upper_bck2", 0);
+        pose.upperBckArc2 = state.value("upper_arc2", 0xFFFF);
         pose.upperFrame2 = state.value("upper_frame2", 0.0f);
         pose.upperRate2 = state.value("upper_rate2", 1.0f);
-        if (!std::isfinite(pose.underFrame) || !std::isfinite(pose.underFrame0) ||
-            !std::isfinite(pose.underRate0) || !std::isfinite(pose.upperFrame2) ||
-            !std::isfinite(pose.upperRate2)) {
+        pose.upperRatio2 = state.value("upper_ratio2", 0.0f);
+        const float animationValues[] = {
+            pose.underFrame, pose.underFrame0, pose.underRate0, pose.underRatio0,
+            pose.underFrame1, pose.underRate1, pose.underRatio1, pose.underFrame2,
+            pose.underRate2, pose.underRatio2, pose.upperFrame0, pose.upperRate0,
+            pose.upperRatio0, pose.upperFrame1, pose.upperRate1, pose.upperRatio1,
+            pose.upperFrame2, pose.upperRate2, pose.upperRatio2,
+        };
+        if (std::any_of(std::begin(animationValues), std::end(animationValues),
+                        [](float value) { return !std::isfinite(value); })) {
             error = "pose contains non-finite animation state";
             return false;
         }
@@ -658,6 +696,36 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         parse_i16_array(state, "hat_rot_b", pose.hatRotB);
         parse_i16_array(state, "hat_swing", pose.hatSwing);
         pose.hatShapeY = state.value("hat_shape_y", 0);
+        pose.shapeAngleX = state.value("shape_angle_x", 0);
+        pose.shapeAngleZ = state.value("shape_angle_z", 0);
+        pose.bodyAngleX = state.value("body_angle_x", 0);
+        pose.bodyAngleY = state.value("body_angle_y", 0);
+        pose.bodyAngleZ = state.value("body_angle_z", 0);
+        pose.bodyTwistY = state.value("body_twist_y", 0);
+        pose.neckJointX = state.value("neck_joint_x", 0);
+        pose.neckJointY = state.value("neck_joint_y", 0);
+        pose.neckJointZ = state.value("neck_joint_z", 0);
+        pose.lowerJointX = state.value("lower_joint_x", 0);
+        pose.lowerJointZ = state.value("lower_joint_z", 0);
+        pose.rootJointX = state.value("root_joint_x", 0);
+        pose.rootJointZ = state.value("root_joint_z", 0);
+        pose.blendMode = state.value("blend_mode", 0);
+        pose.upperSavedRatio = state.value("upper_saved_ratio", 0.0f);
+        pose.bodyRootValid = state.value("body_root_valid", false);
+        pose.bodyRootX = state.value("body_root_x", 0.0f);
+        pose.bodyRootY = state.value("body_root_y", 0.0f);
+        pose.bodyRootZ = state.value("body_root_z", 0.0f);
+        if (!std::isfinite(pose.upperSavedRatio) ||
+            (pose.bodyRootValid &&
+             (!std::isfinite(pose.bodyRootX) || !std::isfinite(pose.bodyRootY) ||
+              !std::isfinite(pose.bodyRootZ)))) {
+            error = "pose contains non-finite body animation state";
+            return false;
+        }
+        parse_i16_array(state, "leg_ik_angles", pose.legIkAngles);
+        parse_i16_array(state, "arm_ik_angles", pose.armIkAngles);
+        parse_i16_array(state, "arm_rot_a", pose.armRotA);
+        parse_i16_array(state, "arm_rot_b", pose.armRotB);
         pose.isWolf = state.value("is_wolf", false);
         pose.isTransforming = state.value("is_transforming", false);
         pose.transformFromWolf = state.value("transform_from_wolf", pose.isWolf);
@@ -681,6 +749,8 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.shieldDraw = state.value("shield_draw", false);
         pose.shieldGuardActive = state.value("shield_guard_active", false);
         pose.swordOut = state.value("sword_out", false);
+        pose.swordHandAttached = state.value("sword_hand_attached", pose.swordOut);
+        pose.shieldHandAttached = state.value("shield_hand_attached", false);
         pose.midnaDraw = false;
         pose.midnaMaskDraw = false;
         pose.midnaHandDraw = false;
@@ -708,6 +778,43 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         error = std::string("invalid pose: ") + ex.what();
         return false;
     }
+}
+
+bool enforce_semantic_pose_invariants(PeerPoseSnapshot& pose, std::string& error) {
+    if (!pose.valid) {
+        error = "semantic pose is invalid";
+        return false;
+    }
+    if (pose.visualMode == PeerPoseSnapshot::VisualMode::Unknown) {
+        error = "semantic pose has no supported visual mode";
+        return false;
+    }
+    if (pose.visualMode == PeerPoseSnapshot::VisualMode::SemanticGameplay &&
+        pose.visualUnsupportedReasons != 0) {
+        error = "semantic pose has contradictory unsupported reasons";
+        return false;
+    }
+    if (pose.visualMode == PeerPoseSnapshot::VisualMode::HiddenUnsupported) {
+        pose.linkMatrices = {};
+        pose.linkMatricesFresh = false;
+        error.clear();
+        return true;
+    }
+
+    // Type-7 owns Link through semantic animation state. Only the inexpensive
+    // attachment slots 4..15 may remain matrix-driven.
+    pose.linkMatrices.body = {};
+    pose.linkMatrices.hat = {};
+    pose.linkMatrices.face = {};
+    pose.linkMatrices.hand = {};
+    pose.linkMatrices.midna = {};
+    pose.linkMatrices.midnaMask = {};
+    pose.linkMatrices.midnaHand = {};
+    pose.linkMatrices.midnaHair = {};
+    pose.linkMatrices.midnaGlow = {};
+    pose.linkMatrices.midnaHairShape = 0;
+    error.clear();
+    return true;
 }
 
 bool merge_midna_pose(const json& message, PeerPoseSnapshot& pose, std::string& error) {

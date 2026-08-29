@@ -30,6 +30,22 @@ int main() {
         decoded.sequence != 4 || decoded.message != small) {
         fail("small pose round trip mismatch");
     }
+    encoded = udp::encode_message(small, "direct1",
+                                  udp::PacketType::SemanticPoseMsgpack, &error);
+    decoder.reset();
+    decoded = decoder.accept(encoded.front().bytes);
+    if (decoded.kind != udp::DecodeKind::Message ||
+        decoded.type != udp::PacketType::SemanticPoseMsgpack || decoded.message != small) {
+        fail("semantic pose packet type round trip mismatch");
+    }
+    const auto semanticAck = udp::encode_ack(
+        "receiver", "direct1", udp::PacketType::SemanticPoseMsgpack, 4);
+    decoded = decoder.accept(semanticAck.bytes);
+    if (decoded.kind != udp::DecodeKind::Ack ||
+        decoded.ack.ackedType !=
+            static_cast<uint8_t>(udp::PacketType::SemanticPoseMsgpack)) {
+        fail("semantic pose acknowledgement round trip failed");
+    }
 
     nlohmann::json values = nlohmann::json::array();
     uint32_t state = 0x12345678U;

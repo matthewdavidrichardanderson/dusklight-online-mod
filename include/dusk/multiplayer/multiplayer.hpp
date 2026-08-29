@@ -113,6 +113,15 @@ struct PeerPoseSnapshot {
     std::string peerId;
     uint32_t sequence = 0;
     uint32_t ageTicks = 0;
+    // Sender-selected presentation intent. Older packets decode as Unknown and
+    // retain the receiver's conservative semantic-support checks.
+    enum class VisualMode : uint8_t {
+        Unknown = 0,
+        SemanticGameplay = 1,
+        HiddenUnsupported = 2,
+    };
+    VisualMode visualMode = VisualMode::Unknown;
+    uint32_t visualUnsupportedReasons = 0;
     std::string stage;
     int room = -1;
     int layer = -1;
@@ -133,15 +142,62 @@ struct PeerPoseSnapshot {
     bool manualSyncReady = false;
     float underFrame = 0.0f;
     int underBck0 = 0;
+    int underBckArc0 = 0xFFFF;
     float underFrame0 = 0.0f;
     float underRate0 = 1.0f;
+    float underRatio0 = 1.0f;
+    int underBck1 = 0;
+    int underBckArc1 = 0xFFFF;
+    float underFrame1 = 0.0f;
+    float underRate1 = 1.0f;
+    float underRatio1 = 0.0f;
+    int underBck2 = 0;
+    int underBckArc2 = 0xFFFF;
+    float underFrame2 = 0.0f;
+    float underRate2 = 1.0f;
+    float underRatio2 = 0.0f;
+    int upperBck0 = 0;
+    int upperBckArc0 = 0xFFFF;
+    float upperFrame0 = 0.0f;
+    float upperRate0 = 1.0f;
+    float upperRatio0 = 1.0f;
+    int upperBck1 = 0;
+    int upperBckArc1 = 0xFFFF;
+    float upperFrame1 = 0.0f;
+    float upperRate1 = 1.0f;
+    float upperRatio1 = 0.0f;
     int upperBck2 = 0;
+    int upperBckArc2 = 0xFFFF;
     float upperFrame2 = 0.0f;
     float upperRate2 = 1.0f;
+    float upperRatio2 = 0.0f;
     std::array<int16_t, 10> hatRotA{};
     std::array<int16_t, 10> hatRotB{};
     std::array<int16_t, 3> hatSwing{};
     int hatShapeY = 0;
+    int shapeAngleX = 0;
+    int shapeAngleZ = 0;
+    int bodyAngleX = 0;
+    int bodyAngleY = 0;
+    int bodyAngleZ = 0;
+    int bodyTwistY = 0;
+    int neckJointX = 0;
+    int neckJointY = 0;
+    int neckJointZ = 0;
+    int lowerJointX = 0;
+    int lowerJointZ = 0;
+    int rootJointX = 0;
+    int rootJointZ = 0;
+    int blendMode = 0;
+    float upperSavedRatio = 0.0f;
+    bool bodyRootValid = false;
+    float bodyRootX = 0.0f;
+    float bodyRootY = 0.0f;
+    float bodyRootZ = 0.0f;
+    std::array<int16_t, 6> legIkAngles{};
+    std::array<int16_t, 6> armIkAngles{};
+    std::array<int16_t, 6> armRotA{};
+    std::array<int16_t, 6> armRotB{};
     bool isWolf = false;
     bool isTransforming = false;
     bool transformFromWolf = false;
@@ -160,6 +216,8 @@ struct PeerPoseSnapshot {
     bool swordDraw = false;
     bool shieldDraw = false;
     bool shieldGuardActive = false;
+    bool swordHandAttached = false;
+    bool shieldHandAttached = false;
     bool swordOut = false;
     bool midnaDraw = false;
     bool midnaMaskDraw = false;
@@ -187,13 +245,15 @@ void configure_remote_actor_bridge(bool pvpEnabled, RemotePvpHitCallback pvpHit,
 void set_remote_pvp_hit_callback(RemotePvpHitCallback callback);
 void set_remote_bomb_actor_callback(RemoteBombActorCallback callback);
 void set_remote_actor_options(bool displayMidna, bool syncWorld,
-                              bool remoteCollision, bool pvpEnabled);
+                              bool remoteCollision, bool pvpEnabled,
+                              bool semanticRenderingExperiment);
 void set_remote_bomb_object(const RemoteBombObjectSnapshot& object);
 void erase_remote_actor_peer(const std::string& peerId);
 void reset_remote_actor_bridge();
 bool pvp_enabled();
 bool display_remote_midna_enabled();
 bool remote_collision_enabled();
+bool semantic_rendering_experiment_enabled();
 bool get_remote_bomb_object_for_peer(const std::string& peerId,
                                      RemoteBombObjectSnapshot* out);
 void report_remote_link_pvp_target_hit(fopAc_ac_c* remoteLinkActor,

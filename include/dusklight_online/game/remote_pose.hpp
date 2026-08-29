@@ -13,6 +13,12 @@ bool decode_peer_pose(const nlohmann::json& message, const std::string& peerId,
                       dusk::multiplayer::PeerPoseSnapshot& output,
                       std::string& error);
 
+// Apply the fail-closed representation contract after decoding a type-7
+// semantic pose. Full-body slots are never valid semantic input; hidden poses
+// carry no matrix presentation at all.
+bool enforce_semantic_pose_invariants(dusk::multiplayer::PeerPoseSnapshot& pose,
+                                      std::string& error);
+
 bool merge_midna_pose(const nlohmann::json& message,
                       dusk::multiplayer::PeerPoseSnapshot& pose,
                       std::string& error);

@@ -235,15 +235,29 @@ static void zeroColor(GXColorS10* o_color) {
 }
 
 static void setRemoteMatrixWorldAxisRot(daRemoteLink_c* i_actor, MtxP i_mtx, s16 i_rotX,
-                                        s16 i_rotY, s16 i_rotZ) {
+                                        s16 i_rotY, s16 i_rotZ,
+                                        const cXyz* i_originOverride = NULL) {
     cXyz origin;
     mDoMtx_multVecZero(i_mtx, &origin);
-    mDoMtx_stack_c::transS(origin);
+    mDoMtx_stack_c::transS(i_originOverride != NULL ? *i_originOverride : origin);
     mDoMtx_stack_c::YrotM(i_actor->shape_angle.y);
     mDoMtx_stack_c::ZXYrotM(i_rotX, i_rotY, i_rotZ);
     mDoMtx_stack_c::YrotM(-i_actor->shape_angle.y);
     mDoMtx_stack_c::transM(-origin.x, -origin.y, -origin.z);
     mDoMtx_stack_c::concat(i_mtx);
+    mDoMtx_copy(mDoMtx_stack_c::get(), i_mtx);
+}
+
+static void setRemoteNeckRot(MtxP i_mtx, s16 i_neckX, s16 i_neckY,
+                             s16 i_neckZ) {
+    // daAlink_c::jointControll applies joint 4 in the joint's own basis:
+    // field_0x3124.y around Y, .x around Z, then .z around X. Applying these
+    // through Link's world-axis helper mirrors attention yaw. The same local
+    // ordering is used by vanilla human and wolf Link.
+    mDoMtx_stack_c::copy(i_mtx);
+    mDoMtx_stack_c::YrotM(-i_neckY);
+    mDoMtx_stack_c::ZrotM(i_neckX);
+    mDoMtx_stack_c::XrotM(i_neckZ);
     mDoMtx_copy(mDoMtx_stack_c::get(), i_mtx);
 }
 
@@ -257,6 +271,14 @@ static int daRemoteLink_headModelCallBack(J3DJoint* i_joint, int i_after) {
     if (link != NULL) {
         link->headModelCallBack(i_joint->getJntNo());
     }
+    return 1;
+}
+
+static int daRemoteLink_bodyModelCallBack(J3DJoint* i_joint, int i_after) {
+    if (i_after != 0 || i_joint == NULL) return 1;
+    daRemoteLink_c* link =
+        reinterpret_cast<daRemoteLink_c*>(j3dSys.getModel()->getUserArea());
+    if (link != NULL) link->bodyModelCallBack(i_joint->getJntNo());
     return 1;
 }
 
@@ -645,7 +667,22 @@ daRemoteLink_c::daRemoteLink_c()
       mpMagicArmorBodyBrk(NULL),
       mpMagicArmorHeadBrk(NULL),
       mpMotionBck(NULL),
+      mpBlendMtxCalc(NULL),
+      mpUpperBlendMtxCalc(NULL),
+      mpOldFrameCalc(NULL),
+      mOldFrameTransInfo(),
+      mOldFrameQuats(),
+      mBlendAnmPacks(),
+      mBlendSlotBck{0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+      mBlendSlotFrame(),
+      mBlendSlotFrameValid(),
+      mBlendSlotPresentedRatio(),
+      mBlendSignatureValid(false),
+      mLastBlendProcId(-1),
+      mLastBlendUnderBck{0xFFFF, 0xFFFF, 0xFFFF},
+      mLastBlendUpperBck{0xFFFF, 0xFFFF, 0xFFFF},
       mBckCache(),
+      mBlendBckCache(),
       mMotionBckResId(0),
       mRemoteMoveSpeed(0.0f),
       mLastRemotePos(),
@@ -657,11 +694,59 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteProcVar5(0),
       mRemoteUnderFrame(0.0f),
       mRemoteUnderBck0(0),
+      mRemoteUnderBckArc0(0xFFFF),
       mRemoteUnderFrame0(0.0f),
       mRemoteUnderRate0(1.0f),
+      mRemoteUnderRatio0(1.0f),
+      mRemoteUnderBck1(0),
+      mRemoteUnderBckArc1(0xFFFF),
+      mRemoteUnderFrame1(0.0f),
+      mRemoteUnderRate1(1.0f),
+      mRemoteUnderRatio1(0.0f),
+      mRemoteUnderBck2(0),
+      mRemoteUnderBckArc2(0xFFFF),
+      mRemoteUnderFrame2(0.0f),
+      mRemoteUnderRate2(1.0f),
+      mRemoteUnderRatio2(0.0f),
+      mRemoteUpperBck0(0),
+      mRemoteUpperBckArc0(0xFFFF),
+      mRemoteUpperFrame0(0.0f),
+      mRemoteUpperRate0(1.0f),
+      mRemoteUpperRatio0(1.0f),
+      mRemoteUpperBck1(0),
+      mRemoteUpperBckArc1(0xFFFF),
+      mRemoteUpperFrame1(0.0f),
+      mRemoteUpperRate1(1.0f),
+      mRemoteUpperRatio1(0.0f),
       mRemoteUpperBck2(0),
+      mRemoteUpperBckArc2(0xFFFF),
       mRemoteUpperFrame2(0.0f),
       mRemoteUpperRate2(1.0f),
+      mRemoteUpperRatio2(0.0f),
+      mRemoteShapeX(0),
+      mRemoteShapeZ(0),
+      mRemoteBodyAngleX(0),
+      mRemoteBodyAngleY(0),
+      mRemoteBodyAngleZ(0),
+      mRemoteBodyTwistY(0),
+      mRemoteNeckJointX(0),
+      mRemoteNeckJointY(0),
+      mRemoteNeckJointZ(0),
+      mRemoteLowerJointX(0),
+      mRemoteLowerJointZ(0),
+      mRemoteRootJointX(0),
+      mRemoteRootJointZ(0),
+      mRemoteBlendMode(0),
+      mRemoteUpperSavedRatio(0.0f),
+      mPrevRemoteBodyRootValid(false),
+      mPrevRemoteBodyRoot(0.0f, 0.0f, 0.0f),
+      mRemoteBodyRootValid(false),
+      mRemoteBodyRoot(0.0f, 0.0f, 0.0f),
+      mRemoteLegIkAngles(),
+      mRemoteArmIkAngles(),
+      mRemoteArmRotA(),
+      mRemoteArmRotB(),
+      mRemoteAnimationFrameCorrectionPending(false),
       mRemoteHatRotA(),
       mRemoteHatRotB(),
       mRemoteHatSwing(),
@@ -677,6 +762,8 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteSwordDraw(false),
       mRemoteShieldDraw(false),
       mRemoteShieldGuardActive(false),
+      mRemoteSwordHandAttached(false),
+      mRemoteShieldHandAttached(false),
       mRemoteSwordOut(false),
       mRemoteHeavyBoots(false),
       mRemoteMidnaDraw(false),
@@ -705,6 +792,8 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteKanteraDraw(false),
       mHasRemotePose(false),
       mHasRemoteMatrices(false),
+      mHasRemoteAttachmentMatrices(false),
+      mRemoteAttachmentMatrices(),
       mClothesVariant(0),
       mpLeftBodyHandShape(NULL),
       mpRightBodyHandShape(NULL),
@@ -733,6 +822,15 @@ daRemoteLink_c::daRemoteLink_c()
       mSwordMatrixInterp(),
       mSheathMatrixInterp(),
       mShieldMatrixInterp(),
+      mHeldItemMatrixInterp(),
+      mHookTipMatrixInterp(),
+      mHookSubItemMatrixInterp(),
+      mHookSubTipMatrixInterp(),
+      mArrowMatrixInterp(),
+      mKanteraMatrixInterp(),
+      mKanteraGlowMatrixInterp(),
+      mItemActorMatrixInterp(),
+      mRideActorMatrixInterp(),
       mMidnaMatrixInterp(),
       mMidnaMaskMatrixInterp(),
       mMidnaHandMatrixInterp(),
@@ -741,6 +839,7 @@ daRemoteLink_c::daRemoteLink_c()
       mPvpTargetStts(),
       mPvpTargetCyl(),
       mPvpTargetCollisionInitialized(false),
+      mRemotePresentationVisible(true),
       mPvpShieldFrontAngle(0),
       mPvpMidnaBindIds(),
       mPvpMidnaBindActive(false),
@@ -1199,7 +1298,10 @@ void daRemoteLink_c::setupHumanKokiriModel() {
     mpRightBodyHandShape = getMaterialShape(bodyData, 12);
     hideAllHandShapes();
 
-    mpBodyModel->setUserArea(0);
+    mpBodyModel->setUserArea((uintptr_t)this);
+    for (u16 i = 0; bodyData != NULL && i < bodyData->getJointNum(); ++i) {
+        bodyData->getJointNodePointer(i)->setCallBack(daRemoteLink_bodyModelCallBack);
+    }
     mpHeadModel->setUserArea((uintptr_t)this);
     J3DModelData* headData = mpHeadModel->getModelData();
     for (u16 i = 1; headData != NULL && i < headData->getJointNum(); ++i) {
@@ -1221,7 +1323,6 @@ void daRemoteLink_c::setupHumanKokiriModel() {
     }
 
     setupHeavyBootModels();
-    setupShadowMidnaModels();
 
     if (sCreateLogCount < 2 || mClothesVariant == 3) {
         daAlink_c* localLink = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
@@ -1278,29 +1379,15 @@ void daRemoteLink_c::setupWolfModel() {
         return;
     }
 
-    mpBodyModel->setUserArea(0);
-    mpMidnaModel = initModel(static_cast<J3DModelData*>(
-                                 mountOwnedArchive()
-                                     ? convertOwnedObjectRes(dRes_ID_WMDL_BMD_MD_e)
-                                     : NULL),
-                             0x1020200);
-    mpMidnaMaskModel = initModel(static_cast<J3DModelData*>(
-                                     mountOwnedArchive()
-                                         ? convertOwnedObjectRes(dRes_ID_WMDL_BMD_MD_MASK_e)
-                                         : NULL),
-                                 0x1000000);
-    mpMidnaHandModel = initModel(static_cast<J3DModelData*>(
-                                     mountOwnedArchive()
-                                         ? convertOwnedObjectRes(dRes_ID_WMDL_BMD_MD_HANDS_e)
-                                         : NULL),
-                                 0x1000000);
-    mpMidnaHairModel = initModel(static_cast<J3DModelData*>(
-                                     mountOwnedArchive()
-                                         ? convertOwnedObjectRes(dRes_ID_WMDL_BMD_MD_HAIR_HAND_e)
-                                         : NULL),
-                                 0x1000000);
-    applyRideMidnaShapeVisibility(mpMidnaHandModel, mpMidnaHairModel, mMidnaHairShape);
-    setupShadowMidnaModels();
+    // The matrix-streamed remote actor never needed wolf joint callbacks.
+    // Semantic rendering does need vanilla's procedural attention turn on
+    // neck joint 4. Register only that joint so human-only IK/body rules are
+    // not applied to the wolf skeleton.
+    mpBodyModel->setUserArea((uintptr_t)this);
+    J3DModelData* bodyData = mpBodyModel->getModelData();
+    if (bodyData != NULL && bodyData->getJointNum() > 4) {
+        bodyData->getJointNodePointer(4)->setCallBack(daRemoteLink_bodyModelCallBack);
+    }
 
     if (sCreateLogCount < 2 || mVisualState.form == FORM_WOLF) {
         daAlink_c* localLink = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
@@ -1308,14 +1395,11 @@ void daRemoteLink_c::setupWolfModel() {
             localLink != NULL && localLink->mpLinkModel != NULL
                 ? localLink->mpLinkModel->getModelData()
                 : NULL;
-        J3DModelData* bodyData = mpBodyModel->getModelData();
         DuskLog.info(
             "RemoteLink: wolf model arc={} body={} bodyData={} localBodyData={} "
-            "sharesLocalBodyData={} bodyJoints={} bodyMaterials={} midna={} mask={} hand={} hair={}",
+            "sharesLocalBodyData={} bodyJoints={} bodyMaterials={}",
             getCurrentArcName(), (void*)mpBodyModel, (void*)bodyData, (void*)localBodyData,
-            bodyData == localBodyData, bodyData->getJointNum(), bodyData->getMaterialNum(),
-            (void*)mpMidnaModel, (void*)mpMidnaMaskModel, (void*)mpMidnaHandModel,
-            (void*)mpMidnaHairModel);
+            bodyData == localBodyData, bodyData->getJointNum(), bodyData->getMaterialNum());
         if (sCreateLogCount < 2) {
             sCreateLogCount++;
         }
@@ -1805,7 +1889,10 @@ void daRemoteLink_c::setupLinkedItemModels() {
     }
 }
 
-J3DAnmTransform* daRemoteLink_c::loadMotionBck(u16 i_resId) {
+J3DAnmTransform* daRemoteLink_c::loadMotionBck(u16 i_resId, u8** o_buffer) {
+    if (o_buffer != NULL) {
+        *o_buffer = NULL;
+    }
     JKRArchive* anmArchive = dComIfGp_getAnmArchive();
     if (anmArchive == NULL || i_resId == 0) {
         return NULL;
@@ -1820,9 +1907,28 @@ J3DAnmTransform* daRemoteLink_c::loadMotionBck(u16 i_resId) {
         JKRReadIdxResource(bckBuffer, l_remoteLinkAnimBufferSize, i_resId, anmArchive);
     if (readSize == 0) {
         DuskLog.warn("RemoteLink: motion BCK read failed resId={}", i_resId);
+        JKR_DELETE_ARRAY(static_cast<u8*>(bckBuffer));
         return NULL;
     }
-    return static_cast<J3DAnmTransform*>(J3DAnmLoaderDataBase::load(bckBuffer));
+    J3DAnmTransform* bck =
+        static_cast<J3DAnmTransform*>(J3DAnmLoaderDataBase::load(bckBuffer));
+    if (bck == NULL) {
+        JKR_DELETE_ARRAY(static_cast<u8*>(bckBuffer));
+        return NULL;
+    }
+    if (o_buffer != NULL) {
+        *o_buffer = static_cast<u8*>(bckBuffer);
+    }
+    return bck;
+}
+
+void daRemoteLink_c::releaseBckCacheEntry(BckCacheEntry& i_entry) {
+    if (i_entry.buffer != NULL) {
+        JKR_DELETE_ARRAY(i_entry.buffer);
+    }
+    i_entry.resId = 0;
+    i_entry.buffer = NULL;
+    i_entry.bck = NULL;
 }
 
 J3DAnmTransform* daRemoteLink_c::getMotionBck(u16 i_resId) {
@@ -1834,11 +1940,13 @@ J3DAnmTransform* daRemoteLink_c::getMotionBck(u16 i_resId) {
 
     for (u32 i = 0; i < ARRAY_SIZE(mBckCache); ++i) {
         if (mBckCache[i].resId == 0) {
-            J3DAnmTransform* bck = loadMotionBck(i_resId);
+            u8* buffer = NULL;
+            J3DAnmTransform* bck = loadMotionBck(i_resId, &buffer);
             if (bck == NULL) {
                 return NULL;
             }
             mBckCache[i].resId = i_resId;
+            mBckCache[i].buffer = buffer;
             mBckCache[i].bck = bck;
             return bck;
         }
@@ -1846,6 +1954,31 @@ J3DAnmTransform* daRemoteLink_c::getMotionBck(u16 i_resId) {
 
     DuskLog.warn("RemoteLink: BCK cache full, could not load resId={}", i_resId);
     return NULL;
+}
+
+J3DAnmTransform* daRemoteLink_c::getBlendSlotBck(int i_slot, u16 i_resId) {
+    if (i_slot < 0 || i_slot >= static_cast<int>(ARRAY_SIZE(mBlendBckCache)) ||
+        !isValidRemoteBck(i_resId))
+    {
+        return NULL;
+    }
+
+    BckCacheEntry& entry = mBlendBckCache[i_slot];
+    if (entry.resId == i_resId && entry.bck != NULL) {
+        return entry.bck;
+    }
+
+    releaseBckCacheEntry(entry);
+    u8* buffer = NULL;
+    J3DAnmTransform* bck = loadMotionBck(i_resId, &buffer);
+    if (bck == NULL) {
+        return NULL;
+    }
+
+    entry.resId = i_resId;
+    entry.buffer = buffer;
+    entry.bck = bck;
+    return entry.bck;
 }
 
 bool daRemoteLink_c::setMotionBck(u16 i_resId, f32 i_speed) {
@@ -1893,6 +2026,279 @@ void daRemoteLink_c::setupMotionAnimation() {
 
     DuskLog.info("RemoteLink: motion BCK cache initialized form={} wait={}",
                  mVisualState.form == FORM_WOLF ? "wolf" : "human", (void*)waitBck);
+}
+
+bool daRemoteLink_c::configureBlendSlot(int i_slot, u16 i_bck, f32 i_frame, f32 i_rate,
+                                        f32 i_ratio) {
+    if (i_slot < 0 || i_slot >= 6) return false;
+    if (!isValidRemoteBck(i_bck)) {
+        mBlendAnmPacks[i_slot].setAnmTransform(NULL);
+        mBlendAnmPacks[i_slot].setRatio(0.0f);
+        mBlendSlotFrameValid[i_slot] = false;
+        mBlendSlotPresentedRatio[i_slot] = 0.0f;
+        return false;
+    }
+
+    // Each active blend slot owns a distinct animation object. J3D animation
+    // frame state is mutable, so sharing the ordinary resource cache lets one
+    // slot overwrite another slot's frame while the blend calculator is using
+    // it (notably during jump-attack transitions).
+    J3DAnmTransform* bck = getBlendSlotBck(i_slot, i_bck);
+    if (bck == NULL) {
+        mBlendAnmPacks[i_slot].setAnmTransform(NULL);
+        mBlendAnmPacks[i_slot].setRatio(0.0f);
+        mBlendSlotFrameValid[i_slot] = false;
+        mBlendSlotPresentedRatio[i_slot] = 0.0f;
+        return false;
+    }
+
+    (void)i_rate;
+    const f32 endFrame = bck->getFrameMax();
+    f32 frame = i_frame;
+    if (endFrame > 0.0f) {
+        if (bck->getAttribute() == J3DFrameCtrl::EMode_LOOP) {
+            while (frame < 0.0f) frame += endFrame;
+            while (frame > endFrame) frame -= endFrame;
+        } else {
+            frame = std::clamp(frame, 0.0f, endFrame);
+        }
+    }
+
+    bck->setFrame(frame);
+    mBlendSlotBck[i_slot] = i_bck;
+    mBlendSlotFrame[i_slot] = frame;
+    mBlendSlotFrameValid[i_slot] = true;
+    const f32 targetRatio = std::clamp(i_ratio, 0.0f, 1.0f);
+    const f32 ratio = targetRatio;
+    mBlendSlotPresentedRatio[i_slot] = ratio;
+    mBlendAnmPacks[i_slot].setAnmTransform(bck);
+    mBlendAnmPacks[i_slot].setRatio(ratio);
+    return true;
+}
+
+bool daRemoteLink_c::setupBlendAnimation() {
+    bool lowerSlots[3] = {
+        configureBlendSlot(0, mRemoteUnderBck0, mRemoteUnderFrame0, mRemoteUnderRate0,
+                           mRemoteUnderRatio0),
+        configureBlendSlot(1, mRemoteUnderBck1, mRemoteUnderFrame1, mRemoteUnderRate1,
+                           mRemoteUnderRatio1),
+        configureBlendSlot(2, mRemoteUnderBck2, mRemoteUnderFrame2, mRemoteUnderRate2,
+                           mRemoteUnderRatio2),
+    };
+    bool upperSlots[3] = {
+        configureBlendSlot(3, mRemoteUpperBck0, mRemoteUpperFrame0, mRemoteUpperRate0,
+                           mRemoteUpperRatio0),
+        configureBlendSlot(4, mRemoteUpperBck1, mRemoteUpperFrame1, mRemoteUpperRate1,
+                           mRemoteUpperRatio1),
+        configureBlendSlot(5, mRemoteUpperBck2, mRemoteUpperFrame2, mRemoteUpperRate2,
+                           mRemoteUpperRatio2),
+    };
+    const bool hasLower = lowerSlots[0] || lowerSlots[1] || lowerSlots[2];
+    const bool hasUpper = upperSlots[0] || upperSlots[1] || upperSlots[2];
+
+    // The engine blend calculator always dereferences element zero before it
+    // considers ratios or later elements. Link can legitimately transition
+    // with only slot 1/2 populated, so provide a harmless base alias rather
+    // than leaving the table's first transform null.
+    if (hasLower && !lowerSlots[0]) {
+        const int source = lowerSlots[1] ? 1 : 2;
+        mBlendAnmPacks[0].setAnmTransform(mBlendAnmPacks[source].getAnmTransform());
+        mBlendAnmPacks[0].setRatio(0.0f);
+    }
+    if (hasUpper && !upperSlots[0]) {
+        const int source = upperSlots[1] ? 4 : 5;
+        mBlendAnmPacks[3].setAnmTransform(mBlendAnmPacks[source].getAnmTransform());
+        mBlendAnmPacks[3].setRatio(0.0f);
+    }
+    mRemoteAnimationFrameCorrectionPending = false;
+    if (!hasLower || mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) return false;
+
+    if (mpOldFrameCalc == NULL || mpBlendMtxCalc == NULL || mpUpperBlendMtxCalc == NULL) {
+        JKRHeap* previousHeap = mDoExt_setCurrentHeap(mpArcHeap);
+        if (mpOldFrameCalc == NULL)
+            mpOldFrameCalc = JKR_NEW mDoExt_MtxCalcOldFrame(mOldFrameTransInfo, mOldFrameQuats);
+        if (mpBlendMtxCalc == NULL && mpOldFrameCalc != NULL)
+            mpBlendMtxCalc =
+                JKR_NEW mDoExt_MtxCalcAnmBlendTblOld(mpOldFrameCalc, 3, mBlendAnmPacks);
+        if (mpUpperBlendMtxCalc == NULL && mpOldFrameCalc != NULL)
+            mpUpperBlendMtxCalc =
+                JKR_NEW mDoExt_MtxCalcAnmBlendTblOld(mpOldFrameCalc, 3,
+                                                     &mBlendAnmPacks[3]);
+        mDoExt_setCurrentHeap(previousHeap);
+    }
+    if (mpBlendMtxCalc == NULL) return false;
+
+    const u16 currentUnderBck[3] = {
+        mRemoteUnderBck0, mRemoteUnderBck1, mRemoteUnderBck2,
+    };
+    const u16 currentUpperBck[3] = {
+        mRemoteUpperBck0, mRemoteUpperBck1, mRemoteUpperBck2,
+    };
+    bool underChanged = false;
+    bool upperChanged = false;
+    for (int i = 0; i < 3; ++i) {
+        underChanged = underChanged || currentUnderBck[i] != mLastBlendUnderBck[i];
+        upperChanged = upperChanged || currentUpperBck[i] != mLastBlendUpperBck[i];
+    }
+    const bool procChanged = mRemoteProcId != mLastBlendProcId;
+    if (mpOldFrameCalc != NULL && mBlendSignatureValid &&
+        (underChanged || upperChanged || procChanged)) {
+        mpOldFrameCalc->initOldFrameMorf(3.0f, underChanged || procChanged ? 0 : 16, 40);
+    }
+    mBlendSignatureValid = true;
+    mLastBlendProcId = mRemoteProcId;
+    for (int i = 0; i < 3; ++i) {
+        mLastBlendUnderBck[i] = currentUnderBck[i];
+        mLastBlendUpperBck[i] = currentUpperBck[i];
+    }
+
+    J3DModelData* bodyData = mpBodyModel->getModelData();
+    bodyData->getJointNodePointer(0)->setMtxCalc(mpBlendMtxCalc);
+    if (bodyData->getJointNum() > 16)
+        bodyData->getJointNodePointer(16)->setMtxCalc(mpBlendMtxCalc);
+    if (bodyData->getJointNum() > 1) {
+        bodyData->getJointNodePointer(1)->setMtxCalc(
+            hasUpper && mpUpperBlendMtxCalc != NULL ? mpUpperBlendMtxCalc : mpBlendMtxCalc);
+    }
+    return true;
+}
+
+void daRemoteLink_c::applyRemoteChangeBlendRate(int i_jointNo) {
+    if (mRemoteBlendMode == 0) return;
+    const auto setUpper1 = [&](f32 ratio) {
+        mBlendAnmPacks[4].setRatio(std::clamp(ratio, 0.0f, 1.0f));
+    };
+    const auto setUpper2 = [&](f32 ratio) {
+        mBlendAnmPacks[5].setRatio(std::clamp(ratio, 0.0f, 1.0f));
+    };
+    const auto setDouble = [&](f32 ratio) {
+        setUpper1(ratio);
+        setUpper2(1.0f - ratio);
+    };
+    switch (mRemoteBlendMode) {
+    case 1:
+        if (i_jointNo == 0) setUpper2(0.0f);
+        else if (i_jointNo == 5) setUpper2(mRemoteUpperSavedRatio);
+        break;
+    case 2:
+        if (i_jointNo == 10) setUpper2(0.0f);
+        else if (i_jointNo == 15) setUpper2(mRemoteUpperSavedRatio);
+        break;
+    case 3:
+        if (i_jointNo == 4) setUpper2(0.0f);
+        else if (i_jointNo == 5) setUpper2(mRemoteUpperSavedRatio);
+        break;
+    case 4:
+        if (i_jointNo == 0) setUpper2(0.0f);
+        else if (i_jointNo == 13) setUpper2(mRemoteUpperSavedRatio);
+        break;
+    case 5:
+        if (i_jointNo == 0 || i_jointNo == 10) setUpper2(0.0f);
+        else if (i_jointNo == 5 || i_jointNo == 15) setUpper2(mRemoteUpperSavedRatio);
+        break;
+    case 6:
+        if (i_jointNo == 4) setDouble(1.0f);
+        else if (i_jointNo == 5) setDouble(0.0f);
+        break;
+    case 7:
+        if (i_jointNo == 0 || i_jointNo == 5) setUpper2(0.0f);
+        else if (i_jointNo == 4 || i_jointNo == 15) setUpper2(1.0f);
+        break;
+    case 8:
+        if (i_jointNo == 4) { setUpper2(0.0f); setUpper1(1.0f); }
+        else if (i_jointNo == 5) { setUpper2(mRemoteUpperSavedRatio); setUpper1(0.0f); }
+        break;
+    default:
+        break;
+    }
+}
+
+void daRemoteLink_c::applyRemoteFootMatrix() {
+    if (mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 26) return;
+    static const u16 joints[] = {0x12, 0x17};
+    static const Vec leg1 = {30.0f, 0.0f, 0.0f};
+    static const Vec leg2 = {39.363499f, 0.0f, 0.0f};
+    static const Vec foot = {14.18f, 0.0f, 0.0f};
+    for (int i = 0; i < 2; ++i) {
+        u16 joint = joints[i];
+        const size_t base = static_cast<size_t>(i) * 3;
+        cXyz chainPos;
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(joint),
+                                    mRemoteLegIkAngles[base + 2], 0, 0);
+        mDoMtx_stack_c::multVec(&leg1, &chainPos);
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint),
+                                    mRemoteLegIkAngles[base + 1], 0, 0, &chainPos);
+        mDoMtx_stack_c::multVec(&leg2, &chainPos);
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint),
+                                    mRemoteLegIkAngles[base], 0, 0, &chainPos);
+        mDoMtx_stack_c::multVec(&foot, &chainPos);
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint),
+                                    mRemoteLegIkAngles[base], 0, 0, &chainPos);
+    }
+}
+
+void daRemoteLink_c::applyRemoteArmMatrix() {
+    if (mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 15) return;
+    static const u16 joints[] = {7, 12};
+    static const Vec arm1 = {29.0f, 0.0f, 0.0f};
+    static const Vec arm2 = {26.5f, 0.0f, 0.0f};
+    for (int i = 0; i < 2; ++i) {
+        u16 joint = joints[i];
+        const size_t base = static_cast<size_t>(i) * 3;
+        cXyz chainPos;
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(joint), 0, 0,
+                                    mRemoteArmIkAngles[base + 2]);
+        mDoMtx_stack_c::ZXYrotM(csXyz(mRemoteArmRotA[base], mRemoteArmRotA[base + 1],
+                                      mRemoteArmRotA[base + 2]));
+        mDoMtx_copy(mDoMtx_stack_c::get(), mpBodyModel->getAnmMtx(joint));
+        mDoMtx_stack_c::multVec(&arm1, &chainPos);
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), 0, 0,
+                                    mRemoteArmIkAngles[base + 1], &chainPos);
+        mDoMtx_stack_c::ZXYrotM(csXyz(mRemoteArmRotB[base], mRemoteArmRotB[base + 1],
+                                      mRemoteArmRotB[base + 2]));
+        mDoMtx_copy(mDoMtx_stack_c::get(), mpBodyModel->getAnmMtx(joint));
+        mDoMtx_stack_c::multVec(&arm2, &chainPos);
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), 0, 0,
+                                    mRemoteArmIkAngles[base], &chainPos);
+    }
+}
+
+int daRemoteLink_c::bodyModelCallBack(int i_jointNo) {
+    if (mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) return 1;
+    if (i_jointNo == 0 && (mRemoteRootJointX != 0 || mRemoteRootJointZ != 0)) {
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(0),
+                                    mRemoteRootJointX, 0, mRemoteRootJointZ);
+        mDoMtx_copy(mpBodyModel->getAnmMtx(0), J3DSys::mCurrentMtx);
+    } else if (i_jointNo == 1 &&
+               (mRemoteBodyAngleX != 0 || mRemoteBodyTwistY != 0 ||
+                mRemoteBodyAngleZ != 0)) {
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(1),
+                                    mRemoteBodyAngleX, mRemoteBodyTwistY,
+                                    mRemoteBodyAngleZ);
+        mDoMtx_copy(mpBodyModel->getAnmMtx(1), J3DSys::mCurrentMtx);
+    } else if (i_jointNo == 2 && mRemoteBodyTwistY != 0) {
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(2), 0,
+                                    mRemoteBodyTwistY, 0);
+        mDoMtx_copy(mpBodyModel->getAnmMtx(2), J3DSys::mCurrentMtx);
+    } else if (i_jointNo == 4 &&
+               (mRemoteNeckJointX != 0 || mRemoteNeckJointY != 0 ||
+                mRemoteNeckJointZ != 0)) {
+        setRemoteNeckRot(mpBodyModel->getAnmMtx(4), mRemoteNeckJointX,
+                         mRemoteNeckJointY, mRemoteNeckJointZ);
+        mDoMtx_copy(mpBodyModel->getAnmMtx(4), J3DSys::mCurrentMtx);
+    } else if (i_jointNo == 16 &&
+               (mRemoteLowerJointX != 0 || mRemoteLowerJointZ != 0)) {
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(16), 0,
+                                    -mRemoteLowerJointZ, mRemoteLowerJointX);
+        mDoMtx_copy(mpBodyModel->getAnmMtx(16), J3DSys::mCurrentMtx);
+    } else if (i_jointNo == 26) {
+        applyRemoteFootMatrix();
+        applyRemoteArmMatrix();
+    }
+    applyRemoteChangeBlendRate(i_jointNo);
+    return 1;
 }
 
 u16 daRemoteLink_c::selectActionBck(f32* o_speed) {
@@ -2152,10 +2558,35 @@ void daRemoteLink_c::updateMotionAnimation() {
         }
 
         mRemoteTransformFrameValid = false;
-        if (bckResId == mRemoteUpperBck2) {
-            mpMotionBck->setFrame(mRemoteUpperFrame2);
-        } else if (bckResId == mRemoteUnderBck0) {
-            mpMotionBck->setFrame(mRemoteUnderFrame0);
+        const f32 targetFrame = bckResId == mRemoteUpperBck2 ?
+                                    mRemoteUpperFrame2 : mRemoteUnderFrame0;
+        if (bckChanged) {
+            mpMotionBck->setFrame(targetFrame);
+            mRemoteAnimationFrameCorrectionPending = false;
+        } else if (mRemoteAnimationFrameCorrectionPending) {
+            f32 currentFrame = mpMotionBck->getFrame();
+            const f32 endFrame = mpMotionBck->getEndFrame();
+            f32 frameDelta = targetFrame - currentFrame;
+            if (endFrame > 0.0f) {
+                const f32 halfRange = endFrame * 0.5f;
+                if (frameDelta > halfRange) {
+                    frameDelta -= endFrame;
+                } else if (frameDelta < -halfRange) {
+                    frameDelta += endFrame;
+                }
+            }
+
+            if (std::fabs(frameDelta) > 8.0f) {
+                currentFrame = targetFrame;
+            } else {
+                currentFrame += frameDelta * 0.35f;
+                if (endFrame > 0.0f) {
+                    while (currentFrame < 0.0f) currentFrame += endFrame;
+                    while (currentFrame > endFrame) currentFrame -= endFrame;
+                }
+            }
+            mpMotionBck->setFrame(currentFrame);
+            mRemoteAnimationFrameCorrectionPending = false;
         }
     }
 }
@@ -2292,7 +2723,8 @@ void daRemoteLink_c::updatePvpTargetCollision() {
         return;
     }
 
-    if (!dusk::multiplayer::pvp_enabled() || isRemoteLinkSceneUnsafe() ||
+    if (!mRemotePresentationVisible || !dusk::multiplayer::pvp_enabled() ||
+        isRemoteLinkSceneUnsafe() ||
         isRemotePvpKnockdownProc(mRemoteProcId) || isRemoteDeadProc(mRemoteProcId))
     {
         mPvpTargetCyl.OffTgSetBit();
@@ -2360,8 +2792,8 @@ void daRemoteLink_c::updatePvpAttentionTarget() {
     // very long-range preset previously used here.
     attention_info.distances[fopAc_attn_BATTLE_e] = 3;
 
-    if (mHasRemotePose && dusk::multiplayer::pvp_enabled() && !isRemoteLinkSceneUnsafe() &&
-        !isRemoteDeadProc(mRemoteProcId))
+    if (mRemotePresentationVisible && mHasRemotePose && dusk::multiplayer::pvp_enabled() &&
+        !isRemoteLinkSceneUnsafe() && !isRemoteDeadProc(mRemoteProcId))
     {
         attention_info.flags = fopAc_AttnFlag_BATTLE_e;
     } else {
@@ -2372,7 +2804,8 @@ void daRemoteLink_c::updatePvpAttentionTarget() {
 void daRemoteLink_c::updatePvpMidnaBindEffect() {
     daPy_py_c* player = daPy_getPlayerActorClass();
     daMidna_c* midna = player != NULL ? player->getMidnaActor() : NULL;
-    const bool isLocked = mHasRemotePose && dusk::multiplayer::pvp_enabled() &&
+    const bool isLocked = mRemotePresentationVisible && mHasRemotePose &&
+                          dusk::multiplayer::pvp_enabled() &&
                           !isRemoteLinkSceneUnsafe() && midna != NULL &&
                           player->checkWolfLock(this);
     if (!isLocked) {
@@ -2491,7 +2924,7 @@ void daRemoteLink_c::applyHeavyBootMatrices() {
     mpHeavyBootModels[1]->setAnmMtx(3, bootMtx);
 }
 
-void daRemoteLink_c::applyWolfEquipmentMatrices() {
+void daRemoteLink_c::applyWolfEquipmentMatrices(bool i_presentation) {
     if (mVisualState.form != FORM_WOLF || mpBodyModel == NULL ||
         mpBodyModel->getModelData() == NULL ||
         mpBodyModel->getModelData()->getJointNum() <= 2)
@@ -2499,8 +2932,16 @@ void daRemoteLink_c::applyWolfEquipmentMatrices() {
         return;
     }
 
+    Mtx presentationBackMtx;
+    MtxP backMtx = mpBodyModel->getAnmMtx(2);
+    if (i_presentation &&
+        dusk::frame_interp::lookup_replacement(backMtx, presentationBackMtx))
+    {
+        backMtx = presentationBackMtx;
+    }
+
     if (mpSwordModel != NULL) {
-        mDoMtx_stack_c::copy(mpBodyModel->getAnmMtx(2));
+        mDoMtx_stack_c::copy(backMtx);
         mDoMtx_stack_c::transM(31.0f, -29.0f, 19.0f);
         mDoMtx_stack_c::XYZrotM(0, cM_deg2s(32.0f), cM_deg2s(157.0f));
         mpSwordModel->setBaseTRMtx(mDoMtx_stack_c::get());
@@ -2508,7 +2949,7 @@ void daRemoteLink_c::applyWolfEquipmentMatrices() {
     }
 
     if (mpSheathModel != NULL) {
-        mDoMtx_stack_c::copy(mpBodyModel->getAnmMtx(2));
+        mDoMtx_stack_c::copy(backMtx);
         mDoMtx_stack_c::transM(13.0f, -21.0f, 7.0f);
         mDoMtx_stack_c::XYZrotM(0, cM_deg2s(-0.8f), cM_deg2s(157.0f));
         mpSheathModel->setBaseTRMtx(mDoMtx_stack_c::get());
@@ -2516,7 +2957,7 @@ void daRemoteLink_c::applyWolfEquipmentMatrices() {
     }
 
     if (mpShieldModel != NULL) {
-        mDoMtx_stack_c::copy(mpBodyModel->getAnmMtx(2));
+        mDoMtx_stack_c::copy(backMtx);
         mDoMtx_stack_c::transM(11.0f, -18.0f, -13.0f);
         mDoMtx_stack_c::XYZrotM(cM_deg2s(90.0f), cM_deg2s(58.0f), cM_deg2s(-24.0f));
         mpShieldModel->setBaseTRMtx(mDoMtx_stack_c::get());
@@ -2565,19 +3006,108 @@ int daRemoteLink_c::headModelCallBack(int i_jointNo) {
     return 1;
 }
 
+void daRemoteLink_c::alignSemanticBodyRootToRemoteRoot() {
+    if (!mRemoteBodyRootValid || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL)
+    {
+        return;
+    }
+
+    MtxP root = mpBodyModel->getAnmMtx(0);
+    const cXyz delta(mRemoteBodyRoot.x - root[0][3],
+                     mRemoteBodyRoot.y - root[1][3],
+                     mRemoteBodyRoot.z - root[2][3]);
+    if (std::fabs(delta.x) < 0.001f && std::fabs(delta.y) < 0.001f &&
+        std::fabs(delta.z) < 0.001f)
+    {
+        return;
+    }
+
+    J3DModelData* data = mpBodyModel->getModelData();
+    for (u16 i = 0; i < data->getJointNum(); ++i) {
+        MtxP joint = mpBodyModel->getAnmMtx(i);
+        joint[0][3] += delta.x;
+        joint[1][3] += delta.y;
+        joint[2][3] += delta.z;
+    }
+    for (u16 i = 0; i < data->getWEvlpMtxNum(); ++i) {
+        MtxP weight = mpBodyModel->getWeightAnmMtx(i);
+        weight[0][3] += delta.x;
+        weight[1][3] += delta.y;
+        weight[2][3] += delta.z;
+    }
+}
+
+void daRemoteLink_c::alignSemanticBodyRootForPresentation() {
+    if (mHasRemoteMatrices || !mRemoteBodyRootValid || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL)
+    {
+        return;
+    }
+
+    Mtx interpolatedRoot;
+    MtxP root = mpBodyModel->getAnmMtx(0);
+    if (!dusk::frame_interp::lookup_replacement(root, interpolatedRoot)) {
+        return;
+    }
+
+    cXyz target = mRemoteBodyRoot;
+    if (mPrevRemoteBodyRootValid) {
+        static f32 const kMaxInterpolatedRootMoveSq = 400.0f * 400.0f;
+        if ((mRemoteBodyRoot - mPrevRemoteBodyRoot).abs2() <=
+            kMaxInterpolatedRootMoveSq)
+        {
+            const f32 alpha = std::clamp(
+                dusk::frame_interp::get_interpolation_step(), 0.0f, 1.0f);
+            const f32 invAlpha = 1.0f - alpha;
+            target.set(mPrevRemoteBodyRoot.x * invAlpha + mRemoteBodyRoot.x * alpha,
+                       mPrevRemoteBodyRoot.y * invAlpha + mRemoteBodyRoot.y * alpha,
+                       mPrevRemoteBodyRoot.z * invAlpha + mRemoteBodyRoot.z * alpha);
+        }
+    }
+
+    const cXyz delta(target.x - interpolatedRoot[0][3],
+                     target.y - interpolatedRoot[1][3],
+                     target.z - interpolatedRoot[2][3]);
+    J3DModelData* data = mpBodyModel->getModelData();
+    const auto alignReplacement = [&](MtxP source) {
+        Mtx replacement;
+        if (!dusk::frame_interp::lookup_replacement(source, replacement)) {
+            return;
+        }
+        replacement[0][3] += delta.x;
+        replacement[1][3] += delta.y;
+        replacement[2][3] += delta.z;
+        dusk::frame_interp::override_replacement(source, replacement);
+    };
+    for (u16 i = 0; i < data->getJointNum(); ++i) {
+        alignReplacement(mpBodyModel->getAnmMtx(i));
+    }
+    for (u16 i = 0; i < data->getWEvlpMtxNum(); ++i) {
+        alignReplacement(mpBodyModel->getWeightAnmMtx(i));
+    }
+}
+
 void daRemoteLink_c::calcModels() {
     if (mHasRemoteMatrices) {
         return;
     }
 
     if (mpMotionBck != NULL) {
-        updateMotionAnimation();
-        if (!isRemoteTransformProc(mRemoteProcId)) {
-            mpMotionBck->play();
+        if (!setupBlendAnimation()) {
+            updateMotionAnimation();
+            if (!isRemoteTransformProc(mRemoteProcId)) {
+                mpMotionBck->play();
+            }
+            mpMotionBck->entry(mpBodyModel->getModelData());
         }
-        mpMotionBck->entry(mpBodyModel->getModelData());
     }
     mpBodyModel->calc();
+
+    // The sender's final joint-zero matrix includes action-specific root
+    // placement that is not fully represented by actor position or the BCK.
+    // This matters for both wolf root motion and human ledge/jump/death poses.
+    alignSemanticBodyRootToRemoteRoot();
 
     if (mVisualState.form == FORM_WOLF) {
         if (mpMidnaModel != NULL) {
@@ -2609,6 +3139,8 @@ void daRemoteLink_c::calcModels() {
         mpHeadModel->calc();
     }
 
+    applyHumanEquipmentMatrices(false);
+
     if (mpHeldItemModel != NULL) {
         mpHeldItemModel->calc();
     }
@@ -2636,6 +3168,9 @@ void daRemoteLink_c::calcModels() {
     if (mpRideActorModel != NULL) {
         mpRideActorModel->calc();
     }
+    // Model calc rebuilds these props from their local defaults. Restore the
+    // most recent small attachment snapshots while Link's body stays semantic.
+    applyRemoteAttachmentMatrices();
 
     if (sCalcLogCount < 5 && mpHeadModel != NULL) {
         MtxP root = mpBodyModel->getAnmMtx(0);
@@ -2647,8 +3182,18 @@ void daRemoteLink_c::calcModels() {
 }
 
 int daRemoteLink_c::Execute() {
-    updatePvpAttentionTarget();
     if (isRemoteLinkSceneUnsafe()) {
+        updatePvpAttentionTarget();
+        mPvpMidnaBindActive = false;
+        stopRemoteActiveSounds();
+        return TRUE;
+    }
+
+    if (!mRemotePresentationVisible) {
+        if (mPvpTargetCollisionInitialized) {
+            mPvpTargetCyl.OffTgSetBit();
+            mPvpTargetCyl.ResetTgHit();
+        }
         mPvpMidnaBindActive = false;
         stopRemoteActiveSounds();
         return TRUE;
@@ -2674,6 +3219,9 @@ int daRemoteLink_c::Execute() {
         setBaseMtx();
         calcModels();
     }
+    // Model calc produces this simulation tick's neck matrix. Updating before
+    // calc leaves the target marker one complete tick behind the rendered body.
+    updatePvpAttentionTarget();
     updatePvpTargetCollision();
     updatePvpMidnaBindEffect();
     updateRemoteBombActor();
@@ -2713,11 +3261,22 @@ void daRemoteLink_c::setRemotePose(const cXyz& i_pos, s16 i_angleY, s8 i_roomNo)
 void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_procVar1,
                                           int i_procVar2, int i_procVar3, int i_procVar5,
                                           f32 i_underFrame, u16 i_underBck0, f32 i_underFrame0,
-                                          f32 i_underRate0, u16 i_upperBck2, f32 i_upperFrame2,
-                                          f32 i_upperRate2, u16 i_equipItem,
+                                          f32 i_underRate0, f32 i_underRatio0,
+                                          u16 i_underBck1, f32 i_underFrame1,
+                                          f32 i_underRate1, f32 i_underRatio1,
+                                          u16 i_underBck2, f32 i_underFrame2,
+                                          f32 i_underRate2, f32 i_underRatio2,
+                                          u16 i_upperBck0, f32 i_upperFrame0,
+                                          f32 i_upperRate0, f32 i_upperRatio0,
+                                          u16 i_upperBck1, f32 i_upperFrame1,
+                                          f32 i_upperRate1, f32 i_upperRatio1,
+                                          u16 i_upperBck2, f32 i_upperFrame2,
+                                          f32 i_upperRate2, f32 i_upperRatio2, u16 i_equipItem,
                                           int i_swordVariant, int i_shieldVariant,
                                           bool i_swordDraw, bool i_shieldDraw,
-                                          bool i_shieldGuardActive, bool i_swordOut,
+                                          bool i_shieldGuardActive,
+                                          bool i_swordHandAttached,
+                                          bool i_shieldHandAttached, bool i_swordOut,
                                           bool i_heavyBoots, bool i_itemDraw, bool i_kanteraDraw,
                                           bool i_midnaDraw, bool i_midnaMaskDraw,
                                           bool i_midnaHandDraw, bool i_midnaHairDraw,
@@ -2734,24 +3293,52 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
     mRemoteUnderBck0 = i_underBck0;
     mRemoteUnderFrame0 = i_underFrame0;
     mRemoteUnderRate0 = i_underRate0;
+    mRemoteUnderRatio0 = i_underRatio0;
+    mRemoteUnderBck1 = i_underBck1;
+    mRemoteUnderFrame1 = i_underFrame1;
+    mRemoteUnderRate1 = i_underRate1;
+    mRemoteUnderRatio1 = i_underRatio1;
+    mRemoteUnderBck2 = i_underBck2;
+    mRemoteUnderFrame2 = i_underFrame2;
+    mRemoteUnderRate2 = i_underRate2;
+    mRemoteUnderRatio2 = i_underRatio2;
+    mRemoteUpperBck0 = i_upperBck0;
+    mRemoteUpperFrame0 = i_upperFrame0;
+    mRemoteUpperRate0 = i_upperRate0;
+    mRemoteUpperRatio0 = i_upperRatio0;
+    mRemoteUpperBck1 = i_upperBck1;
+    mRemoteUpperFrame1 = i_upperFrame1;
+    mRemoteUpperRate1 = i_upperRate1;
+    mRemoteUpperRatio1 = i_upperRatio1;
     mRemoteUpperBck2 = i_upperBck2;
     mRemoteUpperFrame2 = i_upperFrame2;
     mRemoteUpperRate2 = i_upperRate2;
+    mRemoteUpperRatio2 = i_upperRatio2;
+    mRemoteAnimationFrameCorrectionPending = true;
     mRemoteEquipItem = i_equipItem;
     mRemoteSwordVariant = i_swordVariant;
     mRemoteShieldVariant = i_shieldVariant;
     mRemoteSwordDraw = i_swordDraw;
     mRemoteShieldDraw = i_shieldDraw;
     mRemoteShieldGuardActive = i_shieldGuardActive;
+    mRemoteSwordHandAttached = i_swordHandAttached;
+    mRemoteShieldHandAttached = i_shieldHandAttached;
     mRemoteSwordOut = i_swordOut;
     mRemoteHeavyBoots = i_heavyBoots;
     mRemoteItemDraw = i_itemDraw;
     mRemoteKanteraDraw = i_kanteraDraw;
-    mRemoteMidnaDraw = i_midnaDraw;
-    mRemoteMidnaMaskDraw = i_midnaMaskDraw;
-    mRemoteMidnaHandDraw = i_midnaHandDraw;
-    mRemoteMidnaHairDraw = i_midnaHairDraw;
-    mRemoteMidnaShadowForm = i_midnaShadowForm;
+    // Remote Midna is intentionally excluded from every visual mode. Keep the
+    // legacy arguments for source compatibility, but never accept their state.
+    (void)i_midnaDraw;
+    (void)i_midnaMaskDraw;
+    (void)i_midnaHandDraw;
+    (void)i_midnaHairDraw;
+    (void)i_midnaShadowForm;
+    mRemoteMidnaDraw = false;
+    mRemoteMidnaMaskDraw = false;
+    mRemoteMidnaHandDraw = false;
+    mRemoteMidnaHairDraw = false;
+    mRemoteMidnaShadowForm = false;
     if (mRemoteItemActorKind != i_itemActorKind && isRemoteBombActorKind(i_itemActorKind)) {
         mRemoteBombFlashTicks = 0;
         mRemoteBombExplosionSpawned = false;
@@ -2775,6 +3362,8 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
         mRemoteSwordDraw = false;
         mRemoteShieldDraw = false;
         mRemoteSwordOut = false;
+        mRemoteSwordHandAttached = false;
+        mRemoteShieldHandAttached = false;
         mRemoteHeavyBoots = false;
         mRemoteItemDraw = false;
         mRemoteKanteraDraw = false;
@@ -2803,6 +3392,17 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
     setupEquipmentModels();
     setupHeldItemModel();
     setupLinkedItemModels();
+}
+
+void daRemoteLink_c::setRemoteAnimationSourceState(u16 i_underArc0, u16 i_underArc1,
+                                                   u16 i_underArc2, u16 i_upperArc0,
+                                                   u16 i_upperArc1, u16 i_upperArc2) {
+    mRemoteUnderBckArc0 = i_underArc0;
+    mRemoteUnderBckArc1 = i_underArc1;
+    mRemoteUnderBckArc2 = i_underArc2;
+    mRemoteUpperBckArc0 = i_upperArc0;
+    mRemoteUpperBckArc1 = i_upperArc1;
+    mRemoteUpperBckArc2 = i_upperArc2;
 }
 
 void daRemoteLink_c::maybeSpawnRemoteBombExplosion(int i_nextItemActorKind) {
@@ -3219,9 +3819,24 @@ bool daRemoteLink_c::applyInterpolatedRemoteModelMatrices(
 
 void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
     if (mpHeadModel != NULL && mpBodyModel != NULL) {
-        mpHeadModel->setBaseTRMtx(mpBodyModel->getAnmMtx(4));
+        Mtx interpolatedNeckMtx;
+        MtxP presentationNeckMtx = mpBodyModel->getAnmMtx(4);
+        if (dusk::frame_interp::lookup_replacement(presentationNeckMtx,
+                                                   interpolatedNeckMtx)) {
+            presentationNeckMtx = interpolatedNeckMtx;
+        }
+        mpHeadModel->setBaseTRMtx(presentationNeckMtx);
         mpHeadModel->calc();
         overrideRemoteModelMatrices(mpHeadModel);
+
+        // In semantic mode the face is calculated locally rather than coming
+        // from a retained attachment snapshot. Re-anchor it to the same
+        // presentation-time neck as the head so neither model leads the body.
+        if (!mHasRemoteMatrices && mpFaceModel != NULL) {
+            mpFaceModel->setBaseTRMtx(presentationNeckMtx);
+            mpFaceModel->calc();
+            overrideRemoteModelMatrices(mpFaceModel);
+        }
     }
 
     applyInterpolatedRemoteModelMatrices(mpFaceModel, mFaceMatrixInterp, "face");
@@ -3231,12 +3846,37 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
         // offset. Rebuild it after the wolf body has been interpolated so the
         // sword, sheath, and shield follow the render-frame body pose instead
         // of remaining at their last simulation-frame matrices.
-        applyWolfEquipmentMatrices();
+        applyWolfEquipmentMatrices(true);
+    } else if (!mHasRemoteMatrices) {
+        applyHumanEquipmentMatrices(true);
     } else {
         applyInterpolatedRemoteModelMatrices(mpSwordModel, mSwordMatrixInterp, "sword");
         applyInterpolatedRemoteModelMatrices(mpSheathModel, mSheathMatrixInterp, "sheath");
         applyInterpolatedRemoteModelMatrices(mpShieldModel, mShieldMatrixInterp, "shield");
     }
+    if (!mHasRemoteMatrices && mHasRemoteAttachmentMatrices) {
+        // Per-slot validity is authoritative. A present streamed equipment
+        // matrix refines the semantic joint anchor; a missing slot simply
+        // leaves the locally reconstructed sword/sheath/shield in place.
+        applyInterpolatedRemoteModelMatrices(mpSwordModel, mSwordMatrixInterp, "sword");
+        applyInterpolatedRemoteModelMatrices(mpSheathModel, mSheathMatrixInterp, "sheath");
+        applyInterpolatedRemoteModelMatrices(mpShieldModel, mShieldMatrixInterp, "shield");
+    }
+
+    applyInterpolatedRemoteModelMatrices(mpHeldItemModel, mHeldItemMatrixInterp, "held_item");
+    applyInterpolatedRemoteModelMatrices(mpHookTipModel, mHookTipMatrixInterp, "hook_tip");
+    applyInterpolatedRemoteModelMatrices(mpHookSubItemModel, mHookSubItemMatrixInterp,
+                                         "hook_sub_item");
+    applyInterpolatedRemoteModelMatrices(mpHookSubTipModel, mHookSubTipMatrixInterp,
+                                         "hook_sub_tip");
+    applyInterpolatedRemoteModelMatrices(mpArrowModel, mArrowMatrixInterp, "arrow");
+    applyInterpolatedRemoteModelMatrices(mpKanteraModel, mKanteraMatrixInterp, "lantern");
+    applyInterpolatedRemoteModelMatrices(mpKanteraGlowModel, mKanteraGlowMatrixInterp,
+                                         "lantern_glow");
+    applyInterpolatedRemoteModelMatrices(mpItemActorModel, mItemActorMatrixInterp,
+                                         "item_actor");
+    applyInterpolatedRemoteModelMatrices(mpRideActorModel, mRideActorMatrixInterp,
+                                         "ride_actor");
 
     if (mRemoteMidnaShadowForm) {
         applyInterpolatedRemoteModelMatrices(mpShadowMidnaModel, mMidnaMatrixInterp, "midna");
@@ -3347,6 +3987,10 @@ void daRemoteLink_c::clearRemoteBodyMatrixInterpolation() {
 
 void daRemoteLink_c::applyRemoteBodyMatrixInterpolationForPresentation() {
     applyInterpolatedRemoteBodyMatrices();
+    alignSemanticBodyRootForPresentation();
+    // Attention markers are drawn during presentation, so anchor them after
+    // semantic/body replacement matrices have reached their render-frame pose.
+    updatePvpAttentionTarget();
     applyInterpolatedRemoteAttachments();
 }
 
@@ -3555,10 +4199,160 @@ void daRemoteLink_c::applyInterpolatedRemoteBodyMatrices() {
     model = mpBodyModel;
 }
 
+void daRemoteLink_c::applyRemoteAttachmentMatrices() {
+    if (!mHasRemoteAttachmentMatrices) return;
+    const auto& matrices = mRemoteAttachmentMatrices;
+    (void)copyRemoteModelMatrices(mpSwordModel, matrices.sword);
+    (void)copyRemoteModelMatrices(mpSheathModel, matrices.sheath);
+    (void)copyRemoteModelMatrices(mpShieldModel, matrices.shield);
+    mHeldItemMatrixValid =
+        mRemoteItemDraw && copyRemoteModelMatrices(mpHeldItemModel, matrices.heldItem);
+    mHookTipMatrixValid =
+        mRemoteItemDraw && copyRemoteModelMatrices(mpHookTipModel, matrices.hookTip);
+    mHookSubItemMatrixValid =
+        mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubItemModel, matrices.hookSubItem);
+    mHookSubTipMatrixValid =
+        mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubTipModel, matrices.hookSubTip);
+    mArrowMatrixValid =
+        mRemoteItemDraw && copyRemoteModelMatrices(mpArrowModel, matrices.arrow);
+    mKanteraMatrixValid =
+        mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraModel, matrices.kantera);
+    mKanteraGlowMatrixValid =
+        mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraGlowModel,
+                                                      matrices.kanteraGlow);
+    mItemActorMatrixValid = copyRemoteModelMatrices(mpItemActorModel, matrices.itemActor);
+    mRideActorMatrixValid = copyRemoteModelMatrices(mpRideActorModel, matrices.rideActor);
+}
+
+void daRemoteLink_c::applyHumanEquipmentMatrices(bool i_presentation) {
+    if (mVisualState.form == FORM_WOLF || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 15)
+    {
+        return;
+    }
+
+    const auto getJoint = [&](u16 joint, Mtx& output) {
+        MtxP source = mpBodyModel->getAnmMtx(joint);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, output))
+        {
+            MTXCopy(source, output);
+        }
+    };
+    const auto finishModel = [&](J3DModel* model) {
+        if (model == NULL) return;
+        model->calc();
+        if (i_presentation) overrideRemoteModelMatrices(model);
+    };
+
+    Mtx anchor;
+    if (mpSheathModel != NULL) {
+        getJoint(5, anchor);
+        mpSheathModel->setBaseTRMtx(anchor);
+        finishModel(mpSheathModel);
+    }
+
+    if (mpSwordModel != NULL) {
+        getJoint(mRemoteSwordHandAttached ? 10 : 5, anchor);
+        if (mRemoteSwordHandAttached) {
+            mpSwordModel->setBaseTRMtx(anchor);
+        } else {
+            mDoMtx_stack_c::copy(anchor);
+            mDoMtx_stack_c::transM(-18.5f, 0.14f, 12.2f);
+            mDoMtx_stack_c::XYZrotM(0, cM_deg2s(33.1f), 0);
+            mpSwordModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        }
+        finishModel(mpSwordModel);
+    }
+
+    if (mpShieldModel != NULL) {
+        getJoint(mRemoteShieldHandAttached ? 15 : 5, anchor);
+        if (mRemoteShieldHandAttached) {
+            mpShieldModel->setBaseTRMtx(anchor);
+        } else {
+            mDoMtx_stack_c::copy(anchor);
+            mDoMtx_stack_c::transM(4.2f, -4.4f, -20.0f);
+            mDoMtx_stack_c::XYZrotM(cM_deg2s(91.0f), cM_deg2s(57.0f),
+                                    cM_deg2s(180.0f));
+            mpShieldModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        }
+        finishModel(mpShieldModel);
+    }
+}
+
+void daRemoteLink_c::setRemoteAttachmentMatrices(
+    const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices) {
+    mHasRemoteAttachmentMatrices = i_matrices.valid;
+    if (!mHasRemoteAttachmentMatrices) {
+        mRemoteAttachmentMatrices = {};
+        mHeldItemMatrixValid = false;
+        mHookTipMatrixValid = false;
+        mHookSubItemMatrixValid = false;
+        mHookSubTipMatrixValid = false;
+        mArrowMatrixValid = false;
+        mKanteraMatrixValid = false;
+        mKanteraGlowMatrixValid = false;
+        mItemActorMatrixValid = false;
+        mRideActorMatrixValid = false;
+        clearRemoteModelMatrixInterpolation(mSwordMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mSheathMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mShieldMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mHookTipMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mHookSubItemMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mHookSubTipMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mArrowMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mKanteraMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mKanteraGlowMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mItemActorMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mRideActorMatrixInterp);
+        return;
+    }
+    mRemoteAttachmentMatrices = i_matrices;
+    applyRemoteAttachmentMatrices();
+
+    const auto capture = [&](J3DModel* model,
+                             const dusk::multiplayer::RemoteModelMatrixSnapshot& source,
+                             RemoteModelMatrixInterpState& state) {
+        if (source.valid && model != NULL) captureRemoteModelMatrixSnapshot(model, source, state);
+        else clearRemoteModelMatrixInterpolation(state);
+    };
+    capture(mpSwordModel, i_matrices.sword, mSwordMatrixInterp);
+    capture(mpSheathModel, i_matrices.sheath, mSheathMatrixInterp);
+    capture(mpShieldModel, i_matrices.shield, mShieldMatrixInterp);
+    capture(mpHeldItemModel, i_matrices.heldItem, mHeldItemMatrixInterp);
+    capture(mpHookTipModel, i_matrices.hookTip, mHookTipMatrixInterp);
+    capture(mpHookSubItemModel, i_matrices.hookSubItem, mHookSubItemMatrixInterp);
+    capture(mpHookSubTipModel, i_matrices.hookSubTip, mHookSubTipMatrixInterp);
+    capture(mpArrowModel, i_matrices.arrow, mArrowMatrixInterp);
+    capture(mpKanteraModel, i_matrices.kantera, mKanteraMatrixInterp);
+    capture(mpKanteraGlowModel, i_matrices.kanteraGlow, mKanteraGlowMatrixInterp);
+    capture(mpItemActorModel, i_matrices.itemActor, mItemActorMatrixInterp);
+    capture(mpRideActorModel, i_matrices.rideActor, mRideActorMatrixInterp);
+}
+
+void daRemoteLink_c::setRemotePresentationVisible(bool i_visible) {
+    if (mRemotePresentationVisible == i_visible) {
+        return;
+    }
+    mRemotePresentationVisible = i_visible;
+    if (!i_visible) {
+        attention_info.flags = 0;
+        if (mPvpTargetCollisionInitialized) {
+            mPvpTargetCyl.OffTgSetBit();
+            mPvpTargetCyl.ResetTgHit();
+        }
+        mPvpMidnaBindActive = false;
+        stopRemoteActiveSounds();
+    }
+}
+
 void daRemoteLink_c::setRemoteMatrices(
     const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices) {
-    if (!i_matrices.valid) {
+    if (!i_matrices.valid || !i_matrices.body.valid) {
         mHasRemoteMatrices = false;
+        setRemoteAttachmentMatrices({});
         clearRemoteBodyMatrixInterpolation();
         mHeldItemMatrixValid = false;
         mHookTipMatrixValid = false;
@@ -3577,6 +4371,9 @@ void daRemoteLink_c::setRemoteMatrices(
         mMidnaHairShape = 0;
         return;
     }
+
+    mHasRemoteAttachmentMatrices = false;
+    mRemoteAttachmentMatrices = {};
 
     const bool bodyCopied = copyRemoteModelMatrices(mpBodyModel, i_matrices.body);
     if (!bodyCopied) {
@@ -3688,94 +4485,18 @@ void daRemoteLink_c::setRemoteMatrices(
     }
     mRideActorMatrixValid = copyRemoteModelMatrices(mpRideActorModel,
                                                     i_matrices.rideActor);
-    if (mRemoteMidnaShadowForm) {
-        if (mpShadowMidnaModel == NULL) {
-            JKRHeap* previousHeap = mDoExt_setCurrentHeap(mpArcHeap);
-            setupShadowMidnaModels();
-            mDoExt_setCurrentHeap(previousHeap);
-        }
-        mMidnaMatrixValid =
-            mRemoteMidnaDraw && copyRemoteModelMatrices(mpShadowMidnaModel, i_matrices.midna);
-        if (mMidnaMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpShadowMidnaModel, i_matrices.midna,
-                                             mMidnaMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaMatrixInterp);
-        }
-        mMidnaMaskMatrixValid = mRemoteMidnaMaskDraw &&
-                                copyRemoteModelMatrices(mpShadowMidnaMaskModel,
-                                                        i_matrices.midnaMask);
-        if (mMidnaMaskMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpShadowMidnaMaskModel, i_matrices.midnaMask,
-                                             mMidnaMaskMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaMaskMatrixInterp);
-        }
-        mMidnaHandMatrixValid = mRemoteMidnaHandDraw &&
-                                copyRemoteModelMatrices(mpShadowMidnaHandModel,
-                                                        i_matrices.midnaHand);
-        if (mMidnaHandMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpShadowMidnaHandModel, i_matrices.midnaHand,
-                                             mMidnaHandMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaHandMatrixInterp);
-        }
-        mMidnaHairMatrixValid = mRemoteMidnaHairDraw &&
-                                copyRemoteModelMatrices(mpShadowMidnaHairModel,
-                                                        i_matrices.midnaHair);
-        if (mMidnaHairMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpShadowMidnaHairModel, i_matrices.midnaHair,
-                                             mMidnaHairMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaHairMatrixInterp);
-        }
-        mMidnaGlowMatrixValid = copyRemoteModelMatrices(mpMidnaGlowModel,
-                                                        i_matrices.midnaGlow);
-        if (mMidnaGlowMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpMidnaGlowModel, i_matrices.midnaGlow,
-                                             mMidnaGlowMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaGlowMatrixInterp);
-        }
-    } else {
-        mMidnaMatrixValid = mVisualState.form == FORM_WOLF && mRemoteMidnaDraw &&
-                            copyRemoteModelMatrices(mpMidnaModel, i_matrices.midna);
-        if (mMidnaMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpMidnaModel, i_matrices.midna, mMidnaMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaMatrixInterp);
-        }
-        mMidnaMaskMatrixValid = mVisualState.form == FORM_WOLF && mRemoteMidnaMaskDraw &&
-                                copyRemoteModelMatrices(mpMidnaMaskModel,
-                                                        i_matrices.midnaMask);
-        if (mMidnaMaskMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpMidnaMaskModel, i_matrices.midnaMask,
-                                             mMidnaMaskMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaMaskMatrixInterp);
-        }
-        mMidnaHandMatrixValid = mVisualState.form == FORM_WOLF && mRemoteMidnaHandDraw &&
-                                copyRemoteModelMatrices(mpMidnaHandModel,
-                                                        i_matrices.midnaHand);
-        if (mMidnaHandMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpMidnaHandModel, i_matrices.midnaHand,
-                                             mMidnaHandMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaHandMatrixInterp);
-        }
-        mMidnaHairMatrixValid = mVisualState.form == FORM_WOLF && mRemoteMidnaHairDraw &&
-                                copyRemoteModelMatrices(mpMidnaHairModel,
-                                                        i_matrices.midnaHair);
-        if (mMidnaHairMatrixValid) {
-            captureRemoteModelMatrixSnapshot(mpMidnaHairModel, i_matrices.midnaHair,
-                                             mMidnaHairMatrixInterp);
-        } else {
-            clearRemoteModelMatrixInterpolation(mMidnaHairMatrixInterp);
-        }
-        mMidnaGlowMatrixValid = false;
-        clearRemoteModelMatrixInterpolation(mMidnaGlowMatrixInterp);
-    }
-    mMidnaHairShape = i_matrices.midnaHairShape;
+    // Ignore legacy incoming Midna slots in both full-matrix and semantic modes.
+    mMidnaMatrixValid = false;
+    mMidnaMaskMatrixValid = false;
+    mMidnaHandMatrixValid = false;
+    mMidnaHairMatrixValid = false;
+    mMidnaGlowMatrixValid = false;
+    mMidnaHairShape = 0;
+    clearRemoteModelMatrixInterpolation(mMidnaMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mMidnaMaskMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mMidnaHandMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mMidnaHairMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mMidnaGlowMatrixInterp);
     if (!mItemActorMatrixValid && (mRemoteItemActorKind != 0 || i_matrices.itemActor.valid) &&
         sItemActorRejectLogCount < 12)
     {
@@ -3840,6 +4561,45 @@ void daRemoteLink_c::setRemoteHatState(const std::array<int16_t, 10>& i_rotA,
     mRemoteHatRotB = i_rotB;
     mRemoteHatSwing = i_swing;
     mRemoteHatShapeY = i_shapeY;
+}
+
+void daRemoteLink_c::setRemoteBodyState(
+    s16 i_shapeX, s16 i_shapeZ, s16 i_bodyX, s16 i_bodyY, s16 i_bodyZ, s16 i_twistY,
+    s16 i_neckJointX, s16 i_neckJointY, s16 i_neckJointZ, s16 i_lowerJointX,
+    s16 i_lowerJointZ, s16 i_rootJointX, s16 i_rootJointZ, u8 i_blendMode,
+    f32 i_upperSavedRatio, bool i_bodyRootValid, const cXyz& i_bodyRoot,
+    const std::array<int16_t, 6>& i_legIkAngles,
+    const std::array<int16_t, 6>& i_armIkAngles,
+    const std::array<int16_t, 6>& i_armRotA,
+    const std::array<int16_t, 6>& i_armRotB) {
+    mRemoteShapeX = i_shapeX;
+    mRemoteShapeZ = i_shapeZ;
+    mRemoteBodyAngleX = i_bodyX;
+    mRemoteBodyAngleY = i_bodyY;
+    mRemoteBodyAngleZ = i_bodyZ;
+    mRemoteBodyTwistY = i_twistY;
+    mRemoteNeckJointX = i_neckJointX;
+    mRemoteNeckJointY = i_neckJointY;
+    mRemoteNeckJointZ = i_neckJointZ;
+    mRemoteLowerJointX = i_lowerJointX;
+    mRemoteLowerJointZ = i_lowerJointZ;
+    mRemoteRootJointX = i_rootJointX;
+    mRemoteRootJointZ = i_rootJointZ;
+    mRemoteBlendMode = i_blendMode;
+    mRemoteUpperSavedRatio = std::clamp(i_upperSavedRatio, 0.0f, 1.0f);
+    if (mRemoteBodyRootValid) {
+        mPrevRemoteBodyRootValid = true;
+        mPrevRemoteBodyRoot = mRemoteBodyRoot;
+    } else {
+        mPrevRemoteBodyRootValid = i_bodyRootValid;
+        mPrevRemoteBodyRoot = i_bodyRoot;
+    }
+    mRemoteBodyRootValid = i_bodyRootValid;
+    mRemoteBodyRoot = i_bodyRoot;
+    mRemoteLegIkAngles = i_legIkAngles;
+    mRemoteArmIkAngles = i_armIkAngles;
+    mRemoteArmRotA = i_armRotA;
+    mRemoteArmRotB = i_armRotB;
 }
 
 void daRemoteLink_c::drawModel(J3DModel* i_model) {
@@ -4108,7 +4868,7 @@ void daRemoteLink_c::stopRemoteActiveSounds() {
 }
 
 int daRemoteLink_c::Draw() {
-    if (isRemoteLinkSceneUnsafe()) {
+    if (!mRemotePresentationVisible || isRemoteLinkSceneUnsafe()) {
         return TRUE;
     }
 
@@ -4251,6 +5011,12 @@ int daRemoteLink_c::Delete() {
         (void*)mpArcHeap);
     stopRemoteBombActor(false);
     stopRemoteActiveSounds();
+    for (u32 i = 0; i < ARRAY_SIZE(mBlendBckCache); ++i) {
+        releaseBckCacheEntry(mBlendBckCache[i]);
+    }
+    for (u32 i = 0; i < ARRAY_SIZE(mBckCache); ++i) {
+        releaseBckCacheEntry(mBckCache[i]);
+    }
     releaseSlot();
     destroyEquipmentModels();
     for (u32 i = 0; i < ARRAY_SIZE(mEquipmentArchives); ++i) {

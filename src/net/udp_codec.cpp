@@ -30,12 +30,12 @@ static_assert(sizeof(Header) == 58);
 
 bool is_message_type(PacketType type) {
     return type == PacketType::PoseJson || type == PacketType::PoseMsgpack ||
-           type == PacketType::MidnaMsgpack;
+           type == PacketType::MidnaMsgpack || type == PacketType::SemanticPoseMsgpack;
 }
 
 bool is_known_type(uint8_t type) {
     return type >= static_cast<uint8_t>(PacketType::PoseJson) &&
-           type <= static_cast<uint8_t>(PacketType::RelayRegister);
+           type <= static_cast<uint8_t>(PacketType::SemanticPoseMsgpack);
 }
 
 void copy_id(char (&destination)[kSenderIdBytes], std::string_view source) {
@@ -244,6 +244,7 @@ DecodeResult Decoder::accept(std::span<const uint8_t> datagram) {
         }
         std::memcpy(&result.ack, payload, header.payloadSize);
         if (result.ack.ackedType != static_cast<uint8_t>(PacketType::PoseMsgpack) &&
+            result.ack.ackedType != static_cast<uint8_t>(PacketType::SemanticPoseMsgpack) &&
             result.ack.ackedType != static_cast<uint8_t>(PacketType::MidnaMsgpack)) {
             return {};
         }

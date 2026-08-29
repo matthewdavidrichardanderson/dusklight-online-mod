@@ -48,6 +48,7 @@ private:
         ConfigVarHandle syncFlags = 0;
         ConfigVarHandle syncWorld = 0;
         ConfigVarHandle displayMidna = 0;
+        ConfigVarHandle semanticRenderingExperiment = 0;
         ConfigVarHandle remoteCollision = 0;
         ConfigVarHandle pvp = 0;
         ConfigVarHandle playerList = 0;
@@ -154,6 +155,8 @@ public:
     static void sync_flags_set(ModContext*, void*, const UiControlValue*);
     static void sync_world_get(ModContext*, void*, UiControlValue*);
     static void sync_world_set(ModContext*, void*, const UiControlValue*);
+    static void performance_mode_get(ModContext*, void*, UiControlValue*);
+    static void performance_mode_set(ModContext*, void*, const UiControlValue*);
     static void remote_collision_get(ModContext*, void*, UiControlValue*);
     static void remote_collision_set(ModContext*, void*, const UiControlValue*);
     static void pvp_get(ModContext*, void*, UiControlValue*);

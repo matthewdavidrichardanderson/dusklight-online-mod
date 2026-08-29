@@ -66,6 +66,7 @@ HOST_CONTROL_TYPES = (
     "dummy_model",
     "sync_flags",
     "sync_world",
+    "performance_mode",
     "remote_collision",
     "pvp_enabled",
 )
@@ -217,6 +218,7 @@ def hello(
     password: str = "secret",
     action: str = "join",
     settings: dict[str, bool] | None = None,
+    semantic_visuals: bool | None = True,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {
         "type": "hello",
@@ -229,6 +231,8 @@ def hello(
         "want_puppet": True,
         "want_midna": False,
     }
+    if semantic_visuals is not None:
+        message["capabilities"] = {"semantic_visual_v1": semantic_visuals}
     if settings is not None:
         message["settings"] = settings
     return message
@@ -274,6 +278,13 @@ class RelayTests(unittest.TestCase):
         sender.udp.sendto(pose, ("127.0.0.1", self.relay.port))
         routed, _ = receiver.udp.recvfrom(2048)
         self.assertEqual(routed, pose)
+
+        semantic_pose = udp_packet(
+            7, sender_welcome["client_id"], b"semantic-visual-pose", 18
+        )
+        sender.udp.sendto(semantic_pose, ("127.0.0.1", self.relay.port))
+        routed, _ = receiver.udp.recvfrom(2048)
+        self.assertEqual(routed, semantic_pose)
 
         spoof = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -566,6 +577,7 @@ class RelayTests(unittest.TestCase):
                     "dummy_model": False,
                     "sync_flags": True,
                     "sync_world": True,
+                    "performance_mode": True,
                     "remote_collision": False,
                     "pvp": True,
                 },
@@ -574,6 +586,7 @@ class RelayTests(unittest.TestCase):
         owner_welcome = owner.expect_type("welcome")
         self.assertFalse(owner_welcome["settings"]["dummy_model"])
         self.assertTrue(owner_welcome["settings"]["sync_world"])
+        self.assertTrue(owner_welcome["settings"]["performance_mode"])
         self.assertFalse(owner_welcome["settings"]["remote_collision"])
         self.assertFalse(owner_welcome["settings"]["pvp"])
 
@@ -598,6 +611,7 @@ class RelayTests(unittest.TestCase):
                     "dummy_model": True,
                     "sync_flags": False,
                     "sync_world": False,
+                    "performance_mode": False,
                     "remote_collision": True,
                     "pvp": True,
                 },
@@ -608,6 +622,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(owner_update["settings"], member_update["settings"])
         self.assertTrue(member_update["settings"]["pvp"])
         self.assertFalse(member_update["settings"]["sync_flags"])
+        self.assertFalse(member_update["settings"]["performance_mode"])
 
     def test_owner_transfers_to_oldest_remaining_member(self) -> None:
         owner, owner_welcome = self.join("Owner", "owner-transfer")
@@ -636,6 +651,33 @@ class RelayTests(unittest.TestCase):
         )
         self.assertTrue(second.expect_type("room_settings")["settings"]["sync_world"])
         self.assertTrue(third.expect_type("room_settings")["settings"]["sync_world"])
+
+    def test_semantic_visual_capability_requires_every_member(self) -> None:
+        owner = self.client()
+        owner.send(hello("Owner", "semantic-capability", action="create"))
+        owner_welcome = owner.expect_type("welcome")
+        self.assertTrue(owner_welcome["semantic_visuals_ready"])
+
+        legacy = self.client()
+        legacy.send(hello("Legacy", "semantic-capability", semantic_visuals=None))
+        legacy_welcome = legacy.expect_type("welcome")
+        joined = owner.expect_type("peer_joined")
+        self.assertFalse(legacy_welcome["semantic_visuals_ready"])
+        self.assertFalse(joined["semantic_visuals_ready"])
+
+        owner.register_udp(owner_welcome)
+        legacy.register_udp(legacy_welcome)
+        semantic_pose = udp_packet(
+            7, owner_welcome["client_id"], b"must-not-reach-legacy", 1
+        )
+        owner.udp.sendto(semantic_pose, ("127.0.0.1", self.relay.port))
+        with self.assertRaises(socket.timeout):
+            legacy.udp.recvfrom(2048)
+
+        legacy.close()
+        self.clients.remove(legacy)
+        left = owner.expect_type("peer_left")
+        self.assertTrue(left["semantic_visuals_ready"])
 
 
 def main() -> int:

@@ -1,5 +1,6 @@
 #include "dusklight_online/online_app.hpp"
 #include "dusklight_online/game/abi_compat.hpp"
+#include "dusklight_online/logging.hpp"
 
 #include "f_ap/f_ap_game.h"
 #include "mods/service.hpp"
@@ -13,6 +14,7 @@
 #include "mods/svc/ui.h"
 
 #include <memory>
+#include <string>
 
 DEFINE_MOD();
 
@@ -51,6 +53,15 @@ void game_execute_post(ModContext*, void*, void*, void*) {
 }
 
 }  // namespace
+
+namespace dusklight_online {
+
+void log_info(std::string_view message) {
+    const std::string owned(message);
+    svc_log->info(mod_ctx, owned.c_str());
+}
+
+}  // namespace dusklight_online
 
 extern "C" {
 

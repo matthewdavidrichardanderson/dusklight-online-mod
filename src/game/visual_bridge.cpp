@@ -123,7 +123,8 @@ std::vector<MinimapMarker> collect_minimap_markers() {
         return markers;
     }
     for (const auto& [peerId, pose] : sPoses) {
-        if (!pose.valid || pose.ageTicks > 30 || pose.stage != localStage) continue;
+        if (!pose.valid || pose.ageTicks > 30 || pose.stage != localStage ||
+            !dusk::multiplayer::is_remote_link_dummy_visible(peerId)) continue;
         const PlayerColor color = color_for_peer(peerId);
         markers.push_back({pose.room, pose.x, pose.y, pose.z, pose.angleY, color});
     }

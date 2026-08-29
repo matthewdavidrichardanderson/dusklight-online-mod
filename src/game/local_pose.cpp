@@ -15,7 +15,6 @@
 
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "d/actor/d_a_alink.h"
-#include "d/actor/d_a_midna.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item.h"
 #include "f_op/f_op_actor_mng.h"
@@ -128,7 +127,8 @@ void append_model(std::vector<uint8_t>& out, J3DModel* model, size_t slotIndex) 
     }
 }
 
-json pack_matrices(std::initializer_list<MatrixSlot> slots, int midnaHairShape = 0) {
+json pack_matrices(std::initializer_list<MatrixSlot> slots,
+                   LocalPoseDiagnostics* diagnostics) {
     std::vector<uint8_t> packed;
     packed.reserve(32 * 1024);
     static constexpr char magic[] = "DMPM";
@@ -138,11 +138,18 @@ json pack_matrices(std::initializer_list<MatrixSlot> slots, int midnaHairShape =
     append_value(packed, version);
     append_value(packed, count);
     size_t slotIndex = 0;
-    for (const MatrixSlot& slot : slots) append_model(packed, slot.model, slotIndex++);
+    uint8_t presentSlots = 0;
+    for (const MatrixSlot& slot : slots) {
+        if (slot.model != nullptr) ++presentSlots;
+        append_model(packed, slot.model, slotIndex++);
+    }
+    if (diagnostics != nullptr) {
+        diagnostics->matrixPackedBytes = packed.size();
+        diagnostics->matrixPresentSlots = presentSlots;
+    }
     return {
         {"format", "qrot16_trans32_womit_bin_v1"},
         {"data", json::binary(std::move(packed))},
-        {"midna_hair_shape", midnaHairShape},
     };
 }
 
@@ -177,15 +184,34 @@ json i16_array(const int16_t* values) {
     return out;
 }
 
-int visible_hair_shape(J3DModel* model) {
-    if (model == nullptr || model->getModelData() == nullptr) return 0;
-    const int count = std::min<int>(3, model->getModelData()->getMaterialNum());
-    for (int i = 0; i < count; ++i) {
-        J3DMaterial* material = model->getModelData()->getMaterialNodePointer(i);
-        J3DShape* shape = material != nullptr ? material->getShape() : nullptr;
-        if (shape != nullptr && !shape->checkFlag(J3DShpFlag_Visible)) return i;
+json link_ik_array(const daAlink_footData_c* values) {
+    json out = json::array();
+    for (int i = 0; i < 2; ++i) {
+        out.push_back(values != nullptr ? int(values[i].field_0x2) : 0);
+        out.push_back(values != nullptr ? int(values[i].field_0x4) : 0);
+        out.push_back(values != nullptr ? int(values[i].field_0x6) : 0);
     }
-    return 0;
+    return out;
+}
+
+json csxyz_pair_array(const csXyz* values) {
+    json out = json::array();
+    for (int i = 0; i < 2; ++i) {
+        out.push_back(values != nullptr ? int(values[i].x) : 0);
+        out.push_back(values != nullptr ? int(values[i].y) : 0);
+        out.push_back(values != nullptr ? int(values[i].z) : 0);
+    }
+    return out;
+}
+
+bool matrices_nearly_equal(MtxP lhs, MtxP rhs) {
+    if (lhs == nullptr || rhs == nullptr) return false;
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            if (std::fabs(lhs[row][column] - rhs[row][column]) > 0.001f) return false;
+        }
+    }
+    return true;
 }
 
 json audio_json(const std::vector<dusk::multiplayer::RemoteAudioEvent>& events) {
@@ -200,13 +226,14 @@ json audio_json(const std::vector<dusk::multiplayer::RemoteAudioEvent>& events) 
 
 }  // namespace
 
-bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady,
-                      json& poseMessage, json& midnaMessage) {
-    includeMidna = includeMidna && dusk::multiplayer::kRemoteMidnaStreamingEnabled;
+bool build_local_pose(uint32_t sequence, bool manualSyncReady,
+                      bool semanticVisualsEnabled, json& poseMessage,
+                      LocalPoseDiagnostics* diagnostics) {
+    if (diagnostics != nullptr) *diagnostics = {};
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
     if (player == nullptr || fopAcM_GetName(player) != fpcNm_ALINK_e) return false;
     auto* link = static_cast<daAlink_c*>(player);
-    if (link->mClothesChangeWaitTimer != 0 || link->mpLinkModel == nullptr) return false;
+    if (link->mpLinkModel == nullptr) return false;
 
     const bool wolf = static_cast<bool>(link->checkWolf());
     const bool transforming = link->mProcID == daAlink_c::PROC_METAMORPHOSE ||
@@ -224,16 +251,78 @@ bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady
     const float poseX = player->current.pos.x;
     const float poseY = player->current.pos.y;
     const float poseZ = player->current.pos.z;
-    const float underFrame0 = link->mUnderFrameCtrl[0].getFrame();
-    const float underRate0 = link->mUnderFrameCtrl[0].getRate();
-    const float upperFrame2 = link->mUpperFrameCtrl[2].getFrame();
-    const float upperRate2 = link->mUpperFrameCtrl[2].getRate();
+    struct PoseAnimSlot {
+        int bck;
+        int arc;
+        float frame;
+        float rate;
+        float ratio;
+    };
+    PoseAnimSlot underSlots[3];
+    PoseAnimSlot upperSlots[3];
+    for (int i = 0; i < 3; ++i) {
+        underSlots[i] = {int(link->mUnderAnmHeap[i].getIdx()),
+                         int(link->mUnderAnmHeap[i].getArcNo()),
+                         link->mUnderFrameCtrl[i].getFrame(),
+                         link->mUnderFrameCtrl[i].getRate(),
+                         link->mNowAnmPackUnder[i].getRatio()};
+        upperSlots[i] = {int(link->mUpperAnmHeap[i].getIdx()),
+                         int(link->mUpperAnmHeap[i].getArcNo()),
+                         link->mUpperFrameCtrl[i].getFrame(),
+                         link->mUpperFrameCtrl[i].getRate(),
+                         link->mNowAnmPackUpper[i].getRatio()};
+    }
+    enum VisualUnsupportedReason : uint32_t {
+        kUnsupportedStageTransition = 1u << 0,
+        kUnsupportedModelRecreation = 1u << 1,
+        kUnsupportedAnimationArchive = 1u << 2,
+    };
+    uint32_t visualUnsupportedReasons = 0;
+    if (dComIfGp_isEnableNextStage() || fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq()) {
+        visualUnsupportedReasons |= kUnsupportedStageTransition;
+    }
+    if (link->mClothesChangeWaitTimer != 0) {
+        visualUnsupportedReasons |= kUnsupportedModelRecreation;
+    }
+    const auto slotNeedsArchiveFallback = [](const PoseAnimSlot& slot) {
+        return slot.ratio > 0.001f && slot.bck > 0 && slot.bck != 0xFFFF &&
+               slot.arc != 0xFFFF;
+    };
+    for (int i = 0; i < 3; ++i) {
+        if (slotNeedsArchiveFallback(underSlots[i]) ||
+            slotNeedsArchiveFallback(upperSlots[i])) {
+            visualUnsupportedReasons |= kUnsupportedAnimationArchive;
+        }
+    }
+    const auto validPoseBck = [](int id) { return id > 0 && id != 0xFFFF; };
+    // Link commonly points an upper blend pack at a lower animation without
+    // populating the corresponding upper heap. Preserve that relationship so
+    // the receiver does not silently drop an active upper-body slot.
+    for (int upper = 0; upper < 3; ++upper) {
+        if (validPoseBck(upperSlots[upper].bck)) continue;
+        J3DAnmTransform* active = link->mNowAnmPackUpper[upper].getAnmTransform();
+        if (active == nullptr) continue;
+        for (int lower = 0; lower < 3; ++lower) {
+            if (active == link->mNowAnmPackUnder[lower].getAnmTransform() &&
+                validPoseBck(underSlots[lower].bck)) {
+                upperSlots[upper].bck = underSlots[lower].bck;
+                upperSlots[upper].arc = underSlots[lower].arc;
+                upperSlots[upper].frame = underSlots[lower].frame;
+                upperSlots[upper].rate = underSlots[lower].rate;
+                break;
+            }
+        }
+    }
+    const float underFrame0 = underSlots[0].frame;
     const auto audioEvents = drain_local_audio_events();
     const auto activeAudioEvents = drain_local_active_audio_events();
     if (!std::isfinite(poseX) || !std::isfinite(poseY) || !std::isfinite(poseZ) ||
-        !std::isfinite(underFrame0) || !std::isfinite(underRate0) ||
-        !std::isfinite(upperFrame2) || !std::isfinite(upperRate2)) {
-        return false;
+        !std::isfinite(underFrame0)) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(underSlots[i].frame) || !std::isfinite(underSlots[i].rate) ||
+            !std::isfinite(underSlots[i].ratio) || !std::isfinite(upperSlots[i].frame) ||
+            !std::isfinite(upperSlots[i].rate) || !std::isfinite(upperSlots[i].ratio))
+            return false;
     }
     const bool humanCore = !wolf;
     const bool humanParts = humanCore && !transforming;
@@ -263,8 +352,27 @@ bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady
     fopAc_ac_c* rideActor = humanParts ? link->mRideAcKeep.getActor() : nullptr;
     J3DModel* spinner = rideActor != nullptr && fopAcM_GetName(rideActor) == fpcNm_SPINNER_e ?
                         rideActor->model : nullptr;
+    const bool swordHandAttached =
+        humanParts && link->mSwordModel != nullptr &&
+        link->mpLinkModel->getModelData()->getJointNum() > 10 &&
+        matrices_nearly_equal(link->mSwordModel->getBaseTRMtx(),
+                              link->mpLinkModel->getAnmMtx(10));
+    const bool shieldHandAttached =
+        humanParts && link->mShieldModel != nullptr &&
+        link->mpLinkModel->getModelData()->getJointNum() > 15 &&
+        matrices_nearly_equal(link->mShieldModel->getBaseTRMtx(),
+                              link->mpLinkModel->getAnmMtx(15));
+    const bool bodyRootValid = link->mpLinkModel->getModelData() != nullptr &&
+                               link->mpLinkModel->getModelData()->getJointNum() > 0;
+    MtxP bodyRoot = bodyRootValid ? link->mpLinkModel->getAnmMtx(0) : nullptr;
 
+    const bool semanticGameplay = visualUnsupportedReasons == 0;
     json state = {
+        {"visual_mode", visualUnsupportedReasons == 0 ? "semantic_gameplay" :
+                                                         "hidden_unsupported"},
+        {"visual_unsupported_reasons", visualUnsupportedReasons},
+        {"matrix_scope", !semanticVisualsEnabled ? "full_body" :
+                             semanticGameplay ? "attachments" : "none"},
         {"stage", dComIfGp_getStartStageName()},
         {"room", int(fopAcM_GetRoomNo(player))},
         {"layer", int(dComIfGp_getStartStageLayer())},
@@ -277,16 +385,51 @@ bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady
         {"jump_cancel_turn", bool(link->checkCutJumpCancelTurn())},
         {"manual_sync_ready", manualSyncReady},
         {"under_frame", underFrame0},
-        {"under_bck0", int(link->mUnderAnmHeap[0].getIdx())},
-        {"under_frame0", underFrame0},
-        {"under_rate0", underRate0},
-        {"upper_bck2", int(link->mUpperAnmHeap[2].getIdx())},
-        {"upper_frame2", upperFrame2},
-        {"upper_rate2", upperRate2},
+        {"under_bck0", underSlots[0].bck}, {"under_arc0", underSlots[0].arc},
+        {"under_frame0", underSlots[0].frame}, {"under_rate0", underSlots[0].rate},
+        {"under_ratio0", underSlots[0].ratio},
+        {"under_bck1", underSlots[1].bck}, {"under_arc1", underSlots[1].arc},
+        {"under_frame1", underSlots[1].frame}, {"under_rate1", underSlots[1].rate},
+        {"under_ratio1", underSlots[1].ratio},
+        {"under_bck2", underSlots[2].bck}, {"under_arc2", underSlots[2].arc},
+        {"under_frame2", underSlots[2].frame}, {"under_rate2", underSlots[2].rate},
+        {"under_ratio2", underSlots[2].ratio},
+        {"upper_bck0", upperSlots[0].bck}, {"upper_arc0", upperSlots[0].arc},
+        {"upper_frame0", upperSlots[0].frame}, {"upper_rate0", upperSlots[0].rate},
+        {"upper_ratio0", upperSlots[0].ratio},
+        {"upper_bck1", upperSlots[1].bck}, {"upper_arc1", upperSlots[1].arc},
+        {"upper_frame1", upperSlots[1].frame}, {"upper_rate1", upperSlots[1].rate},
+        {"upper_ratio1", upperSlots[1].ratio},
+        {"upper_bck2", upperSlots[2].bck}, {"upper_arc2", upperSlots[2].arc},
+        {"upper_frame2", upperSlots[2].frame}, {"upper_rate2", upperSlots[2].rate},
+        {"upper_ratio2", upperSlots[2].ratio},
         {"hat_rot_a", i16_array<10>(link->field_0x302c)},
         {"hat_rot_b", i16_array<10>(link->field_0x3040)},
         {"hat_swing", i16_array<3>(link->field_0x3066)},
         {"hat_shape_y", int(link->field_0x3062)},
+        {"shape_angle_x", int(link->shape_angle.x)},
+        {"shape_angle_z", int(link->shape_angle.z)},
+        {"body_angle_x", int(link->mBodyAngle.x)},
+        {"body_angle_y", int(link->mBodyAngle.y)},
+        {"body_angle_z", int(link->mBodyAngle.z)},
+        {"body_twist_y", int(link->field_0x30c8)},
+        {"neck_joint_x", int(link->field_0x3124.x)},
+        {"neck_joint_y", int(link->field_0x3124.y)},
+        {"neck_joint_z", int(link->field_0x3124.z)},
+        {"lower_joint_x", int(link->field_0x3088)},
+        {"lower_joint_z", int(link->field_0x308a)},
+        {"root_joint_x", int(link->field_0x3080)},
+        {"root_joint_z", int(link->field_0x3082)},
+        {"blend_mode", int(link->field_0x2fb6)},
+        {"upper_saved_ratio", link->field_0x3444},
+        {"body_root_valid", bodyRootValid},
+        {"body_root_x", bodyRootValid ? bodyRoot[0][3] : 0.0f},
+        {"body_root_y", bodyRootValid ? bodyRoot[1][3] : 0.0f},
+        {"body_root_z", bodyRootValid ? bodyRoot[2][3] : 0.0f},
+        {"leg_ik_angles", link_ik_array(link->mFootData1)},
+        {"arm_ik_angles", link_ik_array(link->mFootData2)},
+        {"arm_rot_a", csxyz_pair_array(link->field_0x312a)},
+        {"arm_rot_b", csxyz_pair_array(link->field_0x3136)},
         {"is_wolf", wolf}, {"is_transforming", transforming},
         {"transform_from_wolf", transformFromWolf},
         {"transform_to_wolf", transformToWolf},
@@ -303,6 +446,8 @@ bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady
         {"shield_draw", bool(link->checkShieldDraw())},
         {"shield_guard_active", !wolf && bool(link->checkShieldDraw()) &&
                                   bool(link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_8000000))},
+        {"sword_hand_attached", swordHandAttached},
+        {"shield_hand_attached", shieldHandAttached},
         {"sword_out", !wolf && link->mEquipItem == 0x103},
         {"heavy_boots", !wolf && bool(link->checkEquipHeavyBoots())},
         {"item_draw", !wolf && bool(link->checkItemDraw())},
@@ -315,45 +460,46 @@ bool build_local_pose(uint32_t sequence, bool includeMidna, bool manualSyncReady
         {"audio_events", audio_json(audioEvents)},
         {"active_audio_events", audio_json(activeAudioEvents)},
     };
-    state["link_matrices"] = pack_matrices({
-        {link->mpLinkModel}, {nullptr}, {humanCore ? link->mpLinkFaceModel : nullptr},
-        {humanCore ? link->mpLinkHandModel : nullptr}, {humanParts ? link->mSwordModel : nullptr},
-        {humanParts ? link->mSheathModel : nullptr}, {humanParts ? link->mShieldModel : nullptr},
-        {humanParts ? link->mHeldItemModel : nullptr}, {humanParts ? link->mpHookTipModel : nullptr},
-        {humanParts ? link->field_0x0710 : nullptr}, {humanParts ? link->field_0x0714 : nullptr},
-        {arrow}, {humanParts ? link->mpKanteraModel : nullptr},
-        {humanParts ? link->mpKanteraGlowModel : nullptr},
-        {humanParts ? itemActorModel : nullptr}, {spinner},
-        {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
-    });
-
-    midnaMessage = json();
-    if (includeMidna && !transforming) {
-        daMidna_c* midna = daPy_py_c::getMidnaActor();
-        J3DModel* body = wolf ? link->getMidnaModel() : nullptr;
-        J3DModel* mask = wolf ? link->getMidnaMaskModel() : nullptr;
-        J3DModel* hand = wolf ? link->getMidnaHandModel() : nullptr;
-        J3DModel* hair = wolf ? link->getMidnaHairHandModel() : nullptr;
-        J3DModel* glow = nullptr;
-        // Shadow Midna model accessors are unavailable. Link's riding-Midna
-        // model set remains available for this pose.
-        const bool shadow = false;
-        state["midna_draw"] = body != nullptr;
-        state["midna_mask_draw"] = mask != nullptr;
-        state["midna_hand_draw"] = hand != nullptr;
-        state["midna_hair_draw"] = hair != nullptr;
-        state["midna_shadow_form"] = shadow;
-        if (body != nullptr || mask != nullptr || hand != nullptr || hair != nullptr || glow != nullptr) {
-            json midnaState;
-            midnaState["link_matrices"] = pack_matrices({
-                {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
-                {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
-                {nullptr}, {nullptr}, {body}, {mask}, {hand}, {hair}, {glow},
-            }, visible_hair_shape(hair));
-            midnaMessage = {{"type", "midna_pose"}, {"sequence", sequence},
-                            {"stage", dComIfGp_getStartStageName()},
-                            {"state", std::move(midnaState)}};
+    if (!semanticVisualsEnabled) {
+        if (diagnostics != nullptr) {
+            diagnostics->matrixScope = LocalPoseMatrixScope::FullBody;
         }
+        state["link_matrices"] = pack_matrices({
+            {link->mpLinkModel}, {nullptr}, {humanCore ? link->mpLinkFaceModel : nullptr},
+            {humanCore ? link->mpLinkHandModel : nullptr},
+            {humanParts ? link->mSwordModel : nullptr},
+            {humanParts ? link->mSheathModel : nullptr},
+            {humanParts ? link->mShieldModel : nullptr},
+            {humanParts ? link->mHeldItemModel : nullptr},
+            {humanParts ? link->mpHookTipModel : nullptr},
+            {humanParts ? link->field_0x0710 : nullptr},
+            {humanParts ? link->field_0x0714 : nullptr}, {arrow},
+            {humanParts ? link->mpKanteraModel : nullptr},
+            {humanParts ? link->mpKanteraGlowModel : nullptr},
+            {humanParts ? itemActorModel : nullptr}, {spinner},
+            {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
+        }, diagnostics);
+    } else if (semanticGameplay) {
+        // Link, wolf, head/hair, face, hands and heavy boots are reconstructed
+        // from semantic animation/body state. Preserve only independently
+        // moving props. Remote Midna is intentionally absent in every mode.
+        if (diagnostics != nullptr) {
+            diagnostics->matrixScope = LocalPoseMatrixScope::Attachments;
+        }
+        state["link_matrices"] = pack_matrices({
+            {nullptr}, {nullptr}, {nullptr}, {nullptr},
+            {humanParts ? link->mSwordModel : nullptr},
+            {humanParts ? link->mSheathModel : nullptr},
+            {humanParts ? link->mShieldModel : nullptr},
+            {humanParts ? link->mHeldItemModel : nullptr},
+            {humanParts ? link->mpHookTipModel : nullptr},
+            {humanParts ? link->field_0x0710 : nullptr},
+            {humanParts ? link->field_0x0714 : nullptr}, {arrow},
+            {humanParts ? link->mpKanteraModel : nullptr},
+            {humanParts ? link->mpKanteraGlowModel : nullptr},
+            {humanParts ? itemActorModel : nullptr}, {spinner},
+            {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
+        }, diagnostics);
     }
 
     poseMessage = {{"type", "pose"}, {"sequence", sequence}, {"state", std::move(state)}};

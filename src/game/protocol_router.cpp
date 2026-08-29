@@ -31,6 +31,7 @@ constexpr std::array kEntries = {
     Entry{"dummy_model", {Domain::Membership, false, false}},
     Entry{"sync_flags", {Domain::Membership, false, false}},
     Entry{"sync_world", {Domain::Membership, false, false}},
+    Entry{"performance_mode", {Domain::Membership, false, false}},
     Entry{"remote_collision", {Domain::Membership, false, false}},
     Entry{"pvp_enabled", {Domain::Membership, false, false}},
     Entry{"presence", {Domain::Presence, false, false}},

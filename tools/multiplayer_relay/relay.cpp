@@ -53,6 +53,7 @@ namespace {
 using json = nlohmann::json;
 
 constexpr int kProtocolVersion = 2;
+constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
 constexpr size_t kMaxLineBytes = 512 * 1024;
 constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxRoomClients = 8;
@@ -71,6 +72,7 @@ constexpr uint8_t kUdpPacketTypeRemoteObject = 3;
 constexpr uint8_t kUdpPacketTypeMidnaMsgpack = 4;
 constexpr uint8_t kUdpPacketTypePoseAck = 5;
 constexpr uint8_t kUdpPacketTypeRelayRegister = 6;
+constexpr uint8_t kUdpPacketTypeSemanticPoseMsgpack = 7;
 constexpr size_t kMaxUdpBytesPerClientSecond = 4 * 1024 * 1024;
 
 #pragma pack(push, 1)
@@ -157,6 +159,14 @@ bool env_enabled(const char* name) {
 bool relay_packet_trace_enabled() {
     static const bool enabled = env_enabled("DUSK_MP_RELAY_PACKET_TRACE");
     return enabled;
+}
+
+bool has_semantic_visual_capability(const json& message) {
+    const auto capabilities = message.find("capabilities");
+    if (capabilities == message.end() || !capabilities->is_object()) return false;
+    const auto capability = capabilities->find(kSemanticVisualCapability);
+    return capability != capabilities->end() && capability->is_boolean() &&
+           capability->get<bool>();
 }
 
 const char* packet_category(const std::string& type) {
@@ -277,6 +287,7 @@ struct Client {
     bool disconnectRequested = false;
     bool wantsPuppet = true;
     bool wantsMidna = false;
+    bool supportsSemanticVisuals = false;
     bool udpAddrKnown = false;
 };
 
@@ -288,6 +299,8 @@ struct Room {
     bool dummyModel = true;
     bool syncFlags = true;
     bool syncWorld = false;
+    bool performanceMode = false;
+    bool semanticVisualsReady = false;
     bool remoteCollision = true;
     bool pvp = false;
 };
@@ -306,6 +319,7 @@ json room_settings_json(const Room& room) {
         {"dummy_model", room.dummyModel},
         {"sync_flags", room.syncFlags},
         {"sync_world", room.syncWorld},
+        {"performance_mode", room.performanceMode},
         {"remote_collision", room.remoteCollision},
         {"pvp", room.pvp},
     };
@@ -331,11 +345,13 @@ bool apply_room_settings(Room& room, const json& settings) {
     bool dummyModel = room.dummyModel;
     bool syncFlags = room.syncFlags;
     bool syncWorld = room.syncWorld;
+    bool performanceMode = room.performanceMode;
     bool remoteCollision = room.remoteCollision;
     bool pvp = room.pvp;
     if (!read_bool("dummy_model", dummyModel) ||
         !read_bool("sync_flags", syncFlags) ||
         !read_bool("sync_world", syncWorld) ||
+        !read_bool("performance_mode", performanceMode) ||
         !read_bool("remote_collision", remoteCollision) ||
         !read_bool("pvp", pvp))
     {
@@ -345,6 +361,7 @@ bool apply_room_settings(Room& room, const json& settings) {
     room.dummyModel = dummyModel;
     room.syncFlags = syncFlags;
     room.syncWorld = syncWorld;
+    room.performanceMode = performanceMode;
     room.remoteCollision = remoteCollision;
     room.pvp = remoteCollision && pvp;
     return true;
@@ -674,6 +691,7 @@ private:
             const json routed = {
                 {"type", "room_settings"},
                 {"owner_client_id", room.ownerClientId},
+                {"semantic_visuals_ready", room.semanticVisualsReady},
                 {"settings", room_settings_json(room)},
             };
             send_json(client, routed);
@@ -823,6 +841,7 @@ private:
         client.name = name;
         client.wantsPuppet = hello.value("want_puppet", true);
         client.wantsMidna = hello.value("want_midna", false);
+        client.supportsSemanticVisuals = has_semantic_visual_capability(hello);
 
         json peers = json::array();
         for (const std::string& peerId : roomIt->second.clientIds) {
@@ -833,6 +852,8 @@ private:
         }
 
         roomIt->second.clientIds.push_back(client.id);
+        roomIt->second.semanticVisualsReady =
+            room_semantic_visuals_ready(roomIt->second);
         log("join room=" + roomId + " client=" + client.id + " name=" + client.name);
 
         send_json(client, {
@@ -842,6 +863,7 @@ private:
             {"client_id", client.id},
             {"udp_token", client.udpToken},
             {"owner_client_id", roomIt->second.ownerClientId},
+            {"semantic_visuals_ready", roomIt->second.semanticVisualsReady},
             {"settings", room_settings_json(roomIt->second)},
             {"peers", peers},
         });
@@ -849,7 +871,19 @@ private:
             {"type", "peer_joined"},
             {"client_id", client.id},
             {"name", client.name},
+            {"semantic_visuals_ready", roomIt->second.semanticVisualsReady},
         });
+    }
+
+    bool room_semantic_visuals_ready(const Room& room) const {
+        if (room.clientIds.empty()) return false;
+        for (const std::string& clientId : room.clientIds) {
+            const auto client = mClients.find(clientId);
+            if (client == mClients.end() || !client->second.supportsSemanticVisuals) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void broadcast(const Client& sender, const json& message) {
@@ -963,7 +997,8 @@ private:
                  header.type != kUdpPacketTypePoseMsgpack &&
                  header.type != kUdpPacketTypeRemoteObject &&
                  header.type != kUdpPacketTypeMidnaMsgpack &&
-                 header.type != kUdpPacketTypePoseAck))
+                 header.type != kUdpPacketTypePoseAck &&
+                 header.type != kUdpPacketTypeSemanticPoseMsgpack))
             {
                 continue;
             }
@@ -1012,8 +1047,14 @@ private:
                 }
                 Client& peer = peerIt->second;
                 if ((header.type == kUdpPacketTypePoseJson ||
-                     header.type == kUdpPacketTypePoseMsgpack) &&
+                     header.type == kUdpPacketTypePoseMsgpack ||
+                     header.type == kUdpPacketTypeSemanticPoseMsgpack) &&
                     !peer.wantsPuppet)
+                {
+                    continue;
+                }
+                if (header.type == kUdpPacketTypeSemanticPoseMsgpack &&
+                    !peer.supportsSemanticVisuals)
                 {
                     continue;
                 }
@@ -1024,6 +1065,7 @@ private:
                 }
                 if ((header.type == kUdpPacketTypePoseJson ||
                      header.type == kUdpPacketTypePoseMsgpack ||
+                     header.type == kUdpPacketTypeSemanticPoseMsgpack ||
                      header.type == kUdpPacketTypeMidnaMsgpack) &&
                     !sender.stage.empty() && !peer.stage.empty() &&
                     sender.stage != peer.stage)
@@ -1079,8 +1121,13 @@ private:
                 room.clientIds.erase(
                     std::remove(room.clientIds.begin(), room.clientIds.end(), clientId),
                     room.clientIds.end());
+                room.semanticVisualsReady = room_semantic_visuals_ready(room);
                 log("leave room=" + roomId + " client=" + clientId);
-                broadcast(departed, {{"type", "peer_left"}, {"client_id", clientId}});
+                broadcast(departed, {
+                    {"type", "peer_left"},
+                    {"client_id", clientId},
+                    {"semantic_visuals_ready", room.semanticVisualsReady},
+                });
                 if (room.clientIds.empty()) {
                     mRooms.erase(roomIt);
                 } else if (room.ownerClientId == clientId) {

@@ -8,12 +8,14 @@
 #include "dusklight_online/game/remote_actor_bridge.hpp"
 #include "dusklight_online/game/remote_pose.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
+#include "dusklight_online/logging.hpp"
 
 #include "d/dolzel.h" // Public game umbrella must precede individual game headers.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -124,6 +126,27 @@ constexpr uint32_t kOrdonReloadWarningTicks = 180;
 constexpr std::string_view kOoccooSaveBlob = "ooccoo-note-v1";
 constexpr uint16_t kTitleSyntheticEponaRescuedEventBit = 0x0601;
 constexpr std::string_view kTitleDemoStage = "F_SP102";
+
+bool visual_wire_trace_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("DUSK_MP_VISUAL_WIRE_TRACE");
+        return value != nullptr && std::strcmp(value, "0") != 0 &&
+               std::strcmp(value, "false") != 0 &&
+               std::strcmp(value, "FALSE") != 0 &&
+               std::strcmp(value, "off") != 0 &&
+               std::strcmp(value, "OFF") != 0;
+    }();
+    return enabled;
+}
+
+struct VisualWireTraceAccumulator {
+    LocalPoseMatrixScope scope = LocalPoseMatrixScope::None;
+    uint64_t samples = 0;
+    uint64_t normalizedWireBytes = 0;
+    uint64_t peakNormalizedWireBytes = 0;
+};
+
+VisualWireTraceAccumulator sVisualWireTrace;
 
 constexpr int kProgressionCueSewersStage = dStage_SaveTbl_PRISON;
 constexpr int kProgressionCueWakeUpInJailSwitch = 27;
@@ -2434,6 +2457,7 @@ void GameAdapter::clear_disabled_sync_flags_state() {
 
 void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
                          bool nameLabelsEnabled, bool displayMidnaEnabled,
+                         bool semanticRenderingExperimentEnabled,
                          bool remoteCollisionEnabled,
                          bool pvpEnabled, bool playerListEnabled) {
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
@@ -2498,7 +2522,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                                     displayMidnaEnabled,
                                                 status.welcomed && syncWorldEnabled &&
                                                     status.settings.syncWorld,
-                                                remoteCollisionEnabled, pvpEnabled);
+                                                remoteCollisionEnabled, pvpEnabled,
+                                                semanticRenderingExperimentEnabled);
     for (auto& [peerId, pose] : peerPoses_) {
         (void)peerId;
         if (pose.valid && pose.ageTicks < std::numeric_limits<uint32_t>::max()) ++pose.ageTicks;
@@ -2517,36 +2542,50 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     // must not stop this client's own pose/audio stream: other peers can still
     // have their models enabled and need our state.
     if (status.welcomed) {
-        bool hasPoseAck = false;
-        uint32_t maxPoseAckLag = 0;
-        bool lossStressed = false;
-        for (const auto& [key, sequence] : latestAckSequence_) {
-            if (!key.ends_with(":" + std::to_string(
-                    static_cast<int>(net::udp::PacketType::PoseMsgpack)))) continue;
-            hasPoseAck = true;
-            maxPoseAckLag = std::max(maxPoseAckLag,
-                localPoseSequence_ > sequence ? localPoseSequence_ - sequence : 0);
-            const auto stress = ackStressUntilSequence_.find(key);
-            lossStressed = lossStressed ||
-                (stress != ackStressUntilSequence_.end() &&
-                 localPoseSequence_ <= stress->second);
-        }
-        if ((hasPoseAck && maxPoseAckLag >= 12) || lossStressed) {
-            ++visualPosePressureTicks_;
-            visualPoseHealthyTicks_ = 0;
-        } else if (hasPoseAck && maxPoseAckLag <= 10) {
-            ++visualPoseHealthyTicks_;
-            visualPosePressureTicks_ = 0;
-        } else {
-            visualPosePressureTicks_ = 0;
-            visualPoseHealthyTicks_ = 0;
-        }
-        if (visualPoseSendInterval_ == 1 && visualPosePressureTicks_ >= 45) {
-            visualPoseSendInterval_ = 2;
-            visualPosePressureTicks_ = 0;
-        } else if (visualPoseSendInterval_ == 2 && visualPoseHealthyTicks_ >= 360) {
+        const net::udp::PacketType activePoseType = semanticRenderingExperimentEnabled ?
+            net::udp::PacketType::SemanticPoseMsgpack :
+            net::udp::PacketType::PoseMsgpack;
+        if (semanticRenderingExperimentEnabled) {
+            // Semantic animation/body state is sampled rather than fully matrix-driven.
+            // Dropping it to every other simulation tick makes root motion remain smooth
+            // while animation, IK and body corrections visibly step at 15 Hz. Performance
+            // Mode's smaller type-7 packets must therefore remain at the full tick rate,
+            // even when a distant relay produces high ACK lag.
             visualPoseSendInterval_ = 1;
+            visualPosePressureTicks_ = 0;
             visualPoseHealthyTicks_ = 0;
+        } else {
+            bool hasPoseAck = false;
+            uint32_t maxPoseAckLag = 0;
+            bool lossStressed = false;
+            for (const auto& [key, sequence] : latestAckSequence_) {
+                if (!key.ends_with(":" +
+                        std::to_string(static_cast<int>(activePoseType)))) continue;
+                hasPoseAck = true;
+                maxPoseAckLag = std::max(maxPoseAckLag,
+                    localPoseSequence_ > sequence ? localPoseSequence_ - sequence : 0);
+                const auto stress = ackStressUntilSequence_.find(key);
+                lossStressed = lossStressed ||
+                    (stress != ackStressUntilSequence_.end() &&
+                     localPoseSequence_ <= stress->second);
+            }
+            if ((hasPoseAck && maxPoseAckLag >= 12) || lossStressed) {
+                ++visualPosePressureTicks_;
+                visualPoseHealthyTicks_ = 0;
+            } else if (hasPoseAck && maxPoseAckLag <= 10) {
+                ++visualPoseHealthyTicks_;
+                visualPosePressureTicks_ = 0;
+            } else {
+                visualPosePressureTicks_ = 0;
+                visualPoseHealthyTicks_ = 0;
+            }
+            if (visualPoseSendInterval_ == 1 && visualPosePressureTicks_ >= 45) {
+                visualPoseSendInterval_ = 2;
+                visualPosePressureTicks_ = 0;
+            } else if (visualPoseSendInterval_ == 2 && visualPoseHealthyTicks_ >= 360) {
+                visualPoseSendInterval_ = 1;
+                visualPoseHealthyTicks_ = 0;
+            }
         }
         fopAc_ac_c* player = dComIfGp_getPlayer(0);
         const auto* link = player != nullptr && fopAcM_GetName(player) == fpcNm_ALINK_e ?
@@ -2559,15 +2598,61 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         if (!sendVisualThisTick) {
             (void)drain_local_active_audio_events();
         } else {
-            nlohmann::json poseMessage, midnaMessage;
+            nlohmann::json poseMessage;
+            LocalPoseDiagnostics poseDiagnostics;
             const uint32_t nextSequence = localPoseSequence_ + 1;
-            if (build_local_pose(nextSequence,
-                                 dusk::multiplayer::kRemoteMidnaStreamingEnabled &&
-                                     displayMidnaEnabled,
-                                 stage_ready() && !manualTransitionActive_,
-                                 poseMessage, midnaMessage)) {
-                if (transport_.send_visual(poseMessage, net::udp::PacketType::PoseMsgpack)) {
+            if (build_local_pose(nextSequence, stage_ready() && !manualTransitionActive_,
+                                 semanticRenderingExperimentEnabled, poseMessage,
+                                 &poseDiagnostics)) {
+                if (transport_.send_visual(poseMessage, activePoseType)) {
                     localPoseSequence_ = nextSequence;
+                    const net::VisualSendStats wireStats =
+                        transport_.last_visual_send_stats();
+                    if (visual_wire_trace_enabled() && wireStats.sequence == nextSequence &&
+                        wireStats.recipients > 0) {
+                        const char* matrixScope = "none";
+                        if (poseDiagnostics.matrixScope == LocalPoseMatrixScope::Attachments) {
+                            matrixScope = "attachments";
+                        } else if (poseDiagnostics.matrixScope ==
+                                   LocalPoseMatrixScope::FullBody) {
+                            matrixScope = "full_body";
+                        }
+                        if (sVisualWireTrace.samples == 0 ||
+                            sVisualWireTrace.scope != poseDiagnostics.matrixScope) {
+                            sVisualWireTrace = {};
+                            sVisualWireTrace.scope = poseDiagnostics.matrixScope;
+                        }
+                        const uint64_t normalizedBytes =
+                            wireStats.wireBytes / wireStats.recipients;
+                        ++sVisualWireTrace.samples;
+                        sVisualWireTrace.normalizedWireBytes += normalizedBytes;
+                        sVisualWireTrace.peakNormalizedWireBytes = std::max(
+                            sVisualWireTrace.peakNormalizedWireBytes, normalizedBytes);
+                        if (sVisualWireTrace.samples <= 5 ||
+                            (sVisualWireTrace.samples % 300) == 0) {
+                            std::ostringstream line;
+                            line << "VISUAL_WIRE_TX seq=" << nextSequence
+                                 << " udp_type=" << static_cast<int>(activePoseType)
+                                 << " matrix_scope=" << matrixScope
+                                 << " matrix_slots="
+                                 << static_cast<int>(poseDiagnostics.matrixPresentSlots)
+                                 << " matrix_packed=" << poseDiagnostics.matrixPackedBytes
+                                 << " msgpack="
+                                 << nlohmann::json::to_msgpack(poseMessage).size()
+                                 << " recipients=" << wireStats.recipients
+                                 << " datagrams=" << wireStats.datagrams
+                                 << " wire_bytes=" << wireStats.wireBytes
+                                 << " wire_per_recipient=" << normalizedBytes
+                                 << " avg_wire_per_recipient="
+                                 << (sVisualWireTrace.normalizedWireBytes /
+                                     sVisualWireTrace.samples)
+                                 << " peak_wire_per_recipient="
+                                 << sVisualWireTrace.peakNormalizedWireBytes
+                                 << " samples=" << sVisualWireTrace.samples
+                                 << " send_interval=" << visualPoseSendInterval_;
+                            dusklight_online::log_info(line.str());
+                        }
+                    }
                 }
             }
         }
@@ -2901,6 +2986,10 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
             if (error == "stale pose sequence") return ApplyResult::IgnoredByPolicy;
             return reject(std::move(error));
         }
+        if (event.udpType == net::udp::PacketType::SemanticPoseMsgpack &&
+            !enforce_semantic_pose_invariants(pose, error)) {
+            return reject(std::move(error));
+        }
         peerPoses_[event.peerId] = std::move(pose);
         return ApplyResult::Applied;
     }
@@ -2940,7 +3029,8 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
     last = event.udpSequence;
     constexpr uint8_t kRateStress = net::udp::AckSequenceGap |
                                     net::udp::AckReassemblyEvicted;
-    if (event.udpType == net::udp::PacketType::PoseMsgpack &&
+    if ((event.udpType == net::udp::PacketType::PoseMsgpack ||
+         event.udpType == net::udp::PacketType::SemanticPoseMsgpack) &&
         (event.udpStressFlags & kRateStress) != 0) {
         ackStressUntilSequence_[key.str()] = event.udpSequence + 90;
     }
@@ -3049,6 +3139,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
 }
 
 void GameAdapter::reset_session() {
+    sVisualWireTrace = {};
     reset_local_pose_state();
     dusk::multiplayer::destroy_all_remote_link_dummies();
     dusk::multiplayer::reset_remote_actor_bridge();

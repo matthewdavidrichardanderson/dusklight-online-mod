@@ -24,6 +24,7 @@ enum class PacketType : uint8_t {
     MidnaMsgpack = 4,
     PoseAck = 5,
     RelayRegister = 6,
+    SemanticPoseMsgpack = 7,
 };
 
 enum AckStressFlags : uint8_t {

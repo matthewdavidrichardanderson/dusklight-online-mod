@@ -15,6 +15,7 @@ namespace dusk::multiplayer {
 // keyed by peerId and cleanup must be per-peer.
 void draw_remote_link_dummy(const std::string& peerId, const PeerPoseSnapshot& pose);
 void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot>& poses);
+bool is_remote_link_dummy_visible(const std::string& peerId);
 bool get_remote_link_dummy_label_position(const std::string& peerId, cXyz* outPos);
 bool get_remote_link_dummy_peer_id_for_actor(fopAc_ac_c* actor, std::string* outPeerId);
 void destroy_remote_link_dummy(const std::string& peerId);

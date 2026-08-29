@@ -31,6 +31,7 @@ struct RoomSettings {
     bool dummyModel = true;
     bool syncFlags = true;
     bool syncWorld = false;
+    bool performanceMode = false;
     bool remoteCollision = true;
     bool pvp = false;
 };
@@ -54,6 +55,7 @@ struct DirectHostConfig {
     RoomSettings settings;
     bool wantPuppet = true;
     bool wantMidna = false;
+    bool supportsSemanticVisuals = true;
 };
 
 struct DirectJoinConfig {
@@ -66,6 +68,7 @@ struct DirectJoinConfig {
     RoomSettings settings;
     bool wantPuppet = true;
     bool wantMidna = false;
+    bool supportsSemanticVisuals = true;
 };
 
 struct RelayConfig {
@@ -80,6 +83,7 @@ struct RelayConfig {
     RoomSettings settings;
     bool wantPuppet = true;
     bool wantMidna = false;
+    bool supportsSemanticVisuals = true;
 };
 
 enum class EventKind : uint8_t {
@@ -98,6 +102,7 @@ struct EventContext {
     uint64_t epoch = 0;
     Mode mode = Mode::Disabled;
     bool welcomed = false;
+    bool semanticVisualsReady = false;
     RoomSettings settings;
     std::string clientId;
 };
@@ -121,6 +126,7 @@ struct Status {
     bool welcomed = false;
     bool udpReady = false;
     bool isOwner = false;
+    bool semanticVisualsReady = false;
     std::string name;
     std::string room;
     std::string host;
@@ -132,6 +138,14 @@ struct Status {
     std::string error;
     uint16_t port = 0;
     RoomSettings settings;
+};
+
+struct VisualSendStats {
+    udp::PacketType type = udp::PacketType::PoseMsgpack;
+    uint32_t sequence = 0;
+    uint32_t recipients = 0;
+    uint32_t datagrams = 0;
+    uint64_t wireBytes = 0;
 };
 
 // Non-blocking reliable transport for every JSON gameplay lane. tick() is
@@ -161,6 +175,7 @@ public:
     void disconnect();
 
     [[nodiscard]] Status status() const;
+    [[nodiscard]] VisualSendStats last_visual_send_stats() const;
     [[nodiscard]] const std::map<std::string, std::string>& peers() const;
     [[nodiscard]] bool has_events() const;
     Event pop_event();
