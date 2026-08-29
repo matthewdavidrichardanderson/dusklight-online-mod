@@ -147,8 +147,9 @@ bool map_world_to_screen(dMap_c* map, const Vec& mapPos, f32 drawX, f32 drawY, f
                          f32 drawH, f32& outX, f32& outY) {
     if (map == nullptr || map->mTexSizeX == 0 || map->getTexSizeY() == 0) return false;
     const f32 texelPerCm = map->getTexelPerCm();
+    const f32 mapDeltaX = (mapPos.x - map->mCenterX) * texelPerCm;
     const f32 texX = f32(map->mTexSizeX) * 0.5f +
-                     (mapPos.x - map->mCenterX) * texelPerCm;
+                     (dComIfGp_isMirrorMode() ? -mapDeltaX : mapDeltaX);
     const f32 texY = f32(map->getTexSizeY()) * 0.5f +
                      (mapPos.z - map->getCenterZ()) * texelPerCm;
     if (texX < 0.0f || texY < 0.0f || texX > map->mTexSizeX || texY > map->getTexSizeY()) {
@@ -227,7 +228,8 @@ void draw_minimap_markers(dMeterMap_c* meter) {
             angle += fileList->field_0x1c;
         }
         draw_minimap_arrow(x, y, angle, marker.color, meter->mMapAlpha,
-                           map->getPlayerCursorSize(), scaleX, scaleY);
+                           map->getPlayerCursorSize(),
+                           dComIfGp_isMirrorMode() ? -scaleX : scaleX, scaleY);
     }
 }
 
@@ -592,7 +594,8 @@ void draw_world_text(NameLabelFontAtlas& atlas, const cXyz& worldPos,
     const size_t visibleGlyphs = count_visible_glyphs(atlas, text, codeUnits);
     Mtx invView;
     if (visibleGlyphs == 0 || !MTXInverse(j3dSys.getViewMtx(), invView)) return;
-    const cXyz right(invView[0][0], invView[1][0], invView[2][0]);
+    cXyz right(invView[0][0], invView[1][0], invView[2][0]);
+    if (dComIfGp_isMirrorMode()) right *= -1.0f;
     const cXyz up(invView[0][1], invView[1][1], invView[2][1]);
     constexpr f32 kScale = 0.34f;
     constexpr f32 kOutlineOffset = 2.35f;
