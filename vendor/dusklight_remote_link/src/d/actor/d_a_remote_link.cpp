@@ -2940,12 +2940,17 @@ void daRemoteLink_c::applyWolfEquipmentMatrices(bool i_presentation) {
         backMtx = presentationBackMtx;
     }
 
+    const auto finishModel = [&](J3DModel* model) {
+        model->calc();
+        if (i_presentation) overrideRemoteModelMatrices(model);
+    };
+
     if (mpSwordModel != NULL) {
         mDoMtx_stack_c::copy(backMtx);
         mDoMtx_stack_c::transM(31.0f, -29.0f, 19.0f);
         mDoMtx_stack_c::XYZrotM(0, cM_deg2s(32.0f), cM_deg2s(157.0f));
         mpSwordModel->setBaseTRMtx(mDoMtx_stack_c::get());
-        mpSwordModel->calc();
+        finishModel(mpSwordModel);
     }
 
     if (mpSheathModel != NULL) {
@@ -2953,7 +2958,7 @@ void daRemoteLink_c::applyWolfEquipmentMatrices(bool i_presentation) {
         mDoMtx_stack_c::transM(13.0f, -21.0f, 7.0f);
         mDoMtx_stack_c::XYZrotM(0, cM_deg2s(-0.8f), cM_deg2s(157.0f));
         mpSheathModel->setBaseTRMtx(mDoMtx_stack_c::get());
-        mpSheathModel->calc();
+        finishModel(mpSheathModel);
     }
 
     if (mpShieldModel != NULL) {
@@ -2961,7 +2966,7 @@ void daRemoteLink_c::applyWolfEquipmentMatrices(bool i_presentation) {
         mDoMtx_stack_c::transM(11.0f, -18.0f, -13.0f);
         mDoMtx_stack_c::XYZrotM(cM_deg2s(90.0f), cM_deg2s(58.0f), cM_deg2s(-24.0f));
         mpShieldModel->setBaseTRMtx(mDoMtx_stack_c::get());
-        mpShieldModel->calc();
+        finishModel(mpShieldModel);
     }
 }
 
