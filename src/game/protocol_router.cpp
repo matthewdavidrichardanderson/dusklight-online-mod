@@ -67,14 +67,13 @@ constexpr std::array kEntries = {
     Entry{"bottle_slots", {Domain::Progression, false, true}},
     Entry{"bomb_bag_slot", {Domain::Progression, false, true}},
     Entry{"rupee_count", {Domain::Progression, false, true}},
+    Entry{"rupee_delta", {Domain::Progression, false, true}},
     Entry{"poe_count", {Domain::Progression, false, true}},
     Entry{"malo_fundraising", {Domain::Progression, false, true}},
     Entry{"charlo_offering", {Domain::Progression, false, true}},
     Entry{"fish_record", {Domain::Progression, false, true}},
-    // Match the AIO ordering contract: the resolved item and its companion
-    // absolute counters must be consumed in wire order. Deferring only the
-    // item lets (for example) rupee_count apply first and the queued rupee
-    // reward add the same pickup again after the stage becomes ready.
+    // Resolved rewards are safe away from a loaded stage and must not wait
+    // behind unrelated stage work.
     Entry{"rando_item_get", {Domain::OptionalRandomizer, false, true}},
     Entry{"pose", {Domain::Visual, false, false}},
     Entry{"midna_pose", {Domain::Visual, false, false}},

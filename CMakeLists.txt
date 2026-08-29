@@ -1,6 +1,29 @@
 cmake_minimum_required(VERSION 3.26)
 project(dusklight_online LANGUAGES CXX)
 
+# Distribution builds must not expose the local Windows account or workspace
+# through compiler diagnostics, __FILE__ strings, CodeView records, or linked
+# static dependencies. MSVC only honours /pathmap consistently when its
+# deterministic front-end mode is enabled. Apply this directory-wide before
+# declaring the SDK and third-party targets so their linked objects are clean
+# as well as the mod's own objects.
+if (MSVC)
+    file(TO_CMAKE_PATH "$ENV{USERPROFILE}" DUSKLIGHT_ONLINE_BUILD_USER_ROOT)
+    file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" DUSKLIGHT_ONLINE_BUILD_SOURCE_ROOT)
+    file(TO_CMAKE_PATH "${CMAKE_BINARY_DIR}" DUSKLIGHT_ONLINE_BUILD_BINARY_ROOT)
+    add_compile_options(
+        "/experimental:deterministic"
+        "/pathmap:${DUSKLIGHT_ONLINE_BUILD_SOURCE_ROOT}=Z:\\src"
+        "/pathmap:${DUSKLIGHT_ONLINE_BUILD_BINARY_ROOT}=Z:\\build"
+    )
+    if (DUSKLIGHT_ONLINE_BUILD_USER_ROOT)
+        add_compile_options(
+            "/pathmap:${DUSKLIGHT_ONLINE_BUILD_USER_ROOT}=Z:\\redacted"
+        )
+    endif ()
+    add_link_options("/Brepro")
+endif ()
+
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)

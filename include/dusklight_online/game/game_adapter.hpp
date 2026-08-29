@@ -64,7 +64,7 @@ public:
     void notify_local_dark_clear(int level);
     void notify_local_max_life(int previous, int value);
     void notify_local_bottle_slots(int previous, int value);
-    void notify_local_rupees(int value);
+    void notify_local_rupees(int previous, int value);
     void notify_local_item_grant(const ItemGiveInfo& info);
 
     void reset_session();

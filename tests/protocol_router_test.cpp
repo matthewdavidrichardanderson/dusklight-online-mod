@@ -30,11 +30,12 @@ public:
     void peer_left(std::string_view) override {}
 };
 
-Event message(std::string type) {
+Event message(std::string type, bool syncFlags = true) {
     Event event;
     event.kind = EventKind::Message;
     event.peerId = "peer";
     event.message = {{"type", std::move(type)}};
+    event.ingress.settings.syncFlags = syncFlags;
     return event;
 }
 
@@ -54,7 +55,7 @@ int main() {
         {"remote_collision",Domain::Membership,false,false}, {"pvp_enabled",Domain::Membership,false,false},
         {"presence",Domain::Presence,false,false}, {"progression_state",Domain::Presence,false,true},
         {"puppet_preference",Domain::Presence,false,false}, {"midna_preference",Domain::Presence,false,false},
-        {"sync_request",Domain::Progression,false,true}, {"save_snapshot",Domain::Progression,true,true},
+        {"sync_request",Domain::Progression,false,false}, {"save_snapshot",Domain::Progression,true,true},
         {"event_bit",Domain::Progression,false,true}, {"tbox_bit",Domain::Progression,true,true},
         {"switch_bit",Domain::Progression,true,true}, {"room_switch_bit",Domain::Progression,true,true},
         {"item_bit",Domain::Progression,true,true}, {"dungeon_item_bit",Domain::Progression,true,true},
@@ -67,7 +68,8 @@ int main() {
         {"key_num",Domain::Progression,true,true}, {"light_drop_num",Domain::Progression,false,true},
         {"light_drop_get_flag",Domain::Progression,false,true}, {"max_life_update",Domain::Progression,false,true},
         {"bottle_slots",Domain::Progression,false,true}, {"bomb_bag_slot",Domain::Progression,false,true},
-        {"rupee_count",Domain::Progression,false,true}, {"poe_count",Domain::Progression,false,true},
+        {"rupee_count",Domain::Progression,false,true}, {"rupee_delta",Domain::Progression,false,true},
+        {"poe_count",Domain::Progression,false,true},
         {"malo_fundraising",Domain::Progression,false,true}, {"charlo_offering",Domain::Progression,false,true},
         {"fish_record",Domain::Progression,false,true},
         {"rando_item_get",Domain::OptionalRandomizer,false,true},
@@ -108,7 +110,7 @@ int main() {
     assert(router.stats().pendingMessages == 0);
     assert(consumer.types.size() == 2 && consumer.types.back() == "rando_item_get");
 
-    assert(router.route(message("event_bit"), false) == ApplyResult::IgnoredByPolicy);
+    assert(router.route(message("event_bit", false), false) == ApplyResult::IgnoredByPolicy);
     assert(consumer.types.size() == 2);
     assert(router.route(message("future_unreviewed_lane"), true) == ApplyResult::Unsupported);
 

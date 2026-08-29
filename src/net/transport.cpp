@@ -35,7 +35,6 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
-#include <set>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -478,18 +477,8 @@ struct Transport::Impl {
             }
             (void)udp_tx_target_rate_locked(destinationKey, now);
 
-            std::set<uint32_t> fullyQueuedStaleSequences;
-            for (const PacedDatagram& queued : udpTxQueue) {
-                if (queued.queueKey != queueKey || queued.datagram.sequence >= sequence) {
-                    continue;
-                }
-                if (queued.datagram.chunkIndex == 0) {
-                    fullyQueuedStaleSequences.insert(queued.datagram.sequence);
-                }
-            }
             for (auto it = udpTxQueue.begin(); it != udpTxQueue.end();) {
-                if (it->queueKey == queueKey &&
-                    fullyQueuedStaleSequences.contains(it->datagram.sequence)) {
+                if (it->queueKey == queueKey && it->datagram.sequence < sequence) {
                     it = udpTxQueue.erase(it);
                 } else {
                     ++it;

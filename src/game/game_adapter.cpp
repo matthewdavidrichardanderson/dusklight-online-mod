@@ -1194,7 +1194,7 @@ void meter_move_rupee_post(ModContext*, void*, void*, void*) {
         sPendingMeterRupeeMutations.pop_back();
     }
     if (pending.publish && sActiveAdapter != nullptr && !sActiveAdapter->applying_remote()) {
-        sActiveAdapter->notify_local_rupees(dComIfGs_getRupee());
+        sActiveAdapter->notify_local_rupees(pending.previous, dComIfGs_getRupee());
     }
 }
 
@@ -1715,13 +1715,31 @@ void GameAdapter::notify_local_bottle_slots(int previous, int value) {
     });
 }
 
-void GameAdapter::notify_local_rupees(int value) {
+void GameAdapter::notify_local_rupees(int previous, int value) {
     if (pendingRupeePublicationToSuppress_.has_value()) {
         const bool matches = *pendingRupeePublicationToSuppress_ == value;
         pendingRupeePublicationToSuppress_.reset();
         if (matches) return;
     }
     if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed) return;
+
+    if (randomizer_active()) {
+        // Positive randomizer rewards are authoritative through
+        // rando_item_get. Publishing the animated wallet total as well races
+        // that additive reward against absolute totals from every peer and
+        // can grant the same rupees repeatedly. Spending is independent of an
+        // item reward, so retain it as an ordered negative delta.
+        const int delta = value - previous;
+        if (delta >= 0) return;
+        if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
+        publish_local({
+            {"type", "rupee_delta"},
+            {"delta", delta},
+            {"event_sequence", localPermanentSequence_},
+        });
+        return;
+    }
+
     publish_local({{"type", "rupee_count"}, {"value", value}});
 }
 
@@ -3845,6 +3863,12 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return ApplyResult::Applied;
     }
     if (type == "rupee_count") {
+        // A live absolute wallet total is not a randomizer reward. Current
+        // randomizer peers carry positive rewards through rando_item_get and
+        // spending through rupee_delta; ignore companion totals from older
+        // peers. Explicit/manual synchronization still applies the rupee
+        // total contained in save_snapshot.
+        if (randomizer_active()) return ApplyResult::IgnoredByPolicy;
         const int value = message.value("value", -1);
         if (value < 0 || value > dComIfGs_getRupeeMax()) {
             return reject("invalid rupee_count value");
@@ -3856,6 +3880,24 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             pendingRupeePublicationToSuppress_ = static_cast<uint16_t>(value);
             return ApplyResult::IgnoredByPolicy;
         }
+        dComIfGs_setRupee(static_cast<u16>(value));
+        return ApplyResult::Applied;
+    }
+    if (type == "rupee_delta") {
+        if (!randomizer_active()) return ApplyResult::IgnoredByPolicy;
+        const int delta = message.value("delta", 0);
+        const uint32_t sequence = message.value("event_sequence", 0U);
+        if (delta >= 0 || delta < -dComIfGs_getRupeeMax()) {
+            return reject("invalid rupee_delta value");
+        }
+        if (sequence == 0) {
+            return reject("rupee_delta is missing event_sequence");
+        }
+        uint32_t& last = permanentPickupSequence_[sequence_key(routed, "rupee_delta")];
+        if (sequence <= last) return ApplyResult::IgnoredByPolicy;
+        last = sequence;
+        const int value = std::clamp<int>(dComIfGs_getRupee() + delta, 0,
+                                          dComIfGs_getRupeeMax());
         dComIfGs_setRupee(static_cast<u16>(value));
         return ApplyResult::Applied;
     }
