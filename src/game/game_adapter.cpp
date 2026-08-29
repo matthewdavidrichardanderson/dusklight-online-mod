@@ -2506,7 +2506,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     promptView.holdRatio = progressionPrompt_.active && !progressionPrompt_.waiting ?
         std::clamp(float(progressionPrompt_.holdTicks) /
                        float(kProgressionPromptHoldTicks), 0.0f, 1.0f) : 0.0f;
-    const bool remoteGameplayReady = remote_link_gameplay_ready(manualTransitionActive_);
+    const bool remoteGameplayReady = remote_link_gameplay_ready(
+        manualTransitionActive_ || ordonReloadTransitionActive_);
     // A direct host is already an active session while listening, before any
     // peer has completed the welcome handshake. Passive local UI such as the
     // player list should work in that state; remote visuals remain separately
@@ -2535,7 +2536,11 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     }
     if (visualReceiveActive && remoteGameplayReady) {
         dusk::multiplayer::sync_remote_link_actor_dummies(peerPoses_);
-    } else {
+    } else if (!visualReceiveActive) {
+        // Disconnecting or disabling remote models is owned by the mod and
+        // requires explicit cleanup. During room/stage transitions, however,
+        // the scene owns actor teardown; touching the same actors here races
+        // the process deletion list (the recurring Ordon/load crash family).
         dusk::multiplayer::destroy_all_remote_link_dummies();
     }
     // The remote-model option controls what this client receives/renders. It
