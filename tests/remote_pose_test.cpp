@@ -52,8 +52,8 @@ int main() {
     std::string error;
     PeerPoseSnapshot pose;
 
-    // A semantic packet may contain only the explicit empty attachment
-    // container. It must still clear old props and remain a valid snapshot.
+    // Performance Mode rejects even an explicitly empty matrix container: the
+    // representation itself is matrix-free, not merely all-absent by habit.
     json empty = pose_message(1, "semantic_gameplay");
     std::vector<std::uint8_t> packed{'D', 'M', 'P', 'M', 1, 21};
     packed.resize(27, 0);
@@ -62,8 +62,8 @@ int main() {
         {"data", json::binary(packed)},
     };
     if (!decode_and_enforce(empty, nullptr, pose, error) ||
-        !pose.linkMatrices.valid || pose.linkMatrices.body.valid) {
-        std::cerr << "empty semantic attachment container rejected: " << error << '\n';
+        pose.linkMatrices.valid || pose.linkMatricesFresh) {
+        std::cerr << "semantic matrix container was retained: " << error << '\n';
         return 1;
     }
 
@@ -95,33 +95,262 @@ int main() {
         return 1;
     }
 
-    // Even malformed/malicious type-7 input cannot restore body or ordinary
-    // equipped-gear matrix streaming. Independently moving props survive the
-    // representation gate.
-    json injected = pose_message(4, "semantic_gameplay");
+    // Performance Mode carries only the small inputs to Spinner's visual
+    // matrix calculation. The monotonically increasing jump epoch makes the
+    // one-shot extension animation recoverable after a dropped edge packet.
+    json spinner = pose_message(4, "semantic_gameplay");
+    spinner["state"].update({
+        {"ride_actor_kind", 1}, {"spinner_visual_valid", true},
+        {"spinner_link_anchored", true},
+        {"spinner_x", 10.0f}, {"spinner_y", 20.0f}, {"spinner_z", 30.0f},
+        {"spinner_shape_x", 100}, {"spinner_shape_y", -200},
+        {"spinner_shape_z", 300}, {"spinner_rot_y", 400},
+        {"spinner_visual_y_offset", 91.5f}, {"spinner_jump_epoch", 7U},
+    });
+    PeerPoseSnapshot spinnerPose;
+    if (!decode_and_enforce(spinner, &facialPose, spinnerPose, error) ||
+        !spinnerPose.spinnerVisualValid || !spinnerPose.spinnerLinkAnchored ||
+        spinnerPose.rideActorKind != 1 ||
+        spinnerPose.spinnerX != 10.0f || spinnerPose.spinnerY != 20.0f ||
+        spinnerPose.spinnerZ != 30.0f || spinnerPose.spinnerShapeX != 100 ||
+        spinnerPose.spinnerShapeY != -200 || spinnerPose.spinnerShapeZ != 300 ||
+        spinnerPose.spinnerRotY != 400 || spinnerPose.spinnerVisualYOffset != 91.5f ||
+        spinnerPose.spinnerJumpEpoch != 7U) {
+        std::cerr << "spinner semantic visual state was not decoded: " << error << '\n';
+        return 1;
+    }
+
+    // Ball and Chain's rigid ball pose supersedes its old held-item matrix.
+    // This both validates the compact fields and prevents a stale retained
+    // matrix from winning after a dropped delta packet.
+    json ironBall = pose_message(5, "semantic_gameplay");
+    ironBall["state"].update({
+        {"iron_ball_visual_valid", true},
+        {"iron_ball_link_anchored", false},
+        {"iron_ball_x", 40.0f}, {"iron_ball_y", 50.0f},
+        {"iron_ball_z", 60.0f}, {"iron_ball_angle_x", 700},
+        {"iron_ball_angle_y", -800}, {"iron_ball_angle_z", 900},
+        {"left_hand_shape", 4}, {"right_hand_shape", 5},
+        {"iron_ball_chain", {{"count", 2},
+            {"data", json::binary({uint8_t(127), uint8_t(0), uint8_t(0),
+                                     uint8_t(0), uint8_t(127), uint8_t(0)})},
+            {"end", json::binary({uint8_t(4), uint8_t(252), uint8_t(2)})}}},
+        {"link_matrices", {{"held_item", identity_model()}}},
+    });
+    PeerPoseSnapshot ironBallPose;
+    if (!decode_and_enforce(ironBall, &spinnerPose, ironBallPose, error) ||
+        !ironBallPose.ironBallVisualValid || ironBallPose.ironBallLinkAnchored ||
+        ironBallPose.ironBallX != 40.0f ||
+        ironBallPose.ironBallY != 50.0f || ironBallPose.ironBallZ != 60.0f ||
+        ironBallPose.ironBallAngleX != 700 || ironBallPose.ironBallAngleY != -800 ||
+        ironBallPose.ironBallAngleZ != 900 ||
+        ironBallPose.leftHandShape != 4 || ironBallPose.rightHandShape != 5 ||
+        ironBallPose.ironBallChainCount != 2 ||
+        ironBallPose.ironBallChainDirections.size() != 6 ||
+        ironBallPose.ironBallChainEndOffsetX != 1.0f ||
+        ironBallPose.ironBallChainEndOffsetY != -1.0f ||
+        ironBallPose.ironBallChainEndOffsetZ != 0.5f ||
+        !ironBallPose.ironBallChainEndOffsetValid ||
+        ironBallPose.linkMatrices.heldItem.valid) {
+        std::cerr << "iron ball semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json hookshot = pose_message(6, "semantic_gameplay");
+    hookshot["state"].update({
+        {"hookshot_visual", {
+            {"left", false}, {"top_link_anchored", true},
+            {"sub_top_link_anchored", true}, {"top", {11.0f, 22.0f, 33.0f}},
+            {"top_angle", {123, -456, 789}}, {"sub_top", {44.0f, 55.0f, 66.0f}},
+            {"sub_top_angle", {-321, 654, -987}}, {"stop_time", 7},
+            {"item_frame", 8.5f}, {"tip_frame", 9.5f}, {"sub_tip_frame", 10.5f},
+        }},
+        {"link_matrices", {
+            {"held_item", identity_model()}, {"hook_tip", identity_model()},
+            {"hook_sub_item", identity_model()}, {"hook_sub_tip", identity_model()},
+        }},
+    });
+    PeerPoseSnapshot hookshotPose;
+    if (!decode_and_enforce(hookshot, &ironBallPose, hookshotPose, error) ||
+        !hookshotPose.hookshotVisualValid || hookshotPose.hookshotLeft ||
+        !hookshotPose.hookshotTopLinkAnchored ||
+        !hookshotPose.hookshotSubTopLinkAnchored ||
+        hookshotPose.hookshotTopX != 11.0f || hookshotPose.hookshotTopY != 22.0f ||
+        hookshotPose.hookshotTopZ != 33.0f || hookshotPose.hookshotTopAngleX != 123 ||
+        hookshotPose.hookshotTopAngleY != -456 || hookshotPose.hookshotTopAngleZ != 789 ||
+        hookshotPose.hookshotSubTopX != 44.0f ||
+        hookshotPose.hookshotSubTopY != 55.0f || hookshotPose.hookshotSubTopZ != 66.0f ||
+        hookshotPose.hookshotSubTopAngleX != -321 ||
+        hookshotPose.hookshotSubTopAngleY != 654 ||
+        hookshotPose.hookshotSubTopAngleZ != -987 ||
+        hookshotPose.hookshotStopTime != 7 || hookshotPose.hookshotItemFrame != 8.5f ||
+        hookshotPose.hookshotTipFrame != 9.5f || hookshotPose.hookshotSubTipFrame != 10.5f ||
+        hookshotPose.linkMatrices.heldItem.valid || hookshotPose.linkMatrices.hookTip.valid ||
+        hookshotPose.linkMatrices.hookSubItem.valid ||
+        hookshotPose.linkMatrices.hookSubTip.valid) {
+        std::cerr << "hookshot semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json boomerang = pose_message(7, "semantic_gameplay");
+    boomerang["state"].update({
+        {"item_actor_kind", 1},
+        {"boomerang_visual", {
+            {"link_anchored", false}, {"pos", {7.0f, 8.0f, 9.0f}},
+            {"angle", {111, -222, 333}},
+        }},
+        {"link_matrices", {{"item_actor", identity_model()}}},
+    });
+    PeerPoseSnapshot boomerangPose;
+    if (!decode_and_enforce(boomerang, &hookshotPose, boomerangPose, error) ||
+        !boomerangPose.boomerangVisualValid || boomerangPose.boomerangLinkAnchored ||
+        boomerangPose.boomerangX != 7.0f || boomerangPose.boomerangY != 8.0f ||
+        boomerangPose.boomerangZ != 9.0f || boomerangPose.boomerangAngleX != 111 ||
+        boomerangPose.boomerangAngleY != -222 || boomerangPose.boomerangAngleZ != 333 ||
+        boomerangPose.linkMatrices.itemActor.valid) {
+        std::cerr << "boomerang semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json copyRod = pose_message(8, "semantic_gameplay");
+    copyRod["state"].update({
+        {"equip_item", 0x46},
+        {"copy_rod_visual", {{"top_use", true}}},
+        {"link_matrices", {{"held_item", identity_model()}}},
+    });
+    PeerPoseSnapshot copyRodPose;
+    if (!decode_and_enforce(copyRod, &boomerangPose, copyRodPose, error) ||
+        !copyRodPose.copyRodVisualValid || !copyRodPose.copyRodTopUse ||
+        copyRodPose.linkMatrices.heldItem.valid) {
+        std::cerr << "copy rod semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json bow = pose_message(9, "semantic_gameplay");
+    bow["state"].update({
+        {"equip_item", 0x59},
+        {"bow_visual", {
+            {"grab_left", true}, {"bck", 123}, {"frame", 7.5f},
+            {"arrow_visible", true}, {"arrow_bomb", true},
+        }},
+        {"link_matrices", {
+            {"held_item", identity_model()}, {"arrow", identity_model()},
+        }},
+    });
+    PeerPoseSnapshot bowPose;
+    if (!decode_and_enforce(bow, &copyRodPose, bowPose, error) ||
+        !bowPose.bowVisualValid || !bowPose.bowGrabLeft ||
+        bowPose.bowBck != 123 || bowPose.bowFrame != 7.5f ||
+        !bowPose.bowArrowVisible || !bowPose.bowArrowBomb ||
+        bowPose.linkMatrices.heldItem.valid || bowPose.linkMatrices.arrow.valid) {
+        std::cerr << "bow semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json sling = pose_message(10, "semantic_gameplay");
+    sling["state"].update({
+        {"equip_item", 0x4B},
+        {"bow_visual", {
+            {"grab_left", true}, {"bck", 456}, {"frame", 12.0f},
+            {"arrow_visible", false}, {"arrow_bomb", false},
+        }},
+        {"link_matrices", {{"held_item", identity_model()}}},
+    });
+    PeerPoseSnapshot slingPose;
+    if (!decode_and_enforce(sling, &bowPose, slingPose, error) ||
+        !slingPose.bowVisualValid || slingPose.equipItem != 0x4B ||
+        slingPose.bowBck != 456 || slingPose.bowFrame != 12.0f ||
+        slingPose.bowArrowVisible || slingPose.linkMatrices.heldItem.valid) {
+        std::cerr << "slingshot semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json lantern = pose_message(11, "semantic_gameplay");
+    lantern["state"].update({
+        {"kantera_draw", true},
+        {"lantern_visual", {
+            {"link_anchored", false}, {"hand_attached", false}, {"lit", true},
+            {"pos", {10.0f, 20.0f, 30.0f}},
+            {"base_angle", {100, -200, 300}},
+            {"joint_angle", {-400, 500, -600}},
+        }},
+        {"link_matrices", {
+            {"kantera", identity_model()}, {"kantera_glow", identity_model()},
+        }},
+    });
+    PeerPoseSnapshot lanternPose;
+    if (!decode_and_enforce(lantern, &slingPose, lanternPose, error) ||
+        !lanternPose.lanternVisualValid || lanternPose.lanternLinkAnchored ||
+        lanternPose.lanternHandAttached || !lanternPose.lanternLit ||
+        lanternPose.lanternX != 10.0f || lanternPose.lanternY != 20.0f ||
+        lanternPose.lanternZ != 30.0f ||
+        lanternPose.lanternBaseAngleX != 100 ||
+        lanternPose.lanternBaseAngleY != -200 ||
+        lanternPose.lanternBaseAngleZ != 300 ||
+        lanternPose.lanternJointAngleX != -400 ||
+        lanternPose.lanternJointAngleY != 500 ||
+        lanternPose.lanternJointAngleZ != -600 ||
+        lanternPose.linkMatrices.kantera.valid ||
+        lanternPose.linkMatrices.kanteraGlow.valid) {
+        std::cerr << "lantern semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    json bottle = pose_message(12, "semantic_gameplay");
+    bottle["state"].update({
+        {"equip_item", 0x6C},
+        {"bottle_visual", {
+            {"oil_right", false}, {"joint_right", true},
+            {"drink_set", false}, {"material_stage", 1},
+            {"brk", 5.0f}, {"btp", 2.0f}, {"btk_swing", 3.0f},
+            {"btk_action", 4.0f}, {"btk_finish", 6.0f},
+            {"content", 1}, {"content_frame", 7.0f},
+        }},
+        {"link_matrices", {
+            {"held_item", identity_model()}, {"hook_tip", identity_model()},
+        }},
+    });
+    PeerPoseSnapshot bottlePose;
+    if (!decode_and_enforce(bottle, &lanternPose, bottlePose, error) ||
+        !bottlePose.bottleVisualValid || bottlePose.bottleOilRightAttached ||
+        !bottlePose.bottleJointRightAttached ||
+        bottlePose.bottleDrinkMaterialSet || bottlePose.bottleMaterialStage != 1 ||
+        bottlePose.bottleBrkFrame != 5.0f || bottlePose.bottleBtpFrame != 2.0f ||
+        bottlePose.bottleBtkSwingFrame != 3.0f ||
+        bottlePose.bottleBtkActionFrame != 4.0f ||
+        bottlePose.bottleBtkFinishFrame != 6.0f ||
+        bottlePose.bottleContentKind != 1 ||
+        bottlePose.bottleContentFrame != 7.0f ||
+        bottlePose.linkMatrices.heldItem.valid ||
+        bottlePose.linkMatrices.hookTip.valid) {
+        std::cerr << "bottle semantic visual state was not enforced: " << error << '\n';
+        return 1;
+    }
+
+    // Even malformed/malicious type-7 input cannot restore any body,
+    // equipment, held-item, actor or effect matrix.
+    json injected = pose_message(7, "semantic_gameplay");
     injected["state"]["link_matrices"] = {
         {"body", identity_model()},
         {"sword", identity_model()},
         {"sheath", identity_model()},
         {"shield", identity_model()},
         {"held_item", identity_model()},
+        {"kantera", identity_model()},
+        {"kantera_glow", identity_model()},
+        {"ride_actor", identity_model()},
         {"midna", identity_model()},
     };
     PeerPoseSnapshot injectedPose;
-    if (!decode_and_enforce(injected, &facialPose, injectedPose, error) ||
-        injectedPose.linkMatrices.body.valid ||
-        injectedPose.linkMatrices.sword.valid ||
-        injectedPose.linkMatrices.sheath.valid ||
-        injectedPose.linkMatrices.shield.valid ||
-        !injectedPose.linkMatrices.heldItem.valid ||
-        injectedPose.linkMatrices.midna.valid) {
+    if (!decode_and_enforce(injected, &hookshotPose, injectedPose, error) ||
+        injectedPose.linkMatrices.valid || injectedPose.linkMatricesFresh) {
         std::cerr << "semantic matrix representation gate failed: " << error << '\n';
         return 1;
     }
 
     // Hidden means no presentation payload at all, including cached matrices
     // hydrated from an earlier pose.
-    json hidden = pose_message(5, "hidden_unsupported");
+    json hidden = pose_message(8, "hidden_unsupported");
     hidden["state"]["visual_unsupported_reasons"] = 1;
     PeerPoseSnapshot hiddenPose;
     if (!decode_and_enforce(hidden, &injectedPose, hiddenPose, error) ||
@@ -131,7 +360,7 @@ int main() {
     }
 
     // Type-7 packets must identify their representation explicitly.
-    json unknown = pose_message(6, "");
+    json unknown = pose_message(9, "");
     PeerPoseSnapshot unknownPose;
     if (decode_and_enforce(unknown, &hiddenPose, unknownPose, error) || error.empty()) {
         std::cerr << "semantic pose without visual mode was accepted\n";
@@ -140,7 +369,7 @@ int main() {
 
     // Existing global sequence ordering remains authoritative across visual
     // representation transitions.
-    json stale = pose_message(5, "semantic_gameplay");
+    json stale = pose_message(7, "semantic_gameplay");
     PeerPoseSnapshot stalePose;
     if (dusklight_online::game::decode_peer_pose(stale, "peer", &hiddenPose,
                                                   stalePose, error) ||
@@ -250,6 +479,29 @@ int main() {
             backToIdle, "snapshot-peer", 7, 13, error) ||
         backToIdle["state"].value("proc_id", 0) != 1) {
         std::cerr << "named baseline did not restore idle state: " << error << '\n';
+        return 1;
+    }
+
+    // A Spinner jump is an epoch, not a one-tick boolean edge. If the packet
+    // that first increments it is lost, every later delta against the last
+    // acknowledged baseline must continue carrying the new epoch.
+    dusklight_online::game::clear_remote_matrix_history();
+    json spinnerIdle = spinner;
+    spinnerIdle["sequence"] = 20;
+    spinnerIdle["state"]["spinner_jump_epoch"] = 40U;
+    json spinnerBaseline = spinnerIdle;
+    if (!dusklight_online::game::prepare_remote_matrix_delta(
+            spinnerBaseline, "spinner-peer", 7, 20, 0, true, false, error)) return 1;
+    json spinnerAfterLostJump = spinnerIdle;
+    spinnerAfterLostJump["sequence"] = 22;
+    spinnerAfterLostJump["state"]["spinner_jump_epoch"] = 41U;
+    spinnerAfterLostJump["state"]["spinner_x"] = 12.0f;
+    if (!dusklight_online::game::prepare_remote_matrix_delta(
+            spinnerAfterLostJump, "spinner-peer", 7, 22, 20, true, false, error) ||
+        !spinnerAfterLostJump.value("snapshot_delta_v1", false) ||
+        spinnerAfterLostJump["state"].value("spinner_jump_epoch", 0U) != 41U) {
+        std::cerr << "spinner jump epoch did not survive a lost edge packet: "
+                  << error << '\n';
         return 1;
     }
 

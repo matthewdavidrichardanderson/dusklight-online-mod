@@ -15,6 +15,8 @@
 
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_arrow.h"
+#include "d/actor/d_a_spinner.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item.h"
 #include "f_op/f_op_actor_mng.h"
@@ -42,6 +44,9 @@ std::array<WeightState, 21> sWeightStates{};
 bool sLocalTransformObserved = false;
 bool sLocalTransformFromWolf = false;
 bool sLocalTransformToWolf = false;
+daSpinner_c* sLocalSpinner = nullptr;
+bool sLocalSpinnerJumpPressed = false;
+uint32_t sLocalSpinnerJumpEpoch = 0;
 constexpr uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
 
@@ -344,18 +349,90 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     // Bombs have an authoritative world-object lane with fuse/explosion state.
     // Never also serialize their held model as a generic attached item.
     if (itemActor != nullptr && fopAcM_GetName(itemActor) == fpcNm_NBOMB_e) itemActor = nullptr;
-    J3DModel* arrow = itemActor != nullptr && fopAcM_GetName(itemActor) == fpcNm_ARROW_e ?
-                      itemActor->model : nullptr;
+    daArrow_c* arrowActor =
+        itemActor != nullptr && fopAcM_GetName(itemActor) == fpcNm_ARROW_e ?
+            static_cast<daArrow_c*>(itemActor) : nullptr;
+    J3DModel* arrow = arrowActor != nullptr ? arrowActor->model : nullptr;
     J3DModel* itemActorModel =
         itemActor != nullptr && fopAcM_GetName(itemActor) != fpcNm_ARROW_e ?
             itemActor->model : nullptr;
+    // The Dominion Rod control ball has never had a corresponding remote
+    // display model; its legacy item-actor matrix was sent and rejected.
+    // Keep it out of the attachment lane rather than paying for dead data.
+    if (itemActor != nullptr && fopAcM_GetName(itemActor) == fpcNm_CROD_e) {
+        itemActorModel = nullptr;
+    }
     const int itemActorKind =
         itemActor != nullptr && fopAcM_GetName(itemActor) == fpcNm_BOOMERANG_e ?
             dusk::multiplayer::REMOTE_ITEM_ACTOR_BOOMERANG :
             dusk::multiplayer::REMOTE_ITEM_ACTOR_NONE;
+    const bool boomerangVisualValid =
+        humanParts && itemActorKind == dusk::multiplayer::REMOTE_ITEM_ACTOR_BOOMERANG &&
+        itemActorModel != nullptr;
+    const bool boomerangLinkAnchored =
+        boomerangVisualValid && fopAcM_GetParam(itemActor) == 0;
+    const bool ironBallVisualValid =
+        humanParts && link->mEquipItem == dItemNo_IRONBALL_e &&
+        link->mHeldItemModel != nullptr && link->mIronBallChainPos != nullptr &&
+        link->mIronBallChainAngle != nullptr;
+    const bool ironBallLinkAnchored =
+        ironBallVisualValid && link->mItemVar0.field_0x3018 == 0;
+    const bool hookshotVisualValid =
+        humanParts && (link->mEquipItem == dItemNo_HOOKSHOT_e ||
+                       link->mEquipItem == dItemNo_W_HOOKSHOT_e) &&
+        link->mHeldItemModel != nullptr && link->mpHookTipModel != nullptr;
+    const bool copyRodVisualValid =
+        humanParts && (link->mEquipItem == dItemNo_COPY_ROD_e ||
+                       link->mEquipItem == dItemNo_COPY_ROD_2_e) &&
+        link->mHeldItemModel != nullptr;
+    const bool bowVisualValid =
+        humanParts && (link->checkBowItem(link->mEquipItem) ||
+                       link->mEquipItem == dItemNo_PACHINKO_e) &&
+        link->mHeldItemModel != nullptr;
+    const bool lanternVisualValid =
+        humanParts && (link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_1) ||
+                       link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_20000)) &&
+        link->mpKanteraModel != nullptr && link->mpKanteraGlowModel != nullptr;
+    const bool lanternNormalPlacement =
+        lanternVisualValid && link->mProcID != daAlink_c::PROC_OPEN_TREASURE &&
+        !link->checkEndResetFlg1(daPy_py_c::ERFLG1_UNK_4) &&
+        (link->mProcID != daAlink_c::PROC_GET_ITEM ||
+         link->mProcVar4.field_0x3010 == 0);
+    const bool lanternHandAttached =
+        lanternNormalPlacement &&
+        (link->mEquipItem == dItemNo_KANTERA_e ||
+         link->checkOilBottleItemNotGet(link->mEquipItem));
+    const bool bottleVisualValid =
+        humanParts && link->checkBottleItem(link->mEquipItem) &&
+        link->mHeldItemModel != nullptr;
+    const bool bottleOilRightAttached =
+        bottleVisualValid && link->checkOilBottleItemNotGet(link->mEquipItem);
+    const int bottleContentKind =
+        link->mEquipItem == dItemNo_FAIRY_e ? 1 :
+        link->mEquipItem == dItemNo_WORM_e ? 2 :
+        link->mEquipItem == dItemNo_BEE_CHILD_e ? 3 : 0;
     fopAc_ac_c* rideActor = humanParts ? link->mRideAcKeep.getActor() : nullptr;
-    J3DModel* spinner = rideActor != nullptr && fopAcM_GetName(rideActor) == fpcNm_SPINNER_e ?
-                        rideActor->model : nullptr;
+    daSpinner_c* spinnerActor =
+        rideActor != nullptr && fopAcM_GetName(rideActor) == fpcNm_SPINNER_e ?
+            static_cast<daSpinner_c*>(rideActor) : nullptr;
+    J3DModel* spinner = spinnerActor != nullptr ? spinnerActor->model : nullptr;
+    if (spinnerActor != sLocalSpinner) {
+        sLocalSpinner = spinnerActor;
+        sLocalSpinnerJumpPressed = false;
+    }
+    if (spinnerActor != nullptr) {
+        const bool jumpPressed = spinnerActor->getButtonJump() != 0;
+        if (jumpPressed && !sLocalSpinnerJumpPressed) ++sLocalSpinnerJumpEpoch;
+        sLocalSpinnerJumpPressed = jumpPressed;
+    } else {
+        sLocalSpinnerJumpPressed = false;
+    }
+    const bool spinnerVisualValid = spinnerActor != nullptr && spinner != nullptr;
+    const bool spinnerLinkAnchored = spinnerVisualValid && link->checkSpinnerRide();
+    const float spinnerVisualYOffset = spinnerVisualValid ?
+        spinner->getBaseTRMtx()[1][3] - spinnerActor->current.pos.y : 90.0f;
+    const int spinnerRotY = spinnerVisualValid ?
+        static_cast<s16>(spinnerActor->getAngleY() - spinnerActor->shape_angle.y) : 0;
     const bool swordHandAttached =
         humanParts && link->mSwordModel != nullptr &&
         link->mpLinkModel->getModelData()->getJointNum() > 10 &&
@@ -366,6 +443,18 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         link->mpLinkModel->getModelData()->getJointNum() > 15 &&
         matrices_nearly_equal(link->mShieldModel->getBaseTRMtx(),
                               link->mpLinkModel->getAnmMtx(15));
+    const auto selectedHandShape = [&](J3DShape* selected) {
+        if (!humanParts || selected == nullptr || link->mpLinkHandModel == nullptr ||
+            link->mpLinkHandModel->getModelData() == nullptr) {
+            return -1;
+        }
+        J3DModelData* handData = link->mpLinkHandModel->getModelData();
+        for (u16 i = 0; i < handData->getMaterialNum(); ++i) {
+            J3DMaterial* material = handData->getMaterialNodePointer(i);
+            if (material != nullptr && material->getShape() == selected) return int(i);
+        }
+        return -1;
+    };
     const bool bodyRootValid = link->mpLinkModel->getModelData() != nullptr &&
                                link->mpLinkModel->getModelData()->getJointNum() > 0;
     MtxP bodyRoot = bodyRootValid ? link->mpLinkModel->getAnmMtx(0) : nullptr;
@@ -382,8 +471,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"visual_mode", visualUnsupportedReasons == 0 ? "semantic_gameplay" :
                                                          "hidden_unsupported"},
         {"visual_unsupported_reasons", visualUnsupportedReasons},
-        {"matrix_scope", !semanticVisualsEnabled ? "full_body" :
-                             semanticGameplay ? "attachments" : "none"},
+        {"matrix_scope", !semanticVisualsEnabled ? "full_body" : "none"},
         {"stage", dComIfGp_getStartStageName()},
         {"room", int(fopAcM_GetRoomNo(player))},
         {"layer", int(dComIfGp_getStartStageLayer())},
@@ -475,6 +563,10 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
                                   bool(link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_8000000))},
         {"sword_hand_attached", swordHandAttached},
         {"shield_hand_attached", shieldHandAttached},
+        // Finger poses are discrete hand meshes selected by animation/item
+        // state, rather than joints contained in Link's body animation.
+        {"left_hand_shape", selectedHandShape(link->field_0x06d0)},
+        {"right_hand_shape", selectedHandShape(link->field_0x06d4)},
         {"sword_out", !wolf && link->mEquipItem == 0x103},
         {"heavy_boots", !wolf && bool(link->checkEquipHeavyBoots())},
         {"item_draw", !wolf && bool(link->checkItemDraw())},
@@ -487,6 +579,211 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"audio_events", audio_json(audioEvents)},
         {"active_audio_events", audio_json(activeAudioEvents)},
     };
+    if (semanticGameplay && spinnerVisualValid) {
+        // Spinner is reconstructed as a passive display model. These are the
+        // inputs to daSpinner_c::setMatrix(), not a streamed model skeleton;
+        // no remote Spinner actor, collision, attack, path or effect exists.
+        state.update({
+            {"spinner_visual_valid", true},
+            // While mounted, vanilla setSpinnerSyncPos() makes Link's
+            // current.pos the exact Spinner model origin. Sharing that anchor
+            // prevents two independent interpolation histories from drifting.
+            {"spinner_link_anchored", spinnerLinkAnchored},
+            {"spinner_shape_x", int(spinnerActor->shape_angle.x)},
+            {"spinner_shape_y", int(spinnerActor->shape_angle.y)},
+            {"spinner_shape_z", int(spinnerActor->shape_angle.z)},
+            {"spinner_rot_y", spinnerRotY},
+            {"spinner_visual_y_offset", spinnerVisualYOffset},
+            {"spinner_jump_epoch", sLocalSpinnerJumpEpoch},
+        });
+        if (!spinnerLinkAnchored) {
+            // During PROC_SPINNER_READY Link is still jumping toward the
+            // independently placed Spinner, so its world position is needed.
+            state.update({
+                {"spinner_x", spinnerActor->current.pos.x},
+                {"spinner_y", spinnerActor->current.pos.y},
+                {"spinner_z", spinnerActor->current.pos.z},
+            });
+        }
+    }
+    if (semanticGameplay && ironBallVisualValid) {
+        state.update({
+            {"iron_ball_visual_valid", true},
+            // In mode zero vanilla derives chain element zero from animated
+            // body joint 10. Let the receiver repeat that exact operation so
+            // the held ball shares Link's presentation/interpolation history.
+            {"iron_ball_link_anchored", ironBallLinkAnchored},
+        });
+        if (!ironBallLinkAnchored) {
+            // Swinging, thrown and returning modes are chain-simulated in
+            // world space, independently of the presented body skeleton.
+            const cXyz& ballPos = link->mIronBallChainPos[0];
+            const csXyz& ballAngle = link->mIronBallChainAngle[0];
+            state.update({
+                {"iron_ball_x", ballPos.x},
+                {"iron_ball_y", ballPos.y},
+                {"iron_ball_z", ballPos.z},
+                {"iron_ball_angle_x", int(ballAngle.x)},
+                {"iron_ball_angle_y", int(ballAngle.y)},
+                {"iron_ball_angle_z", int(ballAngle.z)},
+            });
+        }
+        // Every simulated link is ten world units long. Preserve its visual
+        // direction with three signed normalized bytes; positions and Euler
+        // rotations are reconstructed remotely. This costs 18 bytes in the
+        // ordinary held state and at most 300 bytes at full extension.
+        const int chainCount = std::clamp<int>(link->mItemMode, 0, 100);
+        std::vector<uint8_t> chainDirections;
+        chainDirections.reserve(static_cast<size_t>(chainCount) * 3);
+        for (int i = 0; i < chainCount; ++i) {
+            cXyz direction = link->mIronBallChainPos[i + 1] -
+                             link->mIronBallChainPos[i];
+            direction.normalizeZP();
+            const auto packDirection = [](float value) {
+                const int packed = static_cast<int>(std::lround(
+                    std::clamp(value, -1.0f, 1.0f) * 127.0f));
+                return static_cast<uint8_t>(static_cast<int8_t>(packed));
+            };
+            chainDirections.push_back(packDirection(direction.x));
+            chainDirections.push_back(packDirection(direction.y));
+            chainDirections.push_back(packDirection(direction.z));
+        }
+        const cXyz chainEndOffset = link->mIronBallChainPos[chainCount] -
+                                    link->mHookshotTopPos;
+        const auto packEndOffset = [](float value) {
+            const int packed = static_cast<int>(std::lround(
+                std::clamp(value * 4.0f, -127.0f, 127.0f)));
+            return static_cast<uint8_t>(static_cast<int8_t>(packed));
+        };
+        state["iron_ball_chain"] = {
+            {"count", chainCount},
+            {"data", json::binary(std::move(chainDirections))},
+            // The direction quantization error is tiny per link but can
+            // accumulate at full extension. Three quarter-unit bytes retain
+            // the exact hand-side endpoint without streaming another matrix.
+            {"end", json::binary({packEndOffset(chainEndOffset.x),
+                                   packEndOffset(chainEndOffset.y),
+                                   packEndOffset(chainEndOffset.z)})},
+        };
+    }
+    if (semanticGameplay && hookshotVisualValid) {
+        csXyz hookshotTopAngle;
+        csXyz hookshotSubTopAngle;
+        mDoMtx_MtxToRot(link->mpHookTipModel->getBaseTRMtx(), &hookshotTopAngle);
+        if (link->field_0x0714 != nullptr) {
+            mDoMtx_MtxToRot(link->field_0x0714->getBaseTRMtx(), &hookshotSubTopAngle);
+        } else {
+            hookshotSubTopAngle = hookshotTopAngle;
+        }
+        const float hookshotSubTipFrame =
+            dComIfGp_checkPlayerStatus1(0, 0x10000) ||
+                    dComIfGp_checkPlayerStatus1(0, 0x2000000) ?
+                14.0f : 0.0f;
+        const bool hookshotTopLinkAnchored =
+            link->mHookshotTopPos.abs2(link->mHeldItemRootPos) < 1.0f;
+        const bool hookshotSubTopLinkAnchored =
+            link->mIronBallBgChkPos.abs2(link->field_0x3810) < 1.0f;
+        state["hookshot_visual"] = {
+            {"left", link->field_0x3020 == 0},
+            {"top_link_anchored", hookshotTopLinkAnchored},
+            {"sub_top_link_anchored", hookshotSubTopLinkAnchored},
+            {"top", {link->mHookshotTopPos.x, link->mHookshotTopPos.y,
+                     link->mHookshotTopPos.z}},
+            {"top_angle", {int(hookshotTopAngle.x), int(hookshotTopAngle.y),
+                           int(hookshotTopAngle.z)}},
+            {"sub_top", {link->mIronBallBgChkPos.x, link->mIronBallBgChkPos.y,
+                         link->mIronBallBgChkPos.z}},
+            {"sub_top_angle", {int(hookshotSubTopAngle.x),
+                               int(hookshotSubTopAngle.y),
+                               int(hookshotSubTopAngle.z)}},
+            {"stop_time", int(link->field_0x3026)},
+            {"item_frame", link->field_0x33dc},
+            {"tip_frame", link->field_0x33e0},
+            {"sub_tip_frame", hookshotSubTipFrame},
+        };
+    }
+    if (semanticGameplay && copyRodVisualValid) {
+        state["copy_rod_visual"] = {
+            {"top_use", bool(link->checkCopyRodTopUse())},
+        };
+    }
+    if (semanticGameplay && bowVisualValid) {
+        // Bows and the slingshot are animated independently from Link's body,
+        // but their bases still attach to one of Link's final hand joints.
+        // The arrow actor remains owned by Link only while nocked; fired
+        // projectiles leave this legacy visual lane immediately.
+        state["bow_visual"] = {
+            {"grab_left", bool(link->checkBowGrabLeftHand())},
+            {"bck", int(link->mAnmHeap9.getIdx())},
+            {"frame", link->field_0x33dc},
+            {"arrow_visible", arrowActor != nullptr && arrowActor->checkWait()},
+            {"arrow_bomb", arrowActor != nullptr && arrowActor->checkBombArrow()},
+        };
+    }
+    if (semanticGameplay && lanternVisualValid) {
+        csXyz lanternJointAngle;
+        mDoMtx_MtxToRot(link->mpKanteraModel->getAnmMtx(1), &lanternJointAngle);
+        json lantern = {
+            {"link_anchored", lanternNormalPlacement},
+            {"hand_attached", lanternHandAttached},
+            {"lit", bool(link->checkNoResetFlg1(daPy_py_c::FLG1_UNK_80))},
+            {"joint_angle", {int(lanternJointAngle.x), int(lanternJointAngle.y),
+                              int(lanternJointAngle.z)}},
+        };
+        if (!lanternNormalPlacement) {
+            MtxP base = link->mpKanteraModel->getBaseTRMtx();
+            csXyz baseAngle;
+            mDoMtx_MtxToRot(base, &baseAngle);
+            lantern.update({
+                {"pos", {base[0][3], base[1][3], base[2][3]}},
+                {"base_angle", {int(baseAngle.x), int(baseAngle.y),
+                                 int(baseAngle.z)}},
+            });
+        }
+        state["lantern_visual"] = std::move(lantern);
+    }
+    if (semanticGameplay && bottleVisualValid) {
+        // A bottle is attached to Link, but its liquid texture, open/closed
+        // state and (for fairy/worm/bee bottles) contents are independent
+        // model animations. Preserve those small semantic controls instead of
+        // transmitting either bottle model's calculated matrices.
+        state["bottle_visual"] = {
+            {"oil_right", bottleOilRightAttached},
+            {"joint_right", !bottleOilRightAttached && link->mItemMode != 0},
+            {"drink_set", bool(link->checkDrinkBottleItem(link->mEquipItem) ||
+                                bottleOilRightAttached)},
+            {"material_stage", link->mProcVar2.field_0x300c},
+            {"brk", link->field_0x0724 != nullptr ?
+                        link->field_0x0724->getFrame() : 0.0f},
+            {"btp", link->field_0x072c != nullptr ?
+                        link->field_0x072c->getFrame() : 0.0f},
+            {"btk_swing", link->field_0x0718 != nullptr ?
+                              link->field_0x0718->getFrame() : 0.0f},
+            {"btk_action", link->field_0x071c != nullptr ?
+                               link->field_0x071c->getFrame() : 0.0f},
+            {"btk_finish", link->field_0x0720 != nullptr ?
+                               link->field_0x0720->getFrame() : 0.0f},
+            {"content", bottleContentKind},
+            {"content_frame", bottleContentKind != 0 &&
+                                  link->mHookTipBck.getBckAnm() != nullptr ?
+                                      link->mHookTipBck.getFrame() : 0.0f},
+        };
+    }
+    if (semanticGameplay && boomerangVisualValid) {
+        json boomerang = {{"link_anchored", boomerangLinkAnchored}};
+        if (!boomerangLinkAnchored) {
+            MtxP boomerangMatrix = itemActorModel->getBaseTRMtx();
+            csXyz boomerangAngle;
+            mDoMtx_MtxToRot(boomerangMatrix, &boomerangAngle);
+            boomerang.update({
+                {"pos", {boomerangMatrix[0][3], boomerangMatrix[1][3],
+                         boomerangMatrix[2][3]}},
+                {"angle", {int(boomerangAngle.x), int(boomerangAngle.y),
+                           int(boomerangAngle.z)}},
+            });
+        }
+        state["boomerang_visual"] = std::move(boomerang);
+    }
     if (!semanticVisualsEnabled) {
         if (diagnostics != nullptr) {
             diagnostics->matrixScope = LocalPoseMatrixScope::FullBody;
@@ -501,34 +798,22 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
             {humanParts ? link->mpHookTipModel : nullptr},
             {humanParts ? link->field_0x0710 : nullptr},
             {humanParts ? link->field_0x0714 : nullptr}, {arrow},
-            {humanParts ? link->mpKanteraModel : nullptr},
-            {humanParts ? link->mpKanteraGlowModel : nullptr},
+            {lanternVisualValid ? nullptr :
+                 (humanParts ? link->mpKanteraModel : nullptr)},
+            {lanternVisualValid ? nullptr :
+                 (humanParts ? link->mpKanteraGlowModel : nullptr)},
             {humanParts ? itemActorModel : nullptr}, {spinner},
             {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
         }, diagnostics);
     } else if (semanticGameplay) {
-        // Link, wolf, head/hair, face, hands and heavy boots are reconstructed
-        // from semantic animation/body state. Preserve only independently
-        // moving props. Remote Midna is intentionally absent in every mode.
+        // Performance Mode is structurally matrix-free. Link, wolf, equipment,
+        // held items and independently moving props all use semantic state or
+        // their dedicated object lane; unsupported visuals remain absent.
         if (diagnostics != nullptr) {
-            diagnostics->matrixScope = LocalPoseMatrixScope::Attachments;
+            diagnostics->matrixScope = LocalPoseMatrixScope::None;
+            diagnostics->matrixPackedBytes = 0;
+            diagnostics->matrixPresentSlots = 0;
         }
-        state["link_matrices"] = pack_matrices({
-            {nullptr}, {nullptr}, {nullptr}, {nullptr},
-            // Ordinary sword, sheath, and shield placement is fully described
-            // by the body pose plus the hand-attachment flags above. Streaming
-            // these slots would let a stale prop snapshot override the current
-            // semantic body joints (notably while the owning game is paused).
-            {nullptr}, {nullptr}, {nullptr},
-            {humanParts ? link->mHeldItemModel : nullptr},
-            {humanParts ? link->mpHookTipModel : nullptr},
-            {humanParts ? link->field_0x0710 : nullptr},
-            {humanParts ? link->field_0x0714 : nullptr}, {arrow},
-            {humanParts ? link->mpKanteraModel : nullptr},
-            {humanParts ? link->mpKanteraGlowModel : nullptr},
-            {humanParts ? itemActorModel : nullptr}, {spinner},
-            {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
-        }, diagnostics);
     }
 
     poseMessage = {{"type", "pose"}, {"sequence", sequence}, {"state", std::move(state)}};
@@ -540,6 +825,9 @@ void reset_local_pose_state() {
     sLocalTransformObserved = false;
     sLocalTransformFromWolf = false;
     sLocalTransformToWolf = false;
+    sLocalSpinner = nullptr;
+    sLocalSpinnerJumpPressed = false;
+    sLocalSpinnerJumpEpoch = 0;
 }
 
 }  // namespace dusklight_online::game

@@ -17,6 +17,7 @@
 
 #include "JSystem/J3DGraphAnimator/J3DAnimation.h"
 #include "JSystem/J3DGraphAnimator/J3DJoint.h"
+#include "JSystem/J3DGraphBase/J3DDrawBuffer.h"
 #include "JSystem/J3DGraphBase/J3DMaterial.h"
 #include "JSystem/J3DGraphBase/J3DShape.h"
 #include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
@@ -70,6 +71,7 @@ static int sLiveRemoteLinkActors;
 static int sPvpTargetLogCount;
 static uint32_t sPvpTargetLogTicks;
 static f32 const l_remoteMotionAudioVolumeScale = 0.75f;
+static Vec const l_remoteIronBallChainVec = {0.0f, 0.0f, 10.0f};
 
 constexpr f32 remoteMatrixFallbackInterpolationStep(u32 i_elapsedTicks,
                                                     u32 i_durationTicks) {
@@ -116,7 +118,10 @@ static bool isValidRemoteBck(u16 i_resId) {
 }
 
 static bool isBottleItem(u16 i_itemNo) {
-    return i_itemNo >= dItemNo_EMPTY_BOTTLE_e && i_itemNo <= dItemNo_OIL_e;
+    return (i_itemNo >= dItemNo_EMPTY_BOTTLE_e && i_itemNo <= dItemNo_FAIRY_e) ||
+           i_itemNo == dItemNo_BEE_CHILD_e || i_itemNo == dItemNo_WORM_e ||
+           i_itemNo == dItemNo_FAIRY_DROP_e || i_itemNo == dItemNo_CHUCHU_BLACK_e ||
+           (i_itemNo >= dItemNo_CHUCHU_RARE_e && i_itemNo <= dItemNo_LV3_SOUP_e);
 }
 
 static bool isRemoteBombActorKind(int i_kind) {
@@ -627,6 +632,14 @@ static actor_method_class l_daRemoteLink_Method = {
 
 }  // namespace
 
+void daRemoteLink_c::IronBallChainPacket::draw() {
+    if (mpOwner != NULL) mpOwner->drawIronBallChain();
+}
+
+void daRemoteLink_c::HookshotChainPacket::draw() {
+    if (mpOwner != NULL) mpOwner->drawHookshotChains();
+}
+
 daRemoteLink_c::daRemoteLink_c()
     : mpArcHeap(NULL),
       mpOwnedArchive(NULL),
@@ -652,6 +665,11 @@ daRemoteLink_c::daRemoteLink_c()
       mpKanteraGlowModel(NULL),
       mpItemActorModel(NULL),
       mpRideActorModel(NULL),
+      mpSpinnerBck(NULL),
+      mpHookshotItemBck(NULL),
+      mpHookshotTipBck(NULL),
+      mpBowBck(NULL),
+      mpBottleContentBck(NULL),
       mpMidnaModel(NULL),
       mpMidnaMaskModel(NULL),
       mpMidnaHandModel(NULL),
@@ -663,6 +681,10 @@ daRemoteLink_c::daRemoteLink_c()
       mpMidnaGlowModel(NULL),
       mpHeavyBootModels{NULL, NULL},
       mpHeldItemBrk(NULL),
+      mpBottleBtp(NULL),
+      mpBottleBtkSwing(NULL),
+      mpBottleBtkAction(NULL),
+      mpBottleBtkFinish(NULL),
       mAramResourceCache(),
       mpMagicArmorBodyBrk(NULL),
       mpMagicArmorHeadBrk(NULL),
@@ -820,10 +842,111 @@ daRemoteLink_c::daRemoteLink_c()
       mClothesVariant(0),
       mpLeftBodyHandShape(NULL),
       mpRightBodyHandShape(NULL),
+      mRemoteLeftHandShape(-1),
+      mRemoteRightHandShape(-1),
       mRemoteItemActorKind(0),
       mRemoteRideActorKind(0),
       mLoadedItemActorKind(-1),
       mLoadedRideActorKind(-1),
+      mRemoteSpinnerVisualValid(false),
+      mSpinnerBckInitialized(false),
+      mHookshotItemBckInitialized(false),
+      mHookshotTipBckInitialized(false),
+      mRemoteSpinnerVisualPos(cXyz::Zero),
+      mRemoteSpinnerVisualShape(0, 0, 0),
+      mRemoteSpinnerVisualRotY(0),
+      mRemoteSpinnerVisualYOffset(90.0f),
+      mRemoteSpinnerJumpEpoch(0),
+      mAppliedSpinnerJumpEpoch(0),
+      mRemoteIronBallVisualValid(false),
+      mRemoteIronBallLinkAnchored(false),
+      mRemoteIronBallVisualPos(cXyz::Zero),
+      mRemoteIronBallVisualAngle(0, 0, 0),
+      mRemoteIronBallPreviousVisualPos(cXyz::Zero),
+      mRemoteIronBallPreviousVisualAngle(0, 0, 0),
+      mRemoteIronBallPreviousVisualValid(false),
+      mpIronBallChainModelData(NULL),
+      mIronBallChainPacket(),
+      mRemoteIronBallChainCount(0),
+      mRemoteIronBallChainDirections(),
+      mRemoteIronBallChainPreviousDirections(),
+      mRemoteIronBallChainPreviousCount(0),
+      mRemoteIronBallChainPreviousValid(false),
+      mRemoteIronBallChainEndOffsetValid(false),
+      mRemoteIronBallChainPreviousEndOffsetValid(false),
+      mRemoteIronBallChainEndOffset(cXyz::Zero),
+      mRemoteIronBallChainPreviousEndOffset(cXyz::Zero),
+      mRemoteIronBallRenderedPos(cXyz::Zero),
+      mRemoteIronBallRenderedAngle(0, 0, 0),
+      mRemoteIronBallHandRoot(cXyz::Zero),
+      mRemoteHookshotVisualValid(false),
+      mRemoteHookshotLeft(true),
+      mRemoteHookshotTopLinkAnchored(false),
+      mRemoteHookshotSubTopLinkAnchored(false),
+      mRemoteHookshotTop(cXyz::Zero),
+      mRemoteHookshotPreviousTop(cXyz::Zero),
+      mRemoteHookshotSubTop(cXyz::Zero),
+      mRemoteHookshotPreviousSubTop(cXyz::Zero),
+      mRemoteHookshotTopAngle(0, 0, 0),
+      mRemoteHookshotPreviousTopAngle(0, 0, 0),
+      mRemoteHookshotSubTopAngle(0, 0, 0),
+      mRemoteHookshotPreviousSubTopAngle(0, 0, 0),
+      mRemoteHookshotPreviousValid(false),
+      mRemoteHookshotStopTime(0),
+      mRemoteHookshotItemFrame(0.0f),
+      mRemoteHookshotTipFrame(0.0f),
+      mRemoteHookshotSubTipFrame(0.0f),
+      mRemoteHookshotRenderedTop(cXyz::Zero),
+      mRemoteHookshotRenderedSubTop(cXyz::Zero),
+      mRemoteHookshotRoot(cXyz::Zero),
+      mRemoteHookshotSubRoot(cXyz::Zero),
+      mpHookshotChainModelData(NULL),
+      mHookshotChainPacket(),
+      mRemoteBoomerangVisualValid(false),
+      mRemoteBoomerangLinkAnchored(false),
+      mRemoteBoomerangVisualPos(cXyz::Zero),
+      mRemoteBoomerangPreviousVisualPos(cXyz::Zero),
+      mRemoteBoomerangVisualAngle(0, 0, 0),
+      mRemoteBoomerangPreviousVisualAngle(0, 0, 0),
+      mRemoteBoomerangPreviousVisualValid(false),
+      mRemoteBoomerangRenderedPos(cXyz::Zero),
+      mRemoteBoomerangRenderedAngle(0, 0, 0),
+      mRemoteCopyRodVisualValid(false),
+      mRemoteCopyRodTopUse(false),
+      mRemoteBowVisualValid(false),
+      mRemoteBowGrabLeft(false),
+      mRemoteBowBck(0),
+      mLoadedBowBck(0),
+      mRemoteBowFrame(0.0f),
+      mRemoteBowArrowVisible(false),
+      mRemoteBowArrowBomb(false),
+      mLoadedArrowBomb(-1),
+      mRemoteLanternVisualValid(false),
+      mRemoteLanternLinkAnchored(false),
+      mRemoteLanternHandAttached(false),
+      mRemoteLanternLit(false),
+      mRemoteLanternPos(cXyz::Zero),
+      mRemoteLanternPreviousPos(cXyz::Zero),
+      mRemoteLanternBaseAngle(0, 0, 0),
+      mRemoteLanternPreviousBaseAngle(0, 0, 0),
+      mRemoteLanternJointAngle(0, 0, 0),
+      mRemoteLanternPreviousJointAngle(0, 0, 0),
+      mRemoteLanternPreviousValid(false),
+      mRemoteLanternRenderedPos(cXyz::Zero),
+      mRemoteLanternRenderedBaseAngle(0, 0, 0),
+      mRemoteBottleVisualValid(false),
+      mRemoteBottleOilRightAttached(false),
+      mRemoteBottleJointRightAttached(false),
+      mRemoteBottleDrinkMaterialSet(false),
+      mRemoteBottleMaterialStage(0),
+      mRemoteBottleBrkFrame(0.0f),
+      mRemoteBottleBtpFrame(0.0f),
+      mRemoteBottleBtkSwingFrame(0.0f),
+      mRemoteBottleBtkActionFrame(0.0f),
+      mRemoteBottleBtkFinishFrame(0.0f),
+      mRemoteBottleContentKind(0),
+      mRemoteBottleContentFrame(0.0f),
+      mLoadedBottleContentKind(-1),
       mRemoteBombFlashTicks(0),
       mRemoteBombExTime(-1),
       mRemoteBombFlash(-1),
@@ -871,6 +994,8 @@ daRemoteLink_c::daRemoteLink_c()
       mMidnaHairShape(0),
       mSlotReserved(false) {
     mVisualState.form = FORM_HUMAN_KOKIRI;
+    mIronBallChainPacket.setOwner(this);
+    mHookshotChainPacket.setOwner(this);
     for (u32 i = 0; i < ARRAY_SIZE(mOwnedResourceCache); ++i) {
         mOwnedResourceCache[i].index = -1;
         mOwnedResourceCache[i].resource = NULL;
@@ -1668,6 +1793,11 @@ const daRemoteLink_c::HeldItemVisualDesc* daRemoteLink_c::getHeldItemVisualDesc(
          0},
     };
 
+    if (i_itemNo == dItemNo_BOW_e || i_itemNo == dItemNo_BOMB_ARROW_e ||
+        i_itemNo == dItemNo_HAWK_ARROW_e) {
+        return &l_descs[1];
+    }
+
     if (isBottleItem(i_itemNo)) {
         static const HeldItemVisualDesc l_bottleDesc = {
             dItemNo_EMPTY_BOTTLE_e, dRes_ID_ALANM_BMD_AL_BOTTLE_e, 0x5C00, 0,
@@ -1763,6 +1893,36 @@ J3DAnmTevRegKey* daRemoteLink_c::loadAramItemBrk(u16 i_resId, J3DModel* i_model)
     return brk;
 }
 
+J3DAnmTextureSRTKey* daRemoteLink_c::loadAramItemBtk(u16 i_resId,
+                                                      J3DModel* i_model) {
+    if (i_resId == 0 || i_model == NULL || i_model->getModelData() == NULL) {
+        return NULL;
+    }
+    J3DAnmTextureSRTKey* btk = static_cast<J3DAnmTextureSRTKey*>(
+        loadAramResource(i_resId, 0x400, false));
+    if (btk == NULL) return NULL;
+    J3DModelData* data = i_model->getModelData();
+    btk->setFrame(0.0f);
+    btk->searchUpdateMaterialID(data);
+    data->entryTexMtxAnimator(btk);
+    return btk;
+}
+
+J3DAnmTexPattern* daRemoteLink_c::loadAramItemBtp(u16 i_resId,
+                                                  J3DModel* i_model) {
+    if (i_resId == 0 || i_model == NULL || i_model->getModelData() == NULL) {
+        return NULL;
+    }
+    J3DAnmTexPattern* btp = static_cast<J3DAnmTexPattern*>(
+        loadAramResource(i_resId, 0x400, false));
+    if (btp == NULL) return NULL;
+    J3DModelData* data = i_model->getModelData();
+    btp->setFrame(0.0f);
+    btp->searchUpdateMaterialID(data);
+    data->entryTexNoAnimator(btp);
+    return btp;
+}
+
 void daRemoteLink_c::clearHeldItemExtras() {
     mpHookTipModel = NULL;
     mpHookSubItemModel = NULL;
@@ -1772,12 +1932,16 @@ void daRemoteLink_c::clearHeldItemExtras() {
     mHookSubItemMatrixValid = false;
     mHookSubTipMatrixValid = false;
     mArrowMatrixValid = false;
+    mLoadedArrowBomb = -1;
+    mLoadedBottleContentKind = -1;
 }
 
 void daRemoteLink_c::setupHeldItemModel() {
     const HeldItemVisualDesc* desc = getHeldItemVisualDesc(mRemoteEquipItem);
     if (desc == NULL || mVisualState.form == FORM_WOLF) {
         mpHeldItemModel = NULL;
+        mpIronBallChainModelData = NULL;
+        mpHookshotChainModelData = NULL;
         mpHeldItemBrk = NULL;
         clearHeldItemExtras();
         mLoadedHeldItem = 0xFFFF;
@@ -1785,12 +1949,24 @@ void daRemoteLink_c::setupHeldItemModel() {
         return;
     }
 
-    if (mLoadedHeldItem == desc->itemNo && mpHeldItemModel != NULL) {
+    const bool bowItem = mRemoteEquipItem == dItemNo_BOW_e ||
+                         mRemoteEquipItem == dItemNo_BOMB_ARROW_e ||
+                         mRemoteEquipItem == dItemNo_HAWK_ARROW_e;
+    const bool bottleItem = isBottleItem(mRemoteEquipItem);
+    if (mLoadedHeldItem == desc->itemNo && mpHeldItemModel != NULL &&
+        (!bowItem || mLoadedArrowBomb == int(mRemoteBowArrowBomb)) &&
+        (!bottleItem || mLoadedBottleContentKind == mRemoteBottleContentKind)) {
         return;
     }
 
     mpHeldItemModel = NULL;
+    mpIronBallChainModelData = NULL;
+    mpHookshotChainModelData = NULL;
     mpHeldItemBrk = NULL;
+    mpBottleBtp = NULL;
+    mpBottleBtkSwing = NULL;
+    mpBottleBtkAction = NULL;
+    mpBottleBtkFinish = NULL;
     clearHeldItemExtras();
     mLoadedHeldItem = 0xFFFF;
     mHeldItemMatrixValid = false;
@@ -1807,8 +1983,89 @@ void daRemoteLink_c::setupHeldItemModel() {
         mpHeldItemBrk = loadAramItemBrk(desc->brkResId, mpHeldItemModel);
     }
 
+    if (bottleItem) {
+        mpBottleBtp = loadAramItemBtp(dRes_ID_ALANM_BTP_AL_BOTTLE_e,
+                                      mpHeldItemModel);
+        mpBottleBtkSwing = loadAramItemBtk(dRes_ID_ALANM_BTK_BOTTLE_YURE_e,
+                                           mpHeldItemModel);
+        mpBottleBtkAction = loadAramItemBtk(
+            mRemoteBottleDrinkMaterialSet ?
+                dRes_ID_ALANM_BTK_BOTTLE_D_YURE_e :
+                dRes_ID_ALANM_BTK_BOTTLE_NUKU_e,
+            mpHeldItemModel);
+        mpBottleBtkFinish = loadAramItemBtk(
+            mRemoteBottleDrinkMaterialSet ?
+                dRes_ID_ALANM_BTK_BOTTLE_D_NOMU_e :
+                dRes_ID_ALANM_BTK_BOTTLE_DASU_e,
+            mpHeldItemModel);
+
+        s32 contentBmd = 0;
+        u32 contentBmdSize = 0;
+        s32 contentBck = 0;
+        u32 contentBckSize = 0;
+        if (mRemoteBottleContentKind == 1) {
+            contentBmd = dRes_ID_ALANM_BMD_O_GD_NV_e;
+            contentBmdSize = 0x1400;
+            contentBck = dRes_ID_ALANM_BCK_O_GD_NV_e;
+            contentBckSize = 0xC00;
+        } else if (mRemoteBottleContentKind == 2) {
+            contentBmd = dRes_ID_ALANM_BMD_O_GD_WORM_e;
+            contentBmdSize = 0x2400;
+            contentBck = dRes_ID_ALANM_BCK_O_GD_WORM_e;
+            contentBckSize = 0xC00;
+        } else if (mRemoteBottleContentKind == 3) {
+            contentBmd = dRes_ID_ALANM_BMD_O_GD_HK_e;
+            contentBmdSize = 0x1000;
+        }
+        if (contentBmd != 0) {
+            mpHookTipModel = initModel(loadAramBmd(contentBmd, contentBmdSize), 0);
+        }
+        if (mpHookTipModel != NULL && contentBck != 0) {
+            J3DAnmTransform* bck = static_cast<J3DAnmTransform*>(
+                loadAramResource(contentBck, contentBckSize, false));
+            if (mpBottleContentBck == NULL) mpBottleContentBck = JKR_NEW mDoExt_bckAnm();
+            if (mpBottleContentBck != NULL && bck != NULL) {
+                mpBottleContentBck->init(bck, FALSE, J3DFrameCtrl::EMode_LOOP,
+                                         1.0f, 0, -1, true);
+            }
+        }
+        mLoadedBottleContentKind = mRemoteBottleContentKind;
+    }
+
+    if (mRemoteEquipItem == dItemNo_IRONBALL_e) {
+        mpIronBallChainModelData =
+            loadAramBmd(dRes_ID_ALANM_BMD_AL_HS_KUSARI_e, 0x1000);
+        if (mpIronBallChainModelData == NULL) {
+            DuskLog.warn("RemoteLink: iron ball chain model load failed");
+        }
+    }
+
     if (mRemoteEquipItem == dItemNo_HOOKSHOT_e || mRemoteEquipItem == dItemNo_W_HOOKSHOT_e) {
         mpHookTipModel = initModel(loadAramBmd(dRes_ID_ALANM_BMD_AL_HS_TIP_e, 0x3800), 0);
+        mpHookshotChainModelData =
+            loadAramBmd(dRes_ID_ALANM_BMD_AL_HS_KUSARI_e, 0x1000);
+
+        J3DAnmTransform* itemBck = static_cast<J3DAnmTransform*>(
+            loadAramResource(dRes_ID_ALANM_BCK_HS_SPIN_e, 0x2000, false));
+        const bool modifyItemBck = mpHookshotItemBck != NULL;
+        if (mpHookshotItemBck == NULL) mpHookshotItemBck = JKR_NEW mDoExt_bckAnm();
+        mHookshotItemBckInitialized =
+            mpHookshotItemBck != NULL && itemBck != NULL &&
+            mpHookshotItemBck->init(itemBck, FALSE, 2, 1.0f, 0, -1,
+                                    modifyItemBck);
+
+        J3DAnmTransform* tipBck = static_cast<J3DAnmTransform*>(
+            loadAramResource(dRes_ID_ALANM_BCK_HS_TIP_OPEN_e, 0x800, false));
+        const bool modifyTipBck = mpHookshotTipBck != NULL;
+        if (mpHookshotTipBck == NULL) mpHookshotTipBck = JKR_NEW mDoExt_bckAnm();
+        mHookshotTipBckInitialized =
+            mpHookshotTipBck != NULL && tipBck != NULL &&
+            mpHookshotTipBck->init(tipBck, FALSE, 2, 1.0f, 0, -1,
+                                   modifyTipBck);
+        if (!mHookshotItemBckInitialized || !mHookshotTipBckInitialized) {
+            DuskLog.warn("RemoteLink: hookshot animation load failed itemBck={} tipBck={}",
+                         mHookshotItemBckInitialized, mHookshotTipBckInitialized);
+        }
         if (mRemoteEquipItem == dItemNo_W_HOOKSHOT_e) {
             if (mpHeldItemModel != NULL) {
                 mpHookSubItemModel = initModel(mpHeldItemModel->getModelData(), 0);
@@ -1817,11 +2074,14 @@ void daRemoteLink_c::setupHeldItemModel() {
                 mpHookSubTipModel = initModel(mpHookTipModel->getModelData(), 0);
             }
         }
-    } else if (mRemoteEquipItem == dItemNo_BOW_e) {
+    } else if (bowItem) {
+        const s32 arrowResId = mRemoteBowArrowBomb ?
+            dRes_ID_ALINK_BMD_AL_ARROWB_e : dRes_ID_ALINK_BMD_AL_ARROW_e;
         mpArrowModel = initModel(static_cast<J3DModelData*>(
                                      getArchiveObjectRes(mEquipmentArchives[l_eqArcAlink],
-                                                         dRes_ID_ALINK_BMD_AL_ARROW_e)),
+                                                         arrowResId)),
                                  0x80000, 0);
+        mLoadedArrowBomb = int(mRemoteBowArrowBomb);
     }
 
     mLoadedHeldItem = desc->itemNo;
@@ -1897,6 +2157,20 @@ void daRemoteLink_c::setupLinkedItemModels() {
                                              getArchiveObjectRes(mEquipmentArchives[l_eqArcAlink],
                                                                  dRes_ID_ALINK_BMD_AL_SP_e)),
                                          0x80000, 0);
+            J3DAnmTransform* spinnerBck = static_cast<J3DAnmTransform*>(
+                getArchiveObjectRes(mEquipmentArchives[l_eqArcAlink], 0x16));
+            if (mpRideActorModel != NULL && spinnerBck != NULL) {
+                const bool modifyExisting = mpSpinnerBck != NULL;
+                if (mpSpinnerBck == NULL) mpSpinnerBck = JKR_NEW mDoExt_bckAnm();
+                mSpinnerBckInitialized =
+                    mpSpinnerBck != NULL &&
+                    mpSpinnerBck->init(spinnerBck, TRUE, 2,
+                                       1.0f, 0, -1, modifyExisting);
+                if (mSpinnerBckInitialized) {
+                    mpSpinnerBck->setFrame(mpSpinnerBck->getEndFrame());
+                    mpSpinnerBck->setPlaySpeed(0.0f);
+                }
+            }
         }
 
         if (mpRideActorModel != NULL || mRemoteRideActorKind == 0) {
@@ -3044,10 +3318,15 @@ void daRemoteLink_c::updatePvpMidnaBindEffect() {
 }
 
 void daRemoteLink_c::setupDrawHands() {
+    applyHumanHandMatrices(false);
+}
+
+void daRemoteLink_c::applyHumanHandMatrices(bool i_presentation) {
     if (mpHandModel == NULL || mpBodyModel == NULL) {
         return;
     }
 
+    hideAllHandShapes();
     if (mpLeftBodyHandShape != NULL) {
         mpLeftBodyHandShape->show();
     }
@@ -3055,10 +3334,33 @@ void daRemoteLink_c::setupDrawHands() {
         mpRightBodyHandShape->show();
     }
 
+    const auto selectShape = [&](int index, J3DShape* bodyShape) {
+        J3DModelData* handData = mpHandModel->getModelData();
+        if (index < 0 || handData == NULL || index >= handData->getMaterialNum()) return;
+        J3DMaterial* material = handData->getMaterialNodePointer(index);
+        J3DShape* shape = material != NULL ? material->getShape() : NULL;
+        if (shape == NULL) return;
+        if (bodyShape != NULL) bodyShape->hide();
+        shape->show();
+    };
+    selectShape(mRemoteLeftHandShape, mpLeftBodyHandShape);
+    selectShape(mRemoteRightHandShape, mpRightBodyHandShape);
+
     mpHandModel->setBaseTRMtx(mpBodyModel->getBaseTRMtx());
     mpHandModel->calc();
-    mpHandModel->setAnmMtx(1, mpBodyModel->getAnmMtx(9));
-    mpHandModel->setAnmMtx(2, mpBodyModel->getAnmMtx(0xE));
+    const auto setJoint = [&](u16 handJoint, u16 bodyJoint) {
+        Mtx presentation;
+        MtxP source = mpBodyModel->getAnmMtx(bodyJoint);
+        if (i_presentation &&
+            dusk::frame_interp::lookup_replacement(source, presentation)) {
+            mpHandModel->setAnmMtx(handJoint, presentation);
+        } else {
+            mpHandModel->setAnmMtx(handJoint, source);
+        }
+    };
+    setJoint(1, 9);
+    setJoint(2, 0xE);
+    if (i_presentation) overrideRemoteModelMatrices(mpHandModel);
 }
 
 void daRemoteLink_c::applyHeavyBootMatrices() {
@@ -3321,31 +3623,64 @@ void daRemoteLink_c::calcModels() {
     applyHumanEquipmentMatrices(false);
 
     if (mpHeldItemModel != NULL) {
-        mpHeldItemModel->calc();
+        if (mRemoteIronBallVisualValid) updateRemoteIronBallVisual(false);
+        else if (mRemoteHookshotVisualValid) updateRemoteHookshotVisual(false);
+        else if (mRemoteCopyRodVisualValid) updateRemoteCopyRodVisual(false);
+        else if (mRemoteBowVisualValid) updateRemoteBowVisual(false);
+        else if (mRemoteBottleVisualValid) updateRemoteBottleVisual(false);
+        else mpHeldItemModel->calc();
     }
-    if (mpHookTipModel != NULL) {
+    if (mpHookTipModel != NULL && !mRemoteHookshotVisualValid &&
+        !mRemoteBottleVisualValid) {
         mpHookTipModel->calc();
     }
-    if (mpHookSubItemModel != NULL) {
+    if (mpHookSubItemModel != NULL && !mRemoteHookshotVisualValid) {
         mpHookSubItemModel->calc();
     }
-    if (mpHookSubTipModel != NULL) {
+    if (mpHookSubTipModel != NULL && !mRemoteHookshotVisualValid) {
         mpHookSubTipModel->calc();
     }
-    if (mpArrowModel != NULL) {
+    if (mpArrowModel != NULL && !mRemoteBowVisualValid) {
         mpArrowModel->calc();
     }
-    if (mpKanteraModel != NULL) {
+    if (mpKanteraModel != NULL && !mRemoteLanternVisualValid) {
         mpKanteraModel->calc();
     }
-    if (mpKanteraGlowModel != NULL) {
+    if (mpKanteraGlowModel != NULL && !mRemoteLanternVisualValid) {
         mpKanteraGlowModel->calc();
     }
+    if (mRemoteLanternVisualValid) updateRemoteLanternVisual(false);
     if (mpItemActorModel != NULL) {
-        mpItemActorModel->calc();
+        if (mRemoteBoomerangVisualValid) updateRemoteBoomerangVisual(false);
+        else mpItemActorModel->calc();
     }
     if (mpRideActorModel != NULL) {
-        mpRideActorModel->calc();
+        if (mRemoteSpinnerVisualValid) {
+            if (mSpinnerBckInitialized &&
+                mRemoteSpinnerJumpEpoch != mAppliedSpinnerJumpEpoch) {
+                J3DAnmTransform* spinnerBck = static_cast<J3DAnmTransform*>(
+                    getArchiveObjectRes(mEquipmentArchives[l_eqArcAlink], 0x16));
+                if (spinnerBck != NULL) {
+                    mpSpinnerBck->init(spinnerBck, TRUE, -1, 1.0f, 0, -1, true);
+                }
+                mAppliedSpinnerJumpEpoch = mRemoteSpinnerJumpEpoch;
+            }
+            if (mSpinnerBckInitialized) {
+                mpSpinnerBck->play();
+                mpSpinnerBck->entry(mpRideActorModel->getModelData());
+            }
+            mDoMtx_stack_c::transS(
+                mRemoteSpinnerVisualPos.x,
+                mRemoteSpinnerVisualPos.y + mRemoteSpinnerVisualYOffset,
+                mRemoteSpinnerVisualPos.z);
+            mDoMtx_stack_c::ZXYrotM(mRemoteSpinnerVisualShape);
+            mDoMtx_stack_c::YrotM(mRemoteSpinnerVisualRotY);
+            mpRideActorModel->setBaseTRMtx(mDoMtx_stack_c::get());
+            mpRideActorModel->calc();
+            mRideActorMatrixValid = true;
+        } else {
+            mpRideActorModel->calc();
+        }
     }
     // Model calc rebuilds these props from their local defaults. Restore the
     // most recent small attachment snapshots while Link's body stays semantic.
@@ -3455,7 +3790,8 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
                                           bool i_swordDraw, bool i_shieldDraw,
                                           bool i_shieldGuardActive,
                                           bool i_swordHandAttached,
-                                          bool i_shieldHandAttached, bool i_swordOut,
+                                          bool i_shieldHandAttached, int i_leftHandShape,
+                                          int i_rightHandShape, bool i_swordOut,
                                           bool i_heavyBoots, bool i_itemDraw, bool i_kanteraDraw,
                                           bool i_midnaDraw, bool i_midnaMaskDraw,
                                           bool i_midnaHandDraw, bool i_midnaHairDraw,
@@ -3502,6 +3838,8 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
     mRemoteShieldGuardActive = i_shieldGuardActive;
     mRemoteSwordHandAttached = i_swordHandAttached;
     mRemoteShieldHandAttached = i_shieldHandAttached;
+    mRemoteLeftHandShape = i_leftHandShape;
+    mRemoteRightHandShape = i_rightHandShape;
     mRemoteSwordOut = i_swordOut;
     mRemoteHeavyBoots = i_heavyBoots;
     mRemoteItemDraw = i_itemDraw;
@@ -4033,7 +4371,8 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
     }
 
     applyInterpolatedRemoteModelMatrices(mpFaceModel, mFaceMatrixInterp, "face");
-    applyInterpolatedRemoteModelMatrices(mpHandModel, mHandMatrixInterp, "hand");
+    if (!mHasRemoteMatrices) applyHumanHandMatrices(true);
+    else applyInterpolatedRemoteModelMatrices(mpHandModel, mHandMatrixInterp, "hand");
     if (mVisualState.form == FORM_WOLF) {
         // Wolf equipment is attached to the back joint by a fixed local
         // offset. Rebuild it after the wolf body has been interpolated so the
@@ -4047,20 +4386,54 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
         applyInterpolatedRemoteModelMatrices(mpSheathModel, mSheathMatrixInterp, "sheath");
         applyInterpolatedRemoteModelMatrices(mpShieldModel, mShieldMatrixInterp, "shield");
     }
-    applyInterpolatedRemoteModelMatrices(mpHeldItemModel, mHeldItemMatrixInterp, "held_item");
-    applyInterpolatedRemoteModelMatrices(mpHookTipModel, mHookTipMatrixInterp, "hook_tip");
-    applyInterpolatedRemoteModelMatrices(mpHookSubItemModel, mHookSubItemMatrixInterp,
-                                         "hook_sub_item");
-    applyInterpolatedRemoteModelMatrices(mpHookSubTipModel, mHookSubTipMatrixInterp,
-                                         "hook_sub_tip");
-    applyInterpolatedRemoteModelMatrices(mpArrowModel, mArrowMatrixInterp, "arrow");
-    applyInterpolatedRemoteModelMatrices(mpKanteraModel, mKanteraMatrixInterp, "lantern");
-    applyInterpolatedRemoteModelMatrices(mpKanteraGlowModel, mKanteraGlowMatrixInterp,
-                                         "lantern_glow");
-    applyInterpolatedRemoteModelMatrices(mpItemActorModel, mItemActorMatrixInterp,
-                                         "item_actor");
-    applyInterpolatedRemoteModelMatrices(mpRideActorModel, mRideActorMatrixInterp,
-                                         "ride_actor");
+    if (mRemoteIronBallVisualValid) {
+        // Body interpolation replaces the hand and held-ball joints after the
+        // simulation update. Rebuild both chain endpoints from those exact
+        // presentation matrices so the handle cannot lag Link's visible hand.
+        updateRemoteIronBallVisual(true);
+    } else if (mRemoteHookshotVisualValid) {
+        // Handles are derived from Link's final interpolated hand joints and
+        // tips are interpolated once at the same presentation alpha.
+        updateRemoteHookshotVisual(true);
+    } else if (mRemoteCopyRodVisualValid) {
+        updateRemoteCopyRodVisual(true);
+    } else if (mRemoteBowVisualValid) {
+        updateRemoteBowVisual(true);
+    } else if (mRemoteBottleVisualValid) {
+        updateRemoteBottleVisual(true);
+    } else {
+        applyInterpolatedRemoteModelMatrices(mpHeldItemModel, mHeldItemMatrixInterp,
+                                             "held_item");
+    }
+    if (!mRemoteHookshotVisualValid && !mRemoteBottleVisualValid) {
+        applyInterpolatedRemoteModelMatrices(mpHookTipModel, mHookTipMatrixInterp, "hook_tip");
+        applyInterpolatedRemoteModelMatrices(mpHookSubItemModel, mHookSubItemMatrixInterp,
+                                             "hook_sub_item");
+        applyInterpolatedRemoteModelMatrices(mpHookSubTipModel, mHookSubTipMatrixInterp,
+                                             "hook_sub_tip");
+    }
+    if (!mRemoteBowVisualValid) {
+        applyInterpolatedRemoteModelMatrices(mpArrowModel, mArrowMatrixInterp, "arrow");
+    }
+    if (mRemoteLanternVisualValid) {
+        updateRemoteLanternVisual(true);
+    } else {
+        applyInterpolatedRemoteModelMatrices(mpKanteraModel, mKanteraMatrixInterp,
+                                             "lantern");
+        applyInterpolatedRemoteModelMatrices(mpKanteraGlowModel,
+                                             mKanteraGlowMatrixInterp,
+                                             "lantern_glow");
+    }
+    if (mRemoteBoomerangVisualValid) {
+        updateRemoteBoomerangVisual(true);
+    } else {
+        applyInterpolatedRemoteModelMatrices(mpItemActorModel, mItemActorMatrixInterp,
+                                             "item_actor");
+    }
+    if (!mRemoteSpinnerVisualValid) {
+        applyInterpolatedRemoteModelMatrices(mpRideActorModel, mRideActorMatrixInterp,
+                                             "ride_actor");
+    }
 
     if (mRemoteMidnaShadowForm) {
         applyInterpolatedRemoteModelMatrices(mpShadowMidnaModel, mMidnaMatrixInterp, "midna");
@@ -4389,23 +4762,38 @@ void daRemoteLink_c::applyRemoteAttachmentMatrices() {
     (void)copyRemoteModelMatrices(mpSwordModel, matrices.sword);
     (void)copyRemoteModelMatrices(mpSheathModel, matrices.sheath);
     (void)copyRemoteModelMatrices(mpShieldModel, matrices.shield);
-    mHeldItemMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHeldItemModel, matrices.heldItem);
-    mHookTipMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHookTipModel, matrices.hookTip);
-    mHookSubItemMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubItemModel, matrices.hookSubItem);
-    mHookSubTipMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubTipModel, matrices.hookSubTip);
-    mArrowMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpArrowModel, matrices.arrow);
-    mKanteraMatrixValid =
-        mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraModel, matrices.kantera);
-    mKanteraGlowMatrixValid =
-        mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraGlowModel,
-                                                      matrices.kanteraGlow);
-    mItemActorMatrixValid = copyRemoteModelMatrices(mpItemActorModel, matrices.itemActor);
-    mRideActorMatrixValid = copyRemoteModelMatrices(mpRideActorModel, matrices.rideActor);
+    if (!mRemoteIronBallVisualValid && !mRemoteHookshotVisualValid &&
+        !mRemoteCopyRodVisualValid && !mRemoteBowVisualValid &&
+        !mRemoteBottleVisualValid) {
+        mHeldItemMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHeldItemModel, matrices.heldItem);
+    }
+    if (!mRemoteHookshotVisualValid && !mRemoteBottleVisualValid) {
+        mHookTipMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHookTipModel, matrices.hookTip);
+        mHookSubItemMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubItemModel, matrices.hookSubItem);
+        mHookSubTipMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubTipModel, matrices.hookSubTip);
+    }
+    if (!mRemoteBowVisualValid) {
+        mArrowMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpArrowModel, matrices.arrow);
+    }
+    if (!mRemoteLanternVisualValid) {
+        mKanteraMatrixValid =
+            mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraModel, matrices.kantera);
+        mKanteraGlowMatrixValid =
+            mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraGlowModel,
+                                                          matrices.kanteraGlow);
+    }
+    if (!mRemoteBoomerangVisualValid) {
+        mItemActorMatrixValid = copyRemoteModelMatrices(mpItemActorModel,
+                                                        matrices.itemActor);
+    }
+    if (!mRemoteSpinnerVisualValid) {
+        mRideActorMatrixValid = copyRemoteModelMatrices(mpRideActorModel, matrices.rideActor);
+    }
 }
 
 void daRemoteLink_c::applyHumanEquipmentMatrices(bool i_presentation) {
@@ -4465,20 +4853,231 @@ void daRemoteLink_c::applyHumanEquipmentMatrices(bool i_presentation) {
     }
 }
 
+void daRemoteLink_c::updateRemoteIronBallVisual(bool i_presentation) {
+    if (!mRemoteIronBallVisualValid || mpHeldItemModel == NULL ||
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) {
+        return;
+    }
+
+    const auto getJoint = [&](u16 joint, Mtx& output) {
+        MtxP source = mpBodyModel->getAnmMtx(joint);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, output)) {
+            MTXCopy(source, output);
+        }
+    };
+
+    cXyz renderedBallPos = mRemoteIronBallVisualPos;
+    csXyz renderedBallAngle = mRemoteIronBallVisualAngle;
+    const u16 jointCount = mpBodyModel->getModelData()->getJointNum();
+    Mtx anchor;
+    if (mRemoteIronBallLinkAnchored && jointCount > 10) {
+        // Exact mode-zero path from daAlink_c::setIronBallPos(), evaluated
+        // against either the simulation pose or the final presentation pose.
+        getJoint(10, anchor);
+        mDoMtx_stack_c::copy(anchor);
+        mDoMtx_stack_c::transM(-35.3f, -9.5f, -16.0f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(61.5f), cM_deg2s(-2.5f),
+                                cM_deg2s(50.3f));
+        cXyz ballPos;
+        mDoMtx_stack_c::multVecZero(&ballPos);
+        if (mRemoteProcId == daAlink_c::PROC_IRON_BALL_SUBJECT ||
+            mRemoteProcId == daAlink_c::PROC_IRON_BALL_MOVE) {
+            mDoMtx_MtxToRot(mDoMtx_stack_c::get(), &renderedBallAngle);
+        } else {
+            renderedBallAngle.set(-0x4000, shape_angle.y, 0);
+        }
+        renderedBallPos = ballPos;
+    } else if (i_presentation && mRemoteIronBallPreviousVisualValid &&
+               dusk::frame_interp::is_enabled()) {
+        // The independent ball is sampled on simulation ticks. Present its
+        // rigid transform at the same render alpha as Link and the chain so
+        // neither endpoint appears to alternately lead the other.
+        const f32 alpha = dusk::frame_interp::get_interpolation_step();
+        renderedBallPos = mRemoteIronBallPreviousVisualPos +
+            (mRemoteIronBallVisualPos - mRemoteIronBallPreviousVisualPos) * alpha;
+        const auto interpolateAngle = [alpha](s16 from, s16 to) {
+            return static_cast<s16>(from + static_cast<s16>(to - from) * alpha);
+        };
+        renderedBallAngle.set(
+            interpolateAngle(mRemoteIronBallPreviousVisualAngle.x,
+                             mRemoteIronBallVisualAngle.x),
+            interpolateAngle(mRemoteIronBallPreviousVisualAngle.y,
+                             mRemoteIronBallVisualAngle.y),
+            interpolateAngle(mRemoteIronBallPreviousVisualAngle.z,
+                             mRemoteIronBallVisualAngle.z));
+    }
+
+    mDoMtx_stack_c::transS(renderedBallPos);
+    mDoMtx_stack_c::ZXYrotM(renderedBallAngle);
+    mRemoteIronBallRenderedPos = renderedBallPos;
+    mRemoteIronBallRenderedAngle = renderedBallAngle;
+    mpHeldItemModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    mpHeldItemModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpHeldItemModel);
+    mHeldItemMatrixValid = mRemoteItemDraw;
+
+    if (jointCount > 15) {
+        // Exact hand-side endpoint from daAlink_c::setIronBallPos(). This is
+        // the apparent handle: the chain renderer fills links to this point.
+        getJoint(15, anchor);
+        mDoMtx_stack_c::copy(anchor);
+        mDoMtx_stack_c::transM(-1.0f, -6.0f, -3.6f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(150.0f), cM_deg2s(-81.0f),
+                                cM_deg2s(111.0f));
+        if (mRemoteIronBallLinkAnchored) {
+            mDoMtx_stack_c::transM(0.0f, 0.0f, 10.0f);
+            mDoMtx_stack_c::XrotM(0x7FFF);
+        }
+        mDoMtx_stack_c::multVec(&l_remoteIronBallChainVec,
+                                 &mRemoteIronBallHandRoot);
+    }
+}
+
+void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
+    if (!mRemoteHookshotVisualValid || mpHeldItemModel == NULL ||
+        mpHookTipModel == NULL || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 15) {
+        return;
+    }
+    const auto getJoint = [&](u16 joint, Mtx& output) {
+        MtxP source = mpBodyModel->getAnmMtx(joint);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, output)) {
+            MTXCopy(source, output);
+        }
+    };
+    Mtx leftJoint;
+    Mtx rightJoint;
+    getJoint(10, leftJoint);
+    getJoint(15, rightJoint);
+    Mtx leftBase;
+    Mtx rightBase;
+    mDoMtx_stack_c::copy(leftJoint);
+    mDoMtx_stack_c::transM(-2.0f, 1.0f, 1.0f);
+    mDoMtx_stack_c::XYZrotM(cM_deg2s(5.7f), cM_deg2s(162.0f), 0);
+    MTXCopy(mDoMtx_stack_c::get(), leftBase);
+    mDoMtx_stack_c::copy(rightJoint);
+    mDoMtx_stack_c::transM(-2.0f, 0.0f, 1.0f);
+    mDoMtx_stack_c::XYZrotM(cM_deg2s(-78.0f), cM_deg2s(182.0f),
+                            cM_deg2s(-99.0f));
+    MTXCopy(mDoMtx_stack_c::get(), rightBase);
+
+    MtxP primaryBase = mRemoteHookshotLeft ? leftBase : rightBase;
+    MtxP secondaryBase = mRemoteHookshotLeft ? rightBase : leftBase;
+    mpHeldItemModel->setBaseTRMtx(primaryBase);
+    if (mHookshotItemBckInitialized) {
+        mpHookshotItemBck->entry(mpHeldItemModel->getModelData(),
+                                 mRemoteHookshotItemFrame);
+    }
+    mpHeldItemModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpHeldItemModel);
+    mHeldItemMatrixValid = mRemoteItemDraw;
+    if (mpHookSubItemModel != NULL) {
+        mpHookSubItemModel->setBaseTRMtx(secondaryBase);
+        if (mHookshotItemBckInitialized) {
+            mpHookshotItemBck->entry(mpHookSubItemModel->getModelData(), 0.0f);
+        }
+        mpHookSubItemModel->calc();
+        if (i_presentation) overrideRemoteModelMatrices(mpHookSubItemModel);
+        mHookSubItemMatrixValid = mRemoteItemDraw;
+    } else {
+        mHookSubItemMatrixValid = false;
+    }
+
+    static const cXyz hookRoot(0.0f, 0.0f, 23.5f);
+    mDoMtx_stack_c::copy(primaryBase);
+    mDoMtx_stack_c::multVec(&hookRoot, &mRemoteHookshotRoot);
+    mDoMtx_stack_c::copy(secondaryBase);
+    mDoMtx_stack_c::multVec(&hookRoot, &mRemoteHookshotSubRoot);
+
+    cXyz renderedTop = mRemoteHookshotTop;
+    cXyz renderedSubTop = mRemoteHookshotSubTop;
+    csXyz renderedTopAngle = mRemoteHookshotTopAngle;
+    csXyz renderedSubTopAngle = mRemoteHookshotSubTopAngle;
+    if (i_presentation && mRemoteHookshotPreviousValid &&
+        dusk::frame_interp::is_enabled()) {
+        const f32 alpha = dusk::frame_interp::get_interpolation_step();
+        if (!mRemoteHookshotTopLinkAnchored) {
+            renderedTop = mRemoteHookshotPreviousTop +
+                (mRemoteHookshotTop - mRemoteHookshotPreviousTop) * alpha;
+        }
+        if (!mRemoteHookshotSubTopLinkAnchored) {
+            renderedSubTop = mRemoteHookshotPreviousSubTop +
+                (mRemoteHookshotSubTop - mRemoteHookshotPreviousSubTop) * alpha;
+        }
+        const auto interpolateAngle = [alpha](s16 from, s16 to) {
+            return static_cast<s16>(from + static_cast<s16>(to - from) * alpha);
+        };
+        renderedTopAngle.set(
+            interpolateAngle(mRemoteHookshotPreviousTopAngle.x,
+                             mRemoteHookshotTopAngle.x),
+            interpolateAngle(mRemoteHookshotPreviousTopAngle.y,
+                             mRemoteHookshotTopAngle.y),
+            interpolateAngle(mRemoteHookshotPreviousTopAngle.z,
+                             mRemoteHookshotTopAngle.z));
+        renderedSubTopAngle.set(
+            interpolateAngle(mRemoteHookshotPreviousSubTopAngle.x,
+                             mRemoteHookshotSubTopAngle.x),
+            interpolateAngle(mRemoteHookshotPreviousSubTopAngle.y,
+                             mRemoteHookshotSubTopAngle.y),
+            interpolateAngle(mRemoteHookshotPreviousSubTopAngle.z,
+                             mRemoteHookshotSubTopAngle.z));
+    }
+    if (mRemoteHookshotTopLinkAnchored) renderedTop = mRemoteHookshotRoot;
+    if (mRemoteHookshotSubTopLinkAnchored) renderedSubTop = mRemoteHookshotSubRoot;
+    mRemoteHookshotRenderedTop = renderedTop;
+    mRemoteHookshotRenderedSubTop = renderedSubTop;
+    mDoMtx_stack_c::transS(renderedTop);
+    mDoMtx_stack_c::ZXYrotM(renderedTopAngle);
+    mpHookTipModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    if (mHookshotTipBckInitialized) {
+        mpHookshotTipBck->entry(mpHookTipModel->getModelData(),
+                                mRemoteHookshotTipFrame);
+    }
+    mpHookTipModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpHookTipModel);
+    mHookTipMatrixValid = mRemoteItemDraw;
+
+    if (mpHookSubTipModel != NULL) {
+        mDoMtx_stack_c::transS(renderedSubTop);
+        mDoMtx_stack_c::ZXYrotM(renderedSubTopAngle);
+        mpHookSubTipModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        if (mHookshotTipBckInitialized) {
+            mpHookshotTipBck->entry(mpHookSubTipModel->getModelData(),
+                                    mRemoteHookshotSubTipFrame);
+        }
+        mpHookSubTipModel->calc();
+        if (i_presentation) overrideRemoteModelMatrices(mpHookSubTipModel);
+        mHookSubTipMatrixValid = mRemoteItemDraw;
+    } else {
+        mHookSubTipMatrixValid = false;
+    }
+}
+
 void daRemoteLink_c::setRemoteAttachmentMatrices(
     const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices) {
     mHasRemoteAttachmentMatrices = i_matrices.valid;
     if (!mHasRemoteAttachmentMatrices) {
         mRemoteAttachmentMatrices = {};
-        mHeldItemMatrixValid = false;
-        mHookTipMatrixValid = false;
-        mHookSubItemMatrixValid = false;
-        mHookSubTipMatrixValid = false;
-        mArrowMatrixValid = false;
-        mKanteraMatrixValid = false;
-        mKanteraGlowMatrixValid = false;
+        if (!mRemoteIronBallVisualValid && !mRemoteHookshotVisualValid &&
+            !mRemoteCopyRodVisualValid && !mRemoteBowVisualValid &&
+            !mRemoteBottleVisualValid) {
+            mHeldItemMatrixValid = false;
+        }
+        if (!mRemoteHookshotVisualValid && !mRemoteBottleVisualValid) {
+            mHookTipMatrixValid = false;
+            mHookSubItemMatrixValid = false;
+            mHookSubTipMatrixValid = false;
+        }
+        if (!mRemoteBowVisualValid) mArrowMatrixValid = false;
+        if (!mRemoteLanternVisualValid) {
+            mKanteraMatrixValid = false;
+            mKanteraGlowMatrixValid = false;
+        }
         mItemActorMatrixValid = false;
-        mRideActorMatrixValid = false;
+        if (!mRemoteSpinnerVisualValid) mRideActorMatrixValid = false;
         clearRemoteModelMatrixInterpolation(mSwordMatrixInterp);
         clearRemoteModelMatrixInterpolation(mSheathMatrixInterp);
         clearRemoteModelMatrixInterpolation(mShieldMatrixInterp);
@@ -4505,15 +5104,692 @@ void daRemoteLink_c::setRemoteAttachmentMatrices(
     capture(mpSwordModel, i_matrices.sword, mSwordMatrixInterp);
     capture(mpSheathModel, i_matrices.sheath, mSheathMatrixInterp);
     capture(mpShieldModel, i_matrices.shield, mShieldMatrixInterp);
-    capture(mpHeldItemModel, i_matrices.heldItem, mHeldItemMatrixInterp);
-    capture(mpHookTipModel, i_matrices.hookTip, mHookTipMatrixInterp);
-    capture(mpHookSubItemModel, i_matrices.hookSubItem, mHookSubItemMatrixInterp);
-    capture(mpHookSubTipModel, i_matrices.hookSubTip, mHookSubTipMatrixInterp);
-    capture(mpArrowModel, i_matrices.arrow, mArrowMatrixInterp);
-    capture(mpKanteraModel, i_matrices.kantera, mKanteraMatrixInterp);
-    capture(mpKanteraGlowModel, i_matrices.kanteraGlow, mKanteraGlowMatrixInterp);
-    capture(mpItemActorModel, i_matrices.itemActor, mItemActorMatrixInterp);
-    capture(mpRideActorModel, i_matrices.rideActor, mRideActorMatrixInterp);
+    if (!mRemoteIronBallVisualValid && !mRemoteHookshotVisualValid &&
+        !mRemoteCopyRodVisualValid && !mRemoteBowVisualValid &&
+        !mRemoteBottleVisualValid) {
+        capture(mpHeldItemModel, i_matrices.heldItem, mHeldItemMatrixInterp);
+    } else {
+        clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+    }
+    if (!mRemoteHookshotVisualValid && !mRemoteBottleVisualValid) {
+        capture(mpHookTipModel, i_matrices.hookTip, mHookTipMatrixInterp);
+        capture(mpHookSubItemModel, i_matrices.hookSubItem, mHookSubItemMatrixInterp);
+        capture(mpHookSubTipModel, i_matrices.hookSubTip, mHookSubTipMatrixInterp);
+    } else {
+        clearRemoteModelMatrixInterpolation(mHookTipMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mHookSubItemMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mHookSubTipMatrixInterp);
+    }
+    if (!mRemoteBowVisualValid) {
+        capture(mpArrowModel, i_matrices.arrow, mArrowMatrixInterp);
+    } else {
+        clearRemoteModelMatrixInterpolation(mArrowMatrixInterp);
+    }
+    if (!mRemoteLanternVisualValid) {
+        capture(mpKanteraModel, i_matrices.kantera, mKanteraMatrixInterp);
+        capture(mpKanteraGlowModel, i_matrices.kanteraGlow, mKanteraGlowMatrixInterp);
+    } else {
+        clearRemoteModelMatrixInterpolation(mKanteraMatrixInterp);
+        clearRemoteModelMatrixInterpolation(mKanteraGlowMatrixInterp);
+    }
+    if (!mRemoteBoomerangVisualValid) {
+        capture(mpItemActorModel, i_matrices.itemActor, mItemActorMatrixInterp);
+    } else {
+        clearRemoteModelMatrixInterpolation(mItemActorMatrixInterp);
+    }
+    if (!mRemoteSpinnerVisualValid) {
+        capture(mpRideActorModel, i_matrices.rideActor, mRideActorMatrixInterp);
+    }
+}
+
+void daRemoteLink_c::updateRemoteBoomerangVisual(bool i_presentation) {
+    if (!mRemoteBoomerangVisualValid || mpItemActorModel == NULL) return;
+
+    if (mRemoteBoomerangLinkAnchored && mpBodyModel != NULL &&
+        mpBodyModel->getModelData() != NULL &&
+        mpBodyModel->getModelData()->getJointNum() > 10) {
+        Mtx anchor;
+        MtxP source = mpBodyModel->getAnmMtx(10);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, anchor)) {
+            MTXCopy(source, anchor);
+        }
+        // daBoomerang_c::setKeepMatrix(): the waiting boomerang is rigidly
+        // attached to Link's left-item matrix with these native offsets.
+        mDoMtx_stack_c::copy(anchor);
+        mDoMtx_stack_c::transM(32.0f, -5.0f, -6.0f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(-4.0f), cM_deg2s(39.0f),
+                                cM_deg2s(-9.0f));
+        mpItemActorModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        mDoMtx_stack_c::multVecZero(&mRemoteBoomerangRenderedPos);
+        mDoMtx_MtxToRot(mDoMtx_stack_c::get(), &mRemoteBoomerangRenderedAngle);
+    } else {
+        cXyz renderedPos = mRemoteBoomerangVisualPos;
+        csXyz renderedAngle = mRemoteBoomerangVisualAngle;
+        if (i_presentation && mRemoteBoomerangPreviousVisualValid &&
+            dusk::frame_interp::is_enabled()) {
+            const f32 alpha = dusk::frame_interp::get_interpolation_step();
+            renderedPos = mRemoteBoomerangPreviousVisualPos +
+                (mRemoteBoomerangVisualPos - mRemoteBoomerangPreviousVisualPos) * alpha;
+            const auto interpolateAngle = [alpha](s16 from, s16 to) {
+                return static_cast<s16>(from + static_cast<s16>(to - from) * alpha);
+            };
+            renderedAngle.set(
+                interpolateAngle(mRemoteBoomerangPreviousVisualAngle.x,
+                                 mRemoteBoomerangVisualAngle.x),
+                interpolateAngle(mRemoteBoomerangPreviousVisualAngle.y,
+                                 mRemoteBoomerangVisualAngle.y),
+                interpolateAngle(mRemoteBoomerangPreviousVisualAngle.z,
+                                 mRemoteBoomerangVisualAngle.z));
+        }
+        mRemoteBoomerangRenderedPos = renderedPos;
+        mRemoteBoomerangRenderedAngle = renderedAngle;
+        mDoMtx_stack_c::transS(renderedPos);
+        mDoMtx_stack_c::ZXYrotM(renderedAngle);
+        mpItemActorModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    }
+    mpItemActorModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpItemActorModel);
+    mItemActorMatrixValid = true;
+}
+
+void daRemoteLink_c::updateRemoteCopyRodVisual(bool i_presentation) {
+    if (!mRemoteCopyRodVisualValid || mpHeldItemModel == NULL ||
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 10) {
+        return;
+    }
+    Mtx anchor;
+    MtxP source = mpBodyModel->getAnmMtx(10);
+    if (!i_presentation ||
+        !dusk::frame_interp::lookup_replacement(source, anchor)) {
+        MTXCopy(source, anchor);
+    }
+    // daAlink_c draws the Dominion Rod directly from mLeftItemJntNo.
+    mpHeldItemModel->setBaseTRMtx(anchor);
+    if (mpHeldItemBrk != NULL) {
+        mpHeldItemBrk->setFrame(mRemoteCopyRodTopUse ?
+            mpHeldItemBrk->getFrameMax() - 0.001f : 0.0f);
+    }
+    mpHeldItemModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpHeldItemModel);
+    mHeldItemMatrixValid = mRemoteItemDraw;
+}
+
+void daRemoteLink_c::updateRemoteBowVisual(bool i_presentation) {
+    if (!mRemoteBowVisualValid || mpHeldItemModel == NULL ||
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 15) {
+        return;
+    }
+    const auto getJoint = [&](u16 joint, Mtx& output) {
+        MtxP source = mpBodyModel->getAnmMtx(joint);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, output)) {
+            MTXCopy(source, output);
+        }
+    };
+
+    Mtx leftJoint;
+    Mtx rightJoint;
+    getJoint(10, leftJoint);
+    getJoint(15, rightJoint);
+    if (mRemoteBowGrabLeft) {
+        // Exact checkBowGrabLeftHand() placement from daAlink_c::setMatrix().
+        mDoMtx_stack_c::copy(leftJoint);
+        mDoMtx_stack_c::transM(-1.3f, 0.0f, -3.0f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(-74.0f), cM_deg2s(43.6f),
+                                cM_deg2s(1.9f));
+        mpHeldItemModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    } else {
+        mpHeldItemModel->setBaseTRMtx(rightJoint);
+    }
+
+    if (mRemoteBowBck != mLoadedBowBck || mpBowBck == NULL) {
+        J3DAnmTransform* bck = static_cast<J3DAnmTransform*>(
+            loadAramResource(mRemoteBowBck, 0x4000, false));
+        const bool modifyExisting = mpBowBck != NULL;
+        if (mpBowBck == NULL) mpBowBck = JKR_NEW mDoExt_bckAnm();
+        if (mpBowBck != NULL && bck != NULL &&
+            mpBowBck->init(bck, FALSE, 2, 0.0f, 0, -1, modifyExisting)) {
+            mLoadedBowBck = mRemoteBowBck;
+        } else {
+            mLoadedBowBck = 0;
+        }
+    }
+    if (mpBowBck != NULL && mLoadedBowBck == mRemoteBowBck &&
+        mpBowBck->getBckAnm() != NULL) {
+        const f32 maxFrame = mpBowBck->getBckAnm()->getFrameMax();
+        mpBowBck->entry(mpHeldItemModel->getModelData(),
+                        std::clamp(mRemoteBowFrame, 0.0f,
+                                   std::max(0.0f, maxFrame - 0.001f)));
+    }
+    mpHeldItemModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpHeldItemModel);
+    mHeldItemMatrixValid = mRemoteItemDraw;
+
+    if (mpArrowModel != NULL && mRemoteBowArrowVisible) {
+        // daArrow_c::setKeepMatrix(): left-item joint followed by a 180-degree
+        // local Y rotation. This shares Link's final presented hand pose.
+        mDoMtx_stack_c::YrotS(-0x8000);
+        mDoMtx_stack_c::revConcat(leftJoint);
+        mpArrowModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        mpArrowModel->calc();
+        if (i_presentation) overrideRemoteModelMatrices(mpArrowModel);
+        mArrowMatrixValid = mRemoteItemDraw;
+    } else {
+        mArrowMatrixValid = false;
+    }
+}
+
+void daRemoteLink_c::updateRemoteLanternVisual(bool i_presentation) {
+    if (!mRemoteLanternVisualValid || mpKanteraModel == NULL ||
+        mpKanteraGlowModel == NULL || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 16) {
+        return;
+    }
+    const auto getJoint = [&](u16 joint, Mtx& output) {
+        MtxP source = mpBodyModel->getAnmMtx(joint);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, output)) {
+            MTXCopy(source, output);
+        }
+    };
+    const auto interpolateAngle = [](s16 from, s16 to, f32 alpha) {
+        return static_cast<s16>(from + static_cast<s16>(to - from) * alpha);
+    };
+
+    f32 alpha = 1.0f;
+    if (i_presentation && mRemoteLanternPreviousValid &&
+        dusk::frame_interp::is_enabled()) {
+        alpha = dusk::frame_interp::get_interpolation_step();
+    }
+    csXyz jointAngle(
+        interpolateAngle(mRemoteLanternPreviousJointAngle.x,
+                         mRemoteLanternJointAngle.x, alpha),
+        interpolateAngle(mRemoteLanternPreviousJointAngle.y,
+                         mRemoteLanternJointAngle.y, alpha),
+        interpolateAngle(mRemoteLanternPreviousJointAngle.z,
+                         mRemoteLanternJointAngle.z, alpha));
+
+    if (mRemoteLanternLinkAnchored) {
+        Mtx anchor;
+        getJoint(mRemoteLanternHandAttached ? 10 : 16, anchor);
+        mDoMtx_stack_c::copy(anchor);
+        if (mRemoteLanternHandAttached) {
+            mDoMtx_stack_c::transM(-2.0f, -0.1f, -0.7f);
+            mDoMtx_stack_c::XYZrotM(cM_deg2s(100.0f), cM_deg2s(9.3f),
+                                    cM_deg2s(183.0f));
+        } else {
+            mDoMtx_stack_c::transM(-1.0f, 4.5f, 9.0f);
+            mDoMtx_stack_c::XYZrotM(cM_deg2s(-75.0f), cM_deg2s(62.0f),
+                                    cM_deg2s(89.0f));
+        }
+        mpKanteraModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        mDoMtx_stack_c::multVecZero(&mRemoteLanternRenderedPos);
+        mDoMtx_MtxToRot(mDoMtx_stack_c::get(),
+                        &mRemoteLanternRenderedBaseAngle);
+    } else {
+        cXyz pos = mRemoteLanternPos;
+        csXyz baseAngle = mRemoteLanternBaseAngle;
+        if (i_presentation && mRemoteLanternPreviousValid &&
+            dusk::frame_interp::is_enabled()) {
+            pos = mRemoteLanternPreviousPos +
+                  (mRemoteLanternPos - mRemoteLanternPreviousPos) * alpha;
+            baseAngle.set(
+                interpolateAngle(mRemoteLanternPreviousBaseAngle.x,
+                                 mRemoteLanternBaseAngle.x, alpha),
+                interpolateAngle(mRemoteLanternPreviousBaseAngle.y,
+                                 mRemoteLanternBaseAngle.y, alpha),
+                interpolateAngle(mRemoteLanternPreviousBaseAngle.z,
+                                 mRemoteLanternBaseAngle.z, alpha));
+        }
+        mRemoteLanternRenderedPos = pos;
+        mRemoteLanternRenderedBaseAngle = baseAngle;
+        mDoMtx_stack_c::transS(pos);
+        mDoMtx_stack_c::ZXYrotM(baseAngle);
+        mpKanteraModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    }
+
+    mpKanteraModel->calc();
+    if (mpKanteraModel->getModelData()->getJointNum() > 1) {
+        MtxP nativeJoint = mpKanteraModel->getAnmMtx(1);
+        mDoMtx_stack_c::transS(nativeJoint[0][3], nativeJoint[1][3],
+                               nativeJoint[2][3]);
+        mDoMtx_stack_c::ZXYrotM(jointAngle);
+        mpKanteraModel->setAnmMtx(1, mDoMtx_stack_c::get());
+        mpKanteraModel->calcWeightEnvelopeMtx();
+
+        static const cXyz flameOffset(0.0f, -17.0f, 0.0f);
+        cXyz flamePos;
+        mDoMtx_stack_c::multVec(&flameOffset, &flamePos);
+        mDoMtx_stack_c::transS(flamePos);
+        mpKanteraGlowModel->setBaseTRMtx(mDoMtx_stack_c::get());
+        mpKanteraGlowModel->calc();
+    }
+    if (i_presentation) {
+        overrideRemoteModelMatrices(mpKanteraModel);
+        overrideRemoteModelMatrices(mpKanteraGlowModel);
+    }
+    mKanteraMatrixValid = mRemoteKanteraDraw;
+    mKanteraGlowMatrixValid = mRemoteKanteraDraw && mRemoteLanternLit;
+    if (!mKanteraGlowMatrixValid) resetKanteraGlowOcclusion();
+}
+
+void daRemoteLink_c::updateRemoteBottleVisual(bool i_presentation) {
+    if (!mRemoteBottleVisualValid || mpHeldItemModel == NULL ||
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) {
+        return;
+    }
+
+    const auto getJoint = [&](u16 joint, Mtx& output) {
+        MtxP source = mpBodyModel->getAnmMtx(joint);
+        if (!i_presentation ||
+            !dusk::frame_interp::lookup_replacement(source, output)) {
+            MTXCopy(source, output);
+        }
+    };
+
+    const u16 anchorJoint = mRemoteBottleOilRightAttached ? 15 : 10;
+    if (anchorJoint >= mpBodyModel->getModelData()->getJointNum()) return;
+    Mtx anchor;
+    getJoint(anchorJoint, anchor);
+    mDoMtx_stack_c::copy(anchor);
+    if (mRemoteBottleOilRightAttached) {
+        mDoMtx_stack_c::transM(1.5f, -7.5f, -1.0f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(183.0f), cM_deg2s(176.0f),
+                                cM_deg2s(167.0f));
+    } else {
+        mDoMtx_stack_c::transM(-10.0f, -0.5f, -5.5f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(174.0f), cM_deg2s(-47.0f),
+                                cM_deg2s(94.0f));
+    }
+    mpHeldItemModel->setBaseTRMtx(mDoMtx_stack_c::get());
+
+    J3DModelData* data = mpHeldItemModel->getModelData();
+    if (mpHeldItemBrk != NULL) mpHeldItemBrk->setFrame(mRemoteBottleBrkFrame);
+    if (mpBottleBtp != NULL) mpBottleBtp->setFrame(mRemoteBottleBtpFrame);
+    if (mpBottleBtkSwing != NULL) mpBottleBtkSwing->setFrame(mRemoteBottleBtkSwingFrame);
+    if (mpBottleBtkAction != NULL) mpBottleBtkAction->setFrame(mRemoteBottleBtkActionFrame);
+    if (mpBottleBtkFinish != NULL) mpBottleBtkFinish->setFrame(mRemoteBottleBtkFinishFrame);
+
+    J3DAnmTextureSRTKey* activeBtk = mpBottleBtkSwing;
+    if (mRemoteProcId == daAlink_c::PROC_BOTTLE_OPEN) {
+        if (mRemoteBottleMaterialStage == 1) activeBtk = mpBottleBtkAction;
+        else if (mRemoteBottleMaterialStage == 2) activeBtk = mpBottleBtkFinish;
+    } else if (mRemoteProcId == daAlink_c::PROC_BOTTLE_DRINK ||
+               mRemoteProcId == daAlink_c::PROC_HORSE_BOTTLE_DRINK ||
+               mRemoteProcId == daAlink_c::PROC_CANOE_BOTTLE_DRINK) {
+        activeBtk = mRemoteBottleMaterialStage != 0 ?
+                        mpBottleBtkFinish : mpBottleBtkAction;
+    }
+    if (activeBtk != NULL) data->entryTexMtxAnimator(activeBtk);
+
+    if (data->getMaterialNum() > 0) {
+        J3DMaterial* material = data->getMaterialNodePointer(0);
+        if (material != NULL && material->getShape() != NULL) {
+            const bool openBottle = mRemoteEquipItem == dItemNo_WATER_BOTTLE_e ||
+                                    mRemoteEquipItem == dItemNo_WORM_e ||
+                                    mRemoteEquipItem == dItemNo_FAIRY_e;
+            const bool drinkBottle =
+                (mRemoteEquipItem >= dItemNo_RED_BOTTLE_e &&
+                 mRemoteEquipItem <= dItemNo_HALF_MILK_BOTTLE_e) ||
+                mRemoteEquipItem == dItemNo_RED_BOTTLE_2_e ||
+                mRemoteEquipItem == dItemNo_UGLY_SOUP_e ||
+                mRemoteEquipItem == dItemNo_HOT_SPRING_e ||
+                mRemoteEquipItem == dItemNo_BEE_CHILD_e ||
+                mRemoteEquipItem == dItemNo_CHUCHU_BLACK_e ||
+                mRemoteEquipItem == dItemNo_FAIRY_DROP_e ||
+                (mRemoteEquipItem >= dItemNo_CHUCHU_RARE_e &&
+                 mRemoteEquipItem != dItemNo_CHUCHU_YELLOW_e &&
+                 mRemoteEquipItem <= dItemNo_LV3_SOUP_e);
+            const bool oilBottle = mRemoteEquipItem == dItemNo_CHUCHU_YELLOW_e ||
+                                   mRemoteEquipItem == dItemNo_OIL_BOTTLE_2_e ||
+                                   mRemoteEquipItem == dItemNo_OIL_BOTTLE_e;
+            if (openBottle && !drinkBottle && !oilBottle) material->getShape()->show();
+            else material->getShape()->hide();
+        }
+    }
+
+    mpHeldItemModel->calc();
+    if (mRemoteBottleJointRightAttached &&
+        data->getJointNum() > 1 && mpBodyModel->getModelData()->getJointNum() > 15) {
+        Mtx right;
+        getJoint(15, right);
+        mDoMtx_stack_c::copy(right);
+        mDoMtx_stack_c::transM(-3.0f, -1.0f, 0.3f);
+        mDoMtx_stack_c::XYZrotM(cM_deg2s(102.0f), cM_deg2s(-0.5f),
+                                cM_deg2s(-122.0f));
+        mDoMtx_copy(mDoMtx_stack_c::get(), mpHeldItemModel->getAnmMtx(1));
+        mpHeldItemModel->calcWeightEnvelopeMtx();
+    }
+    if (i_presentation) overrideRemoteModelMatrices(mpHeldItemModel);
+
+    if (mpHookTipModel != NULL && mRemoteBottleContentKind != 0) {
+        mpHookTipModel->setBaseTRMtx(mpHeldItemModel->getBaseTRMtx());
+        if (mpBottleContentBck != NULL && mRemoteBottleContentKind != 3) {
+            mpBottleContentBck->entry(mpHookTipModel->getModelData(),
+                                      mRemoteBottleContentFrame);
+        }
+        mpHookTipModel->calc();
+        if (i_presentation) overrideRemoteModelMatrices(mpHookTipModel);
+    }
+}
+
+void daRemoteLink_c::setRemoteSpinnerVisualState(bool i_valid, const cXyz& i_pos,
+                                                 s16 i_shapeX, s16 i_shapeY,
+                                                 s16 i_shapeZ, s16 i_rotY,
+                                                 f32 i_visualYOffset,
+                                                 u32 i_jumpEpoch) {
+    const bool wasValid = mRemoteSpinnerVisualValid;
+    mRemoteSpinnerVisualValid =
+        i_valid && mRemoteRideActorKind == 1 && mVisualState.form != FORM_WOLF;
+    if (mRemoteSpinnerVisualValid != wasValid) {
+        DuskLog.info("RemoteLink: semantic Spinner visual {} (passive model, no actor)",
+                     mRemoteSpinnerVisualValid ? "enabled" : "disabled");
+    }
+    if (!mRemoteSpinnerVisualValid) {
+        if (!mHasRemoteMatrices) mRideActorMatrixValid = false;
+        return;
+    }
+    mRemoteSpinnerVisualPos = i_pos;
+    mRemoteSpinnerVisualShape.set(i_shapeX, i_shapeY, i_shapeZ);
+    mRemoteSpinnerVisualRotY = i_rotY;
+    mRemoteSpinnerVisualYOffset = i_visualYOffset;
+    mRemoteSpinnerJumpEpoch = i_jumpEpoch;
+}
+
+void daRemoteLink_c::setRemoteIronBallVisualState(
+    bool i_valid, bool i_linkAnchored, const cXyz& i_pos,
+    s16 i_angleX, s16 i_angleY, s16 i_angleZ, uint8_t i_chainCount,
+    const std::array<cXyz, 100>& i_chainDirections,
+    bool i_chainEndOffsetValid, const cXyz& i_chainEndOffset) {
+    const bool wasValid = mRemoteIronBallVisualValid;
+    mRemoteIronBallVisualValid =
+        i_valid && mRemoteEquipItem == dItemNo_IRONBALL_e &&
+        mVisualState.form != FORM_WOLF;
+    if (mRemoteIronBallVisualValid != wasValid) {
+        DuskLog.info("RemoteLink: semantic iron ball visual {} (passive model, no actor)",
+                     mRemoteIronBallVisualValid ? "enabled" : "disabled");
+    }
+    if (!mRemoteIronBallVisualValid) {
+        mRemoteIronBallLinkAnchored = false;
+        mRemoteIronBallChainCount = 0;
+        mRemoteIronBallChainPreviousCount = 0;
+        mRemoteIronBallChainPreviousValid = false;
+        mRemoteIronBallChainEndOffsetValid = false;
+        mRemoteIronBallChainPreviousEndOffsetValid = false;
+        mRemoteIronBallPreviousVisualValid = false;
+        if (!mHasRemoteMatrices && mRemoteEquipItem == dItemNo_IRONBALL_e) {
+            mHeldItemMatrixValid = false;
+        }
+        return;
+    }
+    const bool wasLinkAnchored = mRemoteIronBallLinkAnchored;
+    if (wasValid && !wasLinkAnchored && !i_linkAnchored) {
+        mRemoteIronBallPreviousVisualPos = mRemoteIronBallVisualPos;
+        mRemoteIronBallPreviousVisualAngle = mRemoteIronBallVisualAngle;
+        mRemoteIronBallPreviousVisualValid = true;
+    } else if (wasValid && wasLinkAnchored && !i_linkAnchored) {
+        // Preserve the final body-anchored ball endpoint for the first throw
+        // interval instead of pretending the new world-space ball already
+        // occupied its current position in the preceding frame.
+        mRemoteIronBallPreviousVisualPos = mRemoteIronBallRenderedPos;
+        mRemoteIronBallPreviousVisualAngle = mRemoteIronBallRenderedAngle;
+        mRemoteIronBallPreviousVisualValid = true;
+    } else {
+        mRemoteIronBallPreviousVisualPos = i_pos;
+        mRemoteIronBallPreviousVisualAngle.set(i_angleX, i_angleY, i_angleZ);
+        mRemoteIronBallPreviousVisualValid = false;
+    }
+    mRemoteIronBallLinkAnchored = i_linkAnchored;
+    mRemoteIronBallVisualPos = i_pos;
+    mRemoteIronBallVisualAngle.set(i_angleX, i_angleY, i_angleZ);
+    const uint8_t nextCount = std::min<uint8_t>(i_chainCount, 100);
+    if (wasValid && mRemoteIronBallChainCount > 0) {
+        mRemoteIronBallChainPreviousDirections = mRemoteIronBallChainDirections;
+        mRemoteIronBallChainPreviousEndOffset = mRemoteIronBallChainEndOffset;
+        mRemoteIronBallChainPreviousEndOffsetValid =
+            mRemoteIronBallChainEndOffsetValid;
+        // Keep the actual previous topology. Newly exposed links were
+        // collapsed at its endpoint; pretending they were already full length
+        // makes the throw appear to begin behind Link's hand.
+        mRemoteIronBallChainPreviousCount = mRemoteIronBallChainCount;
+        mRemoteIronBallChainPreviousValid = true;
+    } else {
+        mRemoteIronBallChainPreviousDirections = i_chainDirections;
+        mRemoteIronBallChainPreviousEndOffset = i_chainEndOffset;
+        mRemoteIronBallChainPreviousEndOffsetValid = i_chainEndOffsetValid;
+        mRemoteIronBallChainPreviousCount = nextCount;
+        mRemoteIronBallChainPreviousValid = nextCount > 0;
+    }
+    mRemoteIronBallChainCount = nextCount;
+    mRemoteIronBallChainDirections = i_chainDirections;
+    mRemoteIronBallChainEndOffsetValid = i_chainEndOffsetValid;
+    mRemoteIronBallChainEndOffset = i_chainEndOffset;
+    mHeldItemMatrixValid = mRemoteItemDraw && mpHeldItemModel != NULL;
+    clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteHookshotVisualState(
+    bool i_valid, bool i_left, bool i_topLinkAnchored,
+    bool i_subTopLinkAnchored, const cXyz& i_top, const csXyz& i_topAngle,
+    const cXyz& i_subTop, const csXyz& i_subTopAngle, s16 i_stopTime,
+    f32 i_itemFrame, f32 i_tipFrame, f32 i_subTipFrame) {
+    const bool wasValid = mRemoteHookshotVisualValid;
+    mRemoteHookshotVisualValid =
+        i_valid && (mRemoteEquipItem == dItemNo_HOOKSHOT_e ||
+                    mRemoteEquipItem == dItemNo_W_HOOKSHOT_e) &&
+        mVisualState.form != FORM_WOLF;
+    if (!mRemoteHookshotVisualValid) {
+        mRemoteHookshotPreviousValid = false;
+        mHeldItemMatrixValid = false;
+        mHookTipMatrixValid = false;
+        mHookSubItemMatrixValid = false;
+        mHookSubTipMatrixValid = false;
+        return;
+    }
+    if (wasValid && mRemoteHookshotLeft == i_left) {
+        mRemoteHookshotPreviousTop =
+            mRemoteHookshotTopLinkAnchored && !i_topLinkAnchored ?
+                mRemoteHookshotRenderedTop : mRemoteHookshotTop;
+        mRemoteHookshotPreviousSubTop =
+            mRemoteHookshotSubTopLinkAnchored && !i_subTopLinkAnchored ?
+                mRemoteHookshotRenderedSubTop : mRemoteHookshotSubTop;
+        mRemoteHookshotPreviousTopAngle = mRemoteHookshotTopAngle;
+        mRemoteHookshotPreviousSubTopAngle = mRemoteHookshotSubTopAngle;
+        mRemoteHookshotPreviousValid = true;
+    } else {
+        mRemoteHookshotPreviousTop = i_top;
+        mRemoteHookshotPreviousSubTop = i_subTop;
+        mRemoteHookshotPreviousTopAngle = i_topAngle;
+        mRemoteHookshotPreviousSubTopAngle = i_subTopAngle;
+        mRemoteHookshotPreviousValid = false;
+    }
+    mRemoteHookshotLeft = i_left;
+    mRemoteHookshotTopLinkAnchored = i_topLinkAnchored;
+    mRemoteHookshotSubTopLinkAnchored = i_subTopLinkAnchored;
+    mRemoteHookshotTop = i_top;
+    mRemoteHookshotSubTop = i_subTop;
+    mRemoteHookshotTopAngle = i_topAngle;
+    mRemoteHookshotSubTopAngle = i_subTopAngle;
+    mRemoteHookshotStopTime = i_stopTime;
+    mRemoteHookshotItemFrame = i_itemFrame;
+    mRemoteHookshotTipFrame = i_tipFrame;
+    mRemoteHookshotSubTipFrame = i_subTipFrame;
+    clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mHookTipMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mHookSubItemMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mHookSubTipMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteBoomerangVisualState(
+    bool i_valid, bool i_linkAnchored, const cXyz& i_pos,
+    const csXyz& i_angle) {
+    const bool wasValid = mRemoteBoomerangVisualValid;
+    const bool wasLinkAnchored = mRemoteBoomerangLinkAnchored;
+    mRemoteBoomerangVisualValid =
+        i_valid && mRemoteItemActorKind == 1 &&
+        mVisualState.form != FORM_WOLF;
+    if (!mRemoteBoomerangVisualValid) {
+        mRemoteBoomerangLinkAnchored = false;
+        mRemoteBoomerangPreviousVisualValid = false;
+        if (mRemoteItemActorKind == 1) mItemActorMatrixValid = false;
+        return;
+    }
+    if (wasValid && !wasLinkAnchored && !i_linkAnchored) {
+        mRemoteBoomerangPreviousVisualPos = mRemoteBoomerangVisualPos;
+        mRemoteBoomerangPreviousVisualAngle = mRemoteBoomerangVisualAngle;
+        mRemoteBoomerangPreviousVisualValid = true;
+    } else if (wasValid && wasLinkAnchored && !i_linkAnchored) {
+        // The first detached sample starts at the final hand-attached
+        // presentation transform, exactly as the local actor does.
+        mRemoteBoomerangPreviousVisualPos = mRemoteBoomerangRenderedPos;
+        mRemoteBoomerangPreviousVisualAngle = mRemoteBoomerangRenderedAngle;
+        mRemoteBoomerangPreviousVisualValid = true;
+    } else {
+        mRemoteBoomerangPreviousVisualPos = i_pos;
+        mRemoteBoomerangPreviousVisualAngle = i_angle;
+        mRemoteBoomerangPreviousVisualValid = false;
+    }
+    mRemoteBoomerangLinkAnchored = i_linkAnchored;
+    mRemoteBoomerangVisualPos = i_pos;
+    mRemoteBoomerangVisualAngle = i_angle;
+    mItemActorMatrixValid = mpItemActorModel != NULL;
+    clearRemoteModelMatrixInterpolation(mItemActorMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteCopyRodVisualState(bool i_valid, bool i_topUse) {
+    mRemoteCopyRodVisualValid =
+        i_valid && (mRemoteEquipItem == dItemNo_COPY_ROD_e ||
+                    mRemoteEquipItem == dItemNo_COPY_ROD_2_e) &&
+        mVisualState.form != FORM_WOLF;
+    mRemoteCopyRodTopUse = i_topUse;
+    if (!mRemoteCopyRodVisualValid) {
+        if (mRemoteEquipItem == dItemNo_COPY_ROD_e ||
+            mRemoteEquipItem == dItemNo_COPY_ROD_2_e) {
+            mHeldItemMatrixValid = false;
+        }
+        return;
+    }
+    mHeldItemMatrixValid = mRemoteItemDraw && mpHeldItemModel != NULL;
+    clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteBowVisualState(bool i_valid, bool i_grabLeft,
+                                             u16 i_bck, f32 i_frame,
+                                             bool i_arrowVisible,
+                                             bool i_arrowBomb) {
+    const bool bowItem = mRemoteEquipItem == dItemNo_BOW_e ||
+                         mRemoteEquipItem == dItemNo_BOMB_ARROW_e ||
+                         mRemoteEquipItem == dItemNo_HAWK_ARROW_e ||
+                         mRemoteEquipItem == dItemNo_PACHINKO_e;
+    mRemoteBowVisualValid = i_valid && bowItem &&
+                           mVisualState.form != FORM_WOLF;
+    mRemoteBowGrabLeft = i_grabLeft;
+    mRemoteBowBck = i_bck;
+    mRemoteBowFrame = i_frame;
+    mRemoteBowArrowVisible = i_arrowVisible;
+    mRemoteBowArrowBomb = i_arrowBomb;
+    if (!mRemoteBowVisualValid) {
+        if (bowItem) {
+            mHeldItemMatrixValid = false;
+            mArrowMatrixValid = false;
+        }
+        return;
+    }
+    mHeldItemMatrixValid = mRemoteItemDraw && mpHeldItemModel != NULL;
+    mArrowMatrixValid = mRemoteItemDraw && i_arrowVisible && mpArrowModel != NULL;
+    clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mArrowMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteLanternVisualState(
+    bool i_valid, bool i_linkAnchored, bool i_handAttached, bool i_lit,
+    const cXyz& i_pos, const csXyz& i_baseAngle,
+    const csXyz& i_jointAngle) {
+    const bool wasValid = mRemoteLanternVisualValid;
+    const bool wasLinkAnchored = mRemoteLanternLinkAnchored;
+    mRemoteLanternVisualValid =
+        i_valid && mVisualState.form != FORM_WOLF && mRemoteKanteraDraw;
+    if (!mRemoteLanternVisualValid) {
+        mRemoteLanternPreviousValid = false;
+        if (!mHasRemoteMatrices) {
+            mKanteraMatrixValid = false;
+            mKanteraGlowMatrixValid = false;
+        }
+        return;
+    }
+    if (wasValid) {
+        mRemoteLanternPreviousJointAngle = mRemoteLanternJointAngle;
+        if (!wasLinkAnchored && !i_linkAnchored) {
+            mRemoteLanternPreviousPos = mRemoteLanternPos;
+            mRemoteLanternPreviousBaseAngle = mRemoteLanternBaseAngle;
+        } else if (wasLinkAnchored && !i_linkAnchored) {
+            mRemoteLanternPreviousPos = mRemoteLanternRenderedPos;
+            mRemoteLanternPreviousBaseAngle = mRemoteLanternRenderedBaseAngle;
+        } else {
+            mRemoteLanternPreviousPos = i_pos;
+            mRemoteLanternPreviousBaseAngle = i_baseAngle;
+        }
+        mRemoteLanternPreviousValid = true;
+    } else {
+        mRemoteLanternPreviousPos = i_pos;
+        mRemoteLanternPreviousBaseAngle = i_baseAngle;
+        mRemoteLanternPreviousJointAngle = i_jointAngle;
+        mRemoteLanternPreviousValid = false;
+    }
+    mRemoteLanternLinkAnchored = i_linkAnchored;
+    mRemoteLanternHandAttached = i_handAttached;
+    mRemoteLanternLit = i_lit;
+    mRemoteLanternPos = i_pos;
+    mRemoteLanternBaseAngle = i_baseAngle;
+    mRemoteLanternJointAngle = i_jointAngle;
+    mKanteraMatrixValid = mpKanteraModel != NULL;
+    mKanteraGlowMatrixValid = i_lit && mpKanteraGlowModel != NULL;
+    clearRemoteModelMatrixInterpolation(mKanteraMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mKanteraGlowMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteBottleVisualState(
+    bool i_valid, bool i_oilRightAttached, bool i_jointRightAttached,
+    bool i_drinkMaterialSet, int i_materialStage, f32 i_brkFrame,
+    f32 i_btpFrame, f32 i_btkSwingFrame, f32 i_btkActionFrame,
+    f32 i_btkFinishFrame, int i_contentKind, f32 i_contentFrame) {
+    const bool bottleItem = isBottleItem(mRemoteEquipItem);
+    const bool resourceLayoutChanged =
+        mRemoteBottleDrinkMaterialSet != i_drinkMaterialSet ||
+        mRemoteBottleContentKind != i_contentKind;
+    mRemoteBottleVisualValid =
+        i_valid && bottleItem && mVisualState.form != FORM_WOLF;
+    mRemoteBottleOilRightAttached = i_oilRightAttached;
+    mRemoteBottleJointRightAttached = i_jointRightAttached;
+    mRemoteBottleDrinkMaterialSet = i_drinkMaterialSet;
+    mRemoteBottleMaterialStage = static_cast<s8>(i_materialStage);
+    mRemoteBottleBrkFrame = i_brkFrame;
+    mRemoteBottleBtpFrame = i_btpFrame;
+    mRemoteBottleBtkSwingFrame = i_btkSwingFrame;
+    mRemoteBottleBtkActionFrame = i_btkActionFrame;
+    mRemoteBottleBtkFinishFrame = i_btkFinishFrame;
+    mRemoteBottleContentKind = static_cast<s8>(i_contentKind);
+    mRemoteBottleContentFrame = i_contentFrame;
+    if (!mRemoteBottleVisualValid) {
+        if (bottleItem) {
+            mHeldItemMatrixValid = false;
+            mHookTipMatrixValid = false;
+        }
+        return;
+    }
+    if (resourceLayoutChanged || mLoadedBottleContentKind != i_contentKind) {
+        mLoadedHeldItem = 0xFFFF;
+        setupHeldItemModel();
+    }
+    mHeldItemMatrixValid = mRemoteItemDraw && mpHeldItemModel != NULL;
+    mHookTipMatrixValid = mRemoteItemDraw && i_contentKind != 0 &&
+                          mpHookTipModel != NULL;
+    clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+    clearRemoteModelMatrixInterpolation(mHookTipMatrixInterp);
 }
 
 void daRemoteLink_c::setRemotePresentationVisible(bool i_visible) {
@@ -4634,23 +5910,39 @@ void daRemoteLink_c::setRemoteMatrices(
         clearRemoteModelMatrixInterpolation(mSheathMatrixInterp);
         clearRemoteModelMatrixInterpolation(mShieldMatrixInterp);
     }
-    mHeldItemMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHeldItemModel, i_matrices.heldItem);
-    mHookTipMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHookTipModel, i_matrices.hookTip);
-    mHookSubItemMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubItemModel, i_matrices.hookSubItem);
-    mHookSubTipMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubTipModel, i_matrices.hookSubTip);
-    mArrowMatrixValid =
-        mRemoteItemDraw && copyRemoteModelMatrices(mpArrowModel, i_matrices.arrow);
-    mKanteraMatrixValid =
-        mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraModel, i_matrices.kantera);
-    mKanteraGlowMatrixValid =
-        mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraGlowModel,
-                                                      i_matrices.kanteraGlow);
-    mItemActorMatrixValid = copyRemoteModelMatrices(mpItemActorModel,
-                                                    i_matrices.itemActor);
+    if (!mRemoteIronBallVisualValid && !mRemoteHookshotVisualValid &&
+        !mRemoteCopyRodVisualValid && !mRemoteBowVisualValid &&
+        !mRemoteBottleVisualValid) {
+        mHeldItemMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHeldItemModel, i_matrices.heldItem);
+    }
+    if (!mRemoteHookshotVisualValid && !mRemoteBottleVisualValid) {
+        mHookTipMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHookTipModel, i_matrices.hookTip);
+        mHookSubItemMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubItemModel, i_matrices.hookSubItem);
+        mHookSubTipMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpHookSubTipModel, i_matrices.hookSubTip);
+    }
+    if (!mRemoteBowVisualValid) {
+        mArrowMatrixValid =
+            mRemoteItemDraw && copyRemoteModelMatrices(mpArrowModel, i_matrices.arrow);
+    }
+    if (!mRemoteLanternVisualValid) {
+        mKanteraMatrixValid =
+            mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraModel,
+                                                          i_matrices.kantera);
+        mKanteraGlowMatrixValid =
+            mRemoteKanteraDraw && copyRemoteModelMatrices(mpKanteraGlowModel,
+                                                          i_matrices.kanteraGlow);
+    }
+    if (!mRemoteBoomerangVisualValid) {
+        mItemActorMatrixValid = copyRemoteModelMatrices(mpItemActorModel,
+                                                        i_matrices.itemActor);
+    } else {
+        mItemActorMatrixValid = mpItemActorModel != NULL;
+        clearRemoteModelMatrixInterpolation(mItemActorMatrixInterp);
+    }
     if (mItemActorMatrixValid && isRemoteBombActorKind(mRemoteItemActorKind)) {
         mRemoteBombLastPos.set(i_matrices.itemActor.base[3], i_matrices.itemActor.base[7],
                                i_matrices.itemActor.base[11]);
@@ -4760,6 +6052,11 @@ void daRemoteLink_c::setRemoteBodyState(
     const std::array<int16_t, 3>& i_fishingArm2Angle) {
     mRemoteShapeX = i_shapeX;
     mRemoteShapeZ = i_shapeZ;
+    // Local Link's base matrix uses all three shape angles. Spinner riding in
+    // particular derives X/Z from the Spinner model every frame, so retaining
+    // these values without applying them leaves the semantic actor upright.
+    shape_angle.x = mRemoteShapeX;
+    shape_angle.z = mRemoteShapeZ;
     mRemoteBodyAngleX = i_bodyX;
     mRemoteBodyAngleY = i_bodyY;
     mRemoteBodyAngleZ = i_bodyZ;
@@ -4797,6 +6094,251 @@ void daRemoteLink_c::drawModel(J3DModel* i_model) {
 
     g_env_light.setLightTevColorType_MAJI(i_model, &tevStr);
     mDoExt_modelEntryDL(i_model);
+}
+
+void daRemoteLink_c::drawIronBallChain() {
+    if (!mRemoteIronBallVisualValid || mRemoteIronBallChainCount == 0 ||
+        mpIronBallChainModelData == NULL) {
+        return;
+    }
+
+    J3DMaterial* material = mpIronBallChainModelData->getMaterialNodePointer(0);
+    if (material == NULL || material->getShape() == NULL) return;
+
+    j3dSys.setVtxPos(mpIronBallChainModelData->getVtxPosArray(),
+                     mpIronBallChainModelData->getVtxNum());
+    j3dSys.setVtxNrm(mpIronBallChainModelData->getVtxNrmArray(),
+                     mpIronBallChainModelData->getNrmNum());
+    j3dSys.setVtxCol(mpIronBallChainModelData->getVtxColorArray(0),
+                     mpIronBallChainModelData->getColNum());
+#if TARGET_PC
+    j3dSys.setTexture(mpIronBallChainModelData->getTexture());
+#endif
+    J3DShape::resetVcdVatCache();
+    material->loadSharedDL();
+    material->getShape()->loadPreDrawSetting();
+
+    daAlink_hsChainLight_c* chainLight =
+        reinterpret_cast<daAlink_hsChainLight_c*>(&tevStr);
+    GXColor ambColor = {static_cast<u8>(chainLight->AmbCol.r),
+                        static_cast<u8>(chainLight->AmbCol.g),
+                        static_cast<u8>(chainLight->AmbCol.b),
+                        static_cast<u8>(chainLight->AmbCol.a)};
+    GXSetChanAmbColor(GX_COLOR0A0, ambColor);
+    GXSetChanMatColor(GX_COLOR0A0, g_whiteColor);
+    dKy_setLight_again();
+    dKy_GxFog_tevstr_set(chainLight);
+    GXLoadLightObjImm(chainLight->getLightObj(), GX_LIGHT0);
+
+    cXyz positions[101];
+    csXyz angles[101];
+    positions[0] = mRemoteIronBallRenderedPos;
+    angles[0] = mRemoteIronBallRenderedAngle;
+    const int count = std::min<int>(mRemoteIronBallChainCount, 100);
+    const bool interpolateWorldChain =
+        !mRemoteIronBallLinkAnchored && dusk::frame_interp::is_enabled() &&
+        mRemoteIronBallPreviousVisualValid &&
+        mRemoteIronBallChainPreviousValid;
+    const int previousCount = interpolateWorldChain ?
+        std::min<int>(mRemoteIronBallChainPreviousCount, 100) : count;
+    const int drawCount = interpolateWorldChain ? std::max(count, previousCount) : count;
+    const f32 chainAlpha = interpolateWorldChain ?
+        dusk::frame_interp::get_interpolation_step() : 1.0f;
+    cXyz previousCursor = mRemoteIronBallPreviousVisualPos;
+    cXyz currentCursor = mRemoteIronBallVisualPos;
+    s16 roll = static_cast<s16>(mRemoteIronBallRenderedAngle.z + 0x3000);
+    for (int i = 0; i < drawCount; ++i) {
+        cXyz direction = i < count ?
+            mRemoteIronBallChainDirections[i] : cXyz::Zero;
+        if (interpolateWorldChain) {
+            if (i < previousCount) {
+                cXyz previousDirection = mRemoteIronBallChainPreviousDirections[i];
+                if (previousDirection.abs2() < 0.0001f) previousDirection = cXyz::BaseZ;
+                previousDirection.normalizeZP();
+                previousCursor += previousDirection * 10.0f;
+            }
+            if (i < count) {
+                if (direction.abs2() < 0.0001f) direction = cXyz::BaseZ;
+                direction.normalizeZP();
+                currentCursor += direction * 10.0f;
+            }
+            // Vanilla interpolates every chain position. Interpolating then
+            // normalizing directions instead changes the accumulated endpoint
+            // and makes the hand-side filler approach from behind the grip.
+            positions[i + 1] = previousCursor +
+                (currentCursor - previousCursor) * chainAlpha;
+        } else {
+            if (dusk::frame_interp::is_enabled() &&
+                mRemoteIronBallChainPreviousValid &&
+                mRemoteIronBallChainPreviousCount == mRemoteIronBallChainCount) {
+                const f32 alpha = dusk::frame_interp::get_interpolation_step();
+                direction = mRemoteIronBallChainPreviousDirections[i] +
+                    (direction - mRemoteIronBallChainPreviousDirections[i]) * alpha;
+            }
+            if (direction.abs2() < 0.0001f) direction = cXyz::BaseZ;
+            direction.normalizeZP();
+            positions[i + 1] = positions[i] + direction * 10.0f;
+        }
+        const cXyz towardBall = positions[i] - positions[i + 1];
+        angles[i + 1].set(towardBall.atan2sY_XZ(), towardBall.atan2sX_Z(), roll);
+        roll = static_cast<s16>(roll + 0x3000);
+    }
+
+    if (count > 0 && mRemoteIronBallChainEndOffsetValid) {
+        const f32 endpointAlpha =
+            dusk::frame_interp::is_enabled() && mRemoteIronBallChainPreviousValid &&
+                    mRemoteIronBallChainPreviousEndOffsetValid ?
+                dusk::frame_interp::get_interpolation_step() : 1.0f;
+        const cXyz presentedEndOffset = endpointAlpha < 1.0f ?
+            mRemoteIronBallChainPreviousEndOffset +
+                (mRemoteIronBallChainEndOffset -
+                 mRemoteIronBallChainPreviousEndOffset) * endpointAlpha :
+            mRemoteIronBallChainEndOffset;
+        const cXyz desiredEnd = mRemoteIronBallHandRoot + presentedEndOffset;
+        const cXyz endpointCorrection = desiredEnd - positions[count];
+        for (int i = 1; i <= drawCount; ++i) {
+            const f32 weight = std::min(static_cast<f32>(i) /
+                                            static_cast<f32>(count),
+                                        1.0f);
+            positions[i] += endpointCorrection * weight;
+            const cXyz towardBall = positions[i - 1] - positions[i];
+            if (towardBall.abs2() >= 0.0001f) {
+                angles[i].x = towardBall.atan2sY_XZ();
+                angles[i].y = towardBall.atan2sX_Z();
+            }
+        }
+    }
+
+    const auto drawLink = [&](const cXyz& pos, const csXyz& angle) {
+        mDoMtx_stack_c::copy(j3dSys.getViewMtx());
+        mDoMtx_stack_c::transM(pos);
+        mDoMtx_stack_c::ZXYrotM(angle);
+        mDoMtx_stack_c::scaleM(2.0f, 2.0f, 2.0f);
+        GXLoadPosMtxImm(mDoMtx_stack_c::get(), GX_PNMTX0);
+        GXLoadNrmMtxImm(mDoMtx_stack_c::get(), GX_PNMTX0);
+        material->getShape()->simpleDrawCache();
+    };
+
+    for (int i = 1; i <= drawCount; ++i) drawLink(positions[i], angles[i]);
+
+    // Match vanilla's small endpoint fillers so the first/last full links do
+    // not leave gaps at the ball or the animated hand-side root.
+    for (int endpoint = 0; endpoint < 2; ++endpoint) {
+        cXyz start;
+        cXyz delta;
+        csXyz baseAngle;
+        s16 rollStep;
+        if (endpoint == 0) {
+            start = positions[count];
+            delta = mRemoteIronBallHandRoot - start;
+            baseAngle = angles[count];
+            rollStep = 0x3000;
+        } else {
+            start = positions[0];
+            mDoMtx_stack_c::transS(positions[1]);
+            mDoMtx_stack_c::ZXYrotM(angles[1]);
+            cXyz firstLinkEnd;
+            mDoMtx_stack_c::multVec(&l_remoteIronBallChainVec, &firstLinkEnd);
+            delta = firstLinkEnd - start;
+            baseAngle = angles[1];
+            rollStep = -0x3000;
+        }
+        float distance = delta.abs();
+        if (distance <= 5.0f) continue;
+        const float horizontal = delta.absXZ();
+        const s16 yaw = horizontal >= 1.0f ? delta.atan2sX_Z() : baseAngle.y;
+        const s16 pitch = delta.atan2sY_XZ();
+        s16 endpointRoll = static_cast<s16>(baseAngle.z + rollStep);
+        const cXyz step = delta * (10.0f / distance);
+        while (distance > 5.0f) {
+            drawLink(start, csXyz(pitch, yaw, endpointRoll));
+            start += step;
+            distance -= 10.0f;
+            endpointRoll = static_cast<s16>(endpointRoll + rollStep);
+        }
+    }
+}
+
+void daRemoteLink_c::drawHookshotChains() {
+    if (!mRemoteHookshotVisualValid || mpHookshotChainModelData == NULL) return;
+    J3DMaterial* material = mpHookshotChainModelData->getMaterialNodePointer(0);
+    if (material == NULL || material->getShape() == NULL) return;
+    j3dSys.setVtxPos(mpHookshotChainModelData->getVtxPosArray(),
+                     mpHookshotChainModelData->getVtxNum());
+    j3dSys.setVtxNrm(mpHookshotChainModelData->getVtxNrmArray(),
+                     mpHookshotChainModelData->getNrmNum());
+    j3dSys.setVtxCol(mpHookshotChainModelData->getVtxColorArray(0),
+                     mpHookshotChainModelData->getColNum());
+#if TARGET_PC
+    j3dSys.setTexture(mpHookshotChainModelData->getTexture());
+#endif
+    J3DShape::resetVcdVatCache();
+    material->loadSharedDL();
+    material->getShape()->loadPreDrawSetting();
+    daAlink_hsChainLight_c* chainLight =
+        reinterpret_cast<daAlink_hsChainLight_c*>(&tevStr);
+    GXColor ambColor = {static_cast<u8>(chainLight->AmbCol.r),
+                        static_cast<u8>(chainLight->AmbCol.g),
+                        static_cast<u8>(chainLight->AmbCol.b),
+                        static_cast<u8>(chainLight->AmbCol.a)};
+    GXSetChanAmbColor(GX_COLOR0A0, ambColor);
+    GXSetChanMatColor(GX_COLOR0A0, g_whiteColor);
+    dKy_setLight_again();
+    dKy_GxFog_tevstr_set(chainLight);
+    GXLoadLightObjImm(chainLight->getLightObj(), GX_LIGHT0);
+
+    const auto drawLink = [&](const cXyz& pos, const csXyz& angle) {
+        mDoMtx_stack_c::copy(j3dSys.getViewMtx());
+        mDoMtx_stack_c::transM(pos);
+        mDoMtx_stack_c::ZXYrotM(angle);
+        GXLoadPosMtxImm(mDoMtx_stack_c::get(), GX_PNMTX0);
+        GXLoadNrmMtxImm(mDoMtx_stack_c::get(), GX_PNMTX0);
+        material->getShape()->simpleDrawCache();
+    };
+
+    cXyz direction = mRemoteHookshotRoot - mRemoteHookshotRenderedTop;
+    f32 distance = direction.abs();
+    if (distance > 1.0f) {
+        direction *= 1.0f / distance;
+        cXyz pos = mRemoteHookshotRenderedTop;
+        const csXyz base(direction.atan2sY_XZ(), direction.atan2sX_Z(), 0);
+        csXyz angle(base);
+        const f32 waveScale = (mRemoteHookshotStopTime & 1 ? -2.5f : 2.5f) *
+                              mRemoteHookshotStopTime;
+        const f32 phaseScale = M_PI / distance;
+        f32 traversed = 0.0f;
+        f32 previousWave = 0.0f;
+        int links = 0;
+        while (distance > traversed && links++ < 600) {
+            const f32 wave = waveScale * cM_fsin(phaseScale * traversed);
+            const s16 bend = cM_atan2s(wave - previousWave, 5.0f);
+            angle.x = static_cast<s16>(base.x + bend);
+            drawLink(pos, angle);
+            mDoMtx_stack_c::transS(pos);
+            mDoMtx_stack_c::ZXYrotM(angle);
+            static const cXyz step(0.0f, 0.0f, 5.0f);
+            mDoMtx_stack_c::multVec(&step, &pos);
+            angle.z = static_cast<s16>(angle.z + 0x3000);
+            previousWave = wave;
+            traversed += fabsf(cM_scos(bend)) * 5.0f;
+        }
+    }
+
+    direction = mRemoteHookshotSubRoot - mRemoteHookshotRenderedSubTop;
+    distance = direction.abs();
+    if (distance > 1.0f) {
+        direction *= 1.0f / distance;
+        cXyz pos = mRemoteHookshotRenderedSubTop;
+        csXyz angle(direction.atan2sY_XZ(), direction.atan2sX_Z(), 0);
+        f32 traversed = 0.0f;
+        int links = 0;
+        while (distance > traversed && links++ < 600) {
+            drawLink(pos, angle);
+            pos += direction * 5.0f;
+            angle.z = static_cast<s16>(angle.z + 0x3000);
+            traversed += 5.0f;
+        }
+    }
 }
 
 void daRemoteLink_c::updateKanteraGlowOcclusion() {
@@ -5138,6 +6680,15 @@ int daRemoteLink_c::Draw() {
 
     if (mHeldItemMatrixValid) {
         drawModel(mpHeldItemModel);
+    }
+    if (mRemoteIronBallVisualValid && mRemoteIronBallChainCount > 0 &&
+        mpIronBallChainModelData != NULL) {
+        dComIfGd_getOpaListDark()->entryImm(&mIronBallChainPacket, 0);
+    }
+    if (mRemoteHookshotVisualValid && mpHookshotChainModelData != NULL &&
+        ((mRemoteHookshotRoot - mRemoteHookshotRenderedTop).abs2() > 1.0f ||
+         (mRemoteHookshotSubRoot - mRemoteHookshotRenderedSubTop).abs2() > 1.0f)) {
+        dComIfGd_getOpaListDark()->entryImm(&mHookshotChainPacket, 0);
     }
     if (mHookTipMatrixValid) {
         drawModel(mpHookTipModel);

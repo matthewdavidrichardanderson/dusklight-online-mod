@@ -823,6 +823,13 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.swordOut = state.value("sword_out", false);
         pose.swordHandAttached = state.value("sword_hand_attached", pose.swordOut);
         pose.shieldHandAttached = state.value("shield_hand_attached", false);
+        pose.leftHandShape = state.value("left_hand_shape", -1);
+        pose.rightHandShape = state.value("right_hand_shape", -1);
+        if (pose.leftHandShape < -1 || pose.leftHandShape > 254 ||
+            pose.rightHandShape < -1 || pose.rightHandShape > 254) {
+            error = "pose contains invalid hand shape";
+            return false;
+        }
         pose.midnaDraw = false;
         pose.midnaMaskDraw = false;
         pose.midnaHandDraw = false;
@@ -832,9 +839,251 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.itemDraw = state.value("item_draw", false);
         pose.kanteraDraw = state.value("kantera_draw", false);
         pose.itemActorKind = state.value("item_actor_kind", 0);
+        pose.boomerangVisualValid = false;
+        if (state.contains("boomerang_visual")) {
+            const json& boomerang = state.at("boomerang_visual");
+            if (!boomerang.is_object()) {
+                error = "pose contains invalid boomerang visual state";
+                return false;
+            }
+            pose.boomerangLinkAnchored = boomerang.value("link_anchored", false);
+            if (!pose.boomerangLinkAnchored) {
+                const json pos = boomerang.value("pos", json::array());
+                const json angle = boomerang.value("angle", json::array());
+                if (pos.size() != 3 || angle.size() != 3) {
+                    error = "pose contains invalid boomerang visual state";
+                    return false;
+                }
+                pose.boomerangX = pos.at(0).get<float>();
+                pose.boomerangY = pos.at(1).get<float>();
+                pose.boomerangZ = pos.at(2).get<float>();
+                pose.boomerangAngleX = angle.at(0).get<int>();
+                pose.boomerangAngleY = angle.at(1).get<int>();
+                pose.boomerangAngleZ = angle.at(2).get<int>();
+                if (!std::isfinite(pose.boomerangX) ||
+                    !std::isfinite(pose.boomerangY) ||
+                    !std::isfinite(pose.boomerangZ)) {
+                    error = "pose contains invalid boomerang visual values";
+                    return false;
+                }
+            }
+            pose.boomerangVisualValid = true;
+        }
         pose.itemActorBombExTime = state.value("item_actor_bomb_ex_time", -1);
         pose.itemActorBombFlash = state.value("item_actor_bomb_flash", -1);
+        pose.ironBallVisualValid = state.value("iron_ball_visual_valid", false);
+        pose.ironBallLinkAnchored = state.value("iron_ball_link_anchored", false);
+        pose.ironBallX = state.value("iron_ball_x", 0.0f);
+        pose.ironBallY = state.value("iron_ball_y", 0.0f);
+        pose.ironBallZ = state.value("iron_ball_z", 0.0f);
+        pose.ironBallAngleX = state.value("iron_ball_angle_x", 0);
+        pose.ironBallAngleY = state.value("iron_ball_angle_y", 0);
+        pose.ironBallAngleZ = state.value("iron_ball_angle_z", 0);
+        if (pose.ironBallVisualValid && !pose.ironBallLinkAnchored &&
+            (!std::isfinite(pose.ironBallX) || !std::isfinite(pose.ironBallY) ||
+             !std::isfinite(pose.ironBallZ))) {
+            error = "pose contains non-finite iron ball visual state";
+            return false;
+        }
+        pose.ironBallChainCount = 0;
+        pose.ironBallChainDirections.clear();
+        if (pose.ironBallVisualValid && state.contains("iron_ball_chain")) {
+            const json& chain = state.at("iron_ball_chain");
+            const int count = chain.value("count", -1);
+            std::string directions;
+            if (count < 0 || count > 100 || !packed_bytes(chain, directions) ||
+                directions.size() != static_cast<size_t>(count) * 3) {
+                error = "pose contains invalid iron ball chain state";
+                return false;
+            }
+            pose.ironBallChainCount = static_cast<uint8_t>(count);
+            pose.ironBallChainDirections.assign(directions.begin(), directions.end());
+            std::string endOffset;
+            if (chain.contains("end")) {
+                json endContainer = {{"data", chain.at("end")}};
+                if (!packed_bytes(endContainer, endOffset) || endOffset.size() != 3) {
+                    error = "pose contains invalid iron ball chain endpoint";
+                    return false;
+                }
+                pose.ironBallChainEndOffsetX =
+                    static_cast<float>(static_cast<int8_t>(endOffset[0])) * 0.25f;
+                pose.ironBallChainEndOffsetY =
+                    static_cast<float>(static_cast<int8_t>(endOffset[1])) * 0.25f;
+                pose.ironBallChainEndOffsetZ =
+                    static_cast<float>(static_cast<int8_t>(endOffset[2])) * 0.25f;
+                pose.ironBallChainEndOffsetValid = true;
+            }
+        }
+        pose.hookshotVisualValid = false;
+        if (state.contains("hookshot_visual")) {
+            const json& hookshot = state.at("hookshot_visual");
+            if (!hookshot.is_object()) {
+                error = "pose contains invalid hookshot visual state";
+                return false;
+            }
+            const json top = hookshot.value("top", json::array());
+            const json topAngle = hookshot.value("top_angle", json::array());
+            const json subTop = hookshot.value("sub_top", json::array());
+            const json subTopAngle = hookshot.value("sub_top_angle", json::array());
+            if (top.size() != 3 || topAngle.size() != 3 || subTop.size() != 3 ||
+                subTopAngle.size() != 3) {
+                error = "pose contains invalid hookshot visual state";
+                return false;
+            }
+            pose.hookshotTopX = top.at(0).get<float>();
+            pose.hookshotTopY = top.at(1).get<float>();
+            pose.hookshotTopZ = top.at(2).get<float>();
+            pose.hookshotTopAngleX = topAngle.at(0).get<int>();
+            pose.hookshotTopAngleY = topAngle.at(1).get<int>();
+            pose.hookshotTopAngleZ = topAngle.at(2).get<int>();
+            pose.hookshotSubTopX = subTop.at(0).get<float>();
+            pose.hookshotSubTopY = subTop.at(1).get<float>();
+            pose.hookshotSubTopZ = subTop.at(2).get<float>();
+            pose.hookshotSubTopAngleX = subTopAngle.at(0).get<int>();
+            pose.hookshotSubTopAngleY = subTopAngle.at(1).get<int>();
+            pose.hookshotSubTopAngleZ = subTopAngle.at(2).get<int>();
+            pose.hookshotLeft = hookshot.value("left", true);
+            pose.hookshotTopLinkAnchored =
+                hookshot.value("top_link_anchored", false);
+            pose.hookshotSubTopLinkAnchored =
+                hookshot.value("sub_top_link_anchored", false);
+            pose.hookshotStopTime = hookshot.value("stop_time", 0);
+            pose.hookshotItemFrame = hookshot.value("item_frame", 0.0f);
+            pose.hookshotTipFrame = hookshot.value("tip_frame", 0.0f);
+            pose.hookshotSubTipFrame = hookshot.value("sub_tip_frame", 0.0f);
+            if (!std::isfinite(pose.hookshotTopX) ||
+                !std::isfinite(pose.hookshotTopY) ||
+                !std::isfinite(pose.hookshotTopZ) ||
+                !std::isfinite(pose.hookshotSubTopX) ||
+                !std::isfinite(pose.hookshotSubTopY) ||
+                !std::isfinite(pose.hookshotSubTopZ) ||
+                !std::isfinite(pose.hookshotItemFrame) ||
+                !std::isfinite(pose.hookshotTipFrame) ||
+                !std::isfinite(pose.hookshotSubTipFrame) ||
+                pose.hookshotStopTime < 0 || pose.hookshotStopTime > 0x7FFF) {
+                error = "pose contains invalid hookshot visual values";
+                return false;
+            }
+            pose.hookshotVisualValid = true;
+        }
+        pose.copyRodVisualValid = false;
+        if (state.contains("copy_rod_visual")) {
+            const json& copyRod = state.at("copy_rod_visual");
+            if (!copyRod.is_object()) {
+                error = "pose contains invalid copy rod visual state";
+                return false;
+            }
+            pose.copyRodTopUse = copyRod.value("top_use", false);
+            pose.copyRodVisualValid = true;
+        }
+        pose.bowVisualValid = false;
+        if (state.contains("bow_visual")) {
+            const json& bow = state.at("bow_visual");
+            if (!bow.is_object()) {
+                error = "pose contains invalid bow visual state";
+                return false;
+            }
+            pose.bowGrabLeft = bow.value("grab_left", false);
+            pose.bowBck = bow.value("bck", 0);
+            pose.bowFrame = bow.value("frame", 0.0f);
+            pose.bowArrowVisible = bow.value("arrow_visible", false);
+            pose.bowArrowBomb = bow.value("arrow_bomb", false);
+            if (pose.bowBck <= 0 || pose.bowBck > 0xFFFF ||
+                !std::isfinite(pose.bowFrame)) {
+                error = "pose contains invalid bow visual values";
+                return false;
+            }
+            pose.bowVisualValid = true;
+        }
+        pose.lanternVisualValid = false;
+        if (state.contains("lantern_visual")) {
+            const json& lantern = state.at("lantern_visual");
+            if (!lantern.is_object()) {
+                error = "pose contains invalid lantern visual state";
+                return false;
+            }
+            pose.lanternLinkAnchored = lantern.value("link_anchored", false);
+            pose.lanternHandAttached = lantern.value("hand_attached", false);
+            pose.lanternLit = lantern.value("lit", false);
+            const json jointAngle = lantern.value("joint_angle", json::array());
+            if (jointAngle.size() != 3) {
+                error = "pose contains invalid lantern joint state";
+                return false;
+            }
+            pose.lanternJointAngleX = jointAngle.at(0).get<int>();
+            pose.lanternJointAngleY = jointAngle.at(1).get<int>();
+            pose.lanternJointAngleZ = jointAngle.at(2).get<int>();
+            if (!pose.lanternLinkAnchored) {
+                const json pos = lantern.value("pos", json::array());
+                const json baseAngle = lantern.value("base_angle", json::array());
+                if (pos.size() != 3 || baseAngle.size() != 3) {
+                    error = "pose contains invalid detached lantern state";
+                    return false;
+                }
+                pose.lanternX = pos.at(0).get<float>();
+                pose.lanternY = pos.at(1).get<float>();
+                pose.lanternZ = pos.at(2).get<float>();
+                pose.lanternBaseAngleX = baseAngle.at(0).get<int>();
+                pose.lanternBaseAngleY = baseAngle.at(1).get<int>();
+                pose.lanternBaseAngleZ = baseAngle.at(2).get<int>();
+                if (!std::isfinite(pose.lanternX) ||
+                    !std::isfinite(pose.lanternY) ||
+                    !std::isfinite(pose.lanternZ)) {
+                    error = "pose contains invalid lantern visual values";
+                    return false;
+                }
+            }
+            pose.lanternVisualValid = true;
+        }
+        pose.bottleVisualValid = false;
+        if (state.contains("bottle_visual")) {
+            const json& bottle = state.at("bottle_visual");
+            if (!bottle.is_object()) {
+                error = "pose contains invalid bottle visual state";
+                return false;
+            }
+            pose.bottleOilRightAttached = bottle.value("oil_right", false);
+            pose.bottleJointRightAttached = bottle.value("joint_right", false);
+            pose.bottleDrinkMaterialSet = bottle.value("drink_set", false);
+            pose.bottleMaterialStage = bottle.value("material_stage", 0);
+            pose.bottleBrkFrame = bottle.value("brk", 0.0f);
+            pose.bottleBtpFrame = bottle.value("btp", 0.0f);
+            pose.bottleBtkSwingFrame = bottle.value("btk_swing", 0.0f);
+            pose.bottleBtkActionFrame = bottle.value("btk_action", 0.0f);
+            pose.bottleBtkFinishFrame = bottle.value("btk_finish", 0.0f);
+            pose.bottleContentKind = bottle.value("content", 0);
+            pose.bottleContentFrame = bottle.value("content_frame", 0.0f);
+            if (pose.bottleMaterialStage < 0 || pose.bottleMaterialStage > 2 ||
+                pose.bottleContentKind < 0 || pose.bottleContentKind > 3 ||
+                !std::isfinite(pose.bottleBrkFrame) ||
+                !std::isfinite(pose.bottleBtpFrame) ||
+                !std::isfinite(pose.bottleBtkSwingFrame) ||
+                !std::isfinite(pose.bottleBtkActionFrame) ||
+                !std::isfinite(pose.bottleBtkFinishFrame) ||
+                !std::isfinite(pose.bottleContentFrame)) {
+                error = "pose contains invalid bottle visual values";
+                return false;
+            }
+            pose.bottleVisualValid = true;
+        }
         pose.rideActorKind = state.value("ride_actor_kind", 0);
+        pose.spinnerVisualValid = state.value("spinner_visual_valid", false);
+        pose.spinnerLinkAnchored = state.value("spinner_link_anchored", false);
+        pose.spinnerX = state.value("spinner_x", 0.0f);
+        pose.spinnerY = state.value("spinner_y", 0.0f);
+        pose.spinnerZ = state.value("spinner_z", 0.0f);
+        pose.spinnerShapeX = state.value("spinner_shape_x", 0);
+        pose.spinnerShapeY = state.value("spinner_shape_y", 0);
+        pose.spinnerShapeZ = state.value("spinner_shape_z", 0);
+        pose.spinnerRotY = state.value("spinner_rot_y", 0);
+        pose.spinnerVisualYOffset = state.value("spinner_visual_y_offset", 90.0f);
+        pose.spinnerJumpEpoch = state.value("spinner_jump_epoch", uint32_t{0});
+        if (pose.spinnerVisualValid &&
+            (!std::isfinite(pose.spinnerX) || !std::isfinite(pose.spinnerY) ||
+             !std::isfinite(pose.spinnerZ) || !std::isfinite(pose.spinnerVisualYOffset))) {
+            error = "pose contains non-finite spinner visual state";
+            return false;
+        }
         pose.linkMatrices = parse_matrices(state.value("link_matrices", json::object()));
         pose.linkMatricesFresh = pose.linkMatrices.valid;
         if (previous != nullptr && previous->valid) {
@@ -872,24 +1121,33 @@ bool enforce_semantic_pose_invariants(PeerPoseSnapshot& pose, std::string& error
         error.clear();
         return true;
     }
+    if (pose.boomerangVisualValid &&
+        pose.itemActorKind != dusk::multiplayer::REMOTE_ITEM_ACTOR_BOOMERANG) {
+        error = "semantic boomerang state has no boomerang actor";
+        return false;
+    }
+    if (pose.copyRodVisualValid && pose.equipItem != 0x46 &&
+        pose.equipItem != 0x4C) {
+        error = "semantic copy rod state has no equipped copy rod";
+        return false;
+    }
+    if (pose.bowVisualValid && pose.equipItem != 0x43 &&
+        pose.equipItem != 0x59 && pose.equipItem != 0x5A &&
+        pose.equipItem != 0x4B) {
+        error = "semantic bow/slingshot state has no equipped projectile item";
+        return false;
+    }
+    if (pose.bottleVisualValid &&
+        (pose.equipItem < 0x60 || pose.equipItem > 0x9F)) {
+        error = "semantic bottle state has no equipped bottle";
+        return false;
+    }
 
-    // Type-7 owns Link and ordinary equipped gear through semantic animation
-    // state. Only independently moving props may remain matrix-driven. Clear
-    // gear slots from older peers as well so stale snapshots cannot override
-    // sword/sheath/shield matrices reconstructed from the current body pose.
-    pose.linkMatrices.body = {};
-    pose.linkMatrices.hat = {};
-    pose.linkMatrices.face = {};
-    pose.linkMatrices.hand = {};
-    pose.linkMatrices.sword = {};
-    pose.linkMatrices.sheath = {};
-    pose.linkMatrices.shield = {};
-    pose.linkMatrices.midna = {};
-    pose.linkMatrices.midnaMask = {};
-    pose.linkMatrices.midnaHand = {};
-    pose.linkMatrices.midnaHair = {};
-    pose.linkMatrices.midnaGlow = {};
-    pose.linkMatrices.midnaHairShape = 0;
+    // Type-7 is a matrix-free representation. This clears freshly supplied
+    // matrices and any snapshot hydrated from a previous packet, preventing
+    // an older or malformed peer from silently restoring attachment fallback.
+    pose.linkMatrices = {};
+    pose.linkMatricesFresh = false;
     error.clear();
     return true;
 }

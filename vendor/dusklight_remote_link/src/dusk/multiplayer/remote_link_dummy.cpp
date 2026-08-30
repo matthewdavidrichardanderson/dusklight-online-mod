@@ -65,6 +65,12 @@ struct RemoteLinkActorDummy {
     s16 semanticStartYaw = 0;
     s16 semanticTargetYaw = 0;
     s16 semanticPresentedYaw = 0;
+    s16 semanticStartShapeX = 0;
+    s16 semanticTargetShapeX = 0;
+    s16 semanticPresentedShapeX = 0;
+    s16 semanticStartShapeZ = 0;
+    s16 semanticTargetShapeZ = 0;
+    s16 semanticPresentedShapeZ = 0;
     std::array<int16_t, 10> semanticStartHatRotA{};
     std::array<int16_t, 10> semanticTargetHatRotA{};
     std::array<int16_t, 10> semanticPresentedHatRotA{};
@@ -77,6 +83,65 @@ struct RemoteLinkActorDummy {
     s16 semanticStartHatShapeY = 0;
     s16 semanticTargetHatShapeY = 0;
     s16 semanticPresentedHatShapeY = 0;
+    bool spinnerPresentationValid = false;
+    uint32_t spinnerSourceSequence = 0;
+    uint32_t spinnerTicksSinceSample = 0;
+    uint32_t spinnerBlendDurationTicks = 1;
+    cXyz spinnerStartPos;
+    cXyz spinnerTargetPos;
+    cXyz spinnerPresentedPos;
+    csXyz spinnerStartShape;
+    csXyz spinnerTargetShape;
+    csXyz spinnerPresentedShape;
+    s16 spinnerStartRotY = 0;
+    s16 spinnerTargetRotY = 0;
+    s16 spinnerPresentedRotY = 0;
+    f32 spinnerStartYOffset = 90.0f;
+    f32 spinnerTargetYOffset = 90.0f;
+    f32 spinnerPresentedYOffset = 90.0f;
+    bool ironBallPresentationValid = false;
+    bool ironBallLinkAnchored = false;
+    uint32_t ironBallSourceSequence = 0;
+    uint32_t ironBallTicksSinceSample = 0;
+    uint32_t ironBallBlendDurationTicks = 1;
+    cXyz ironBallStartPos;
+    cXyz ironBallTargetPos;
+    cXyz ironBallPresentedPos;
+    csXyz ironBallStartAngle;
+    csXyz ironBallTargetAngle;
+    csXyz ironBallPresentedAngle;
+    bool ironBallChainPresentationValid = false;
+    uint32_t ironBallChainSourceSequence = 0;
+    uint32_t ironBallChainTicksSinceSample = 0;
+    uint32_t ironBallChainBlendDurationTicks = 1;
+    uint8_t ironBallChainCount = 0;
+    std::array<cXyz, 100> ironBallChainStartDirections{};
+    std::array<cXyz, 100> ironBallChainTargetDirections{};
+    std::array<cXyz, 100> ironBallChainPresentedDirections{};
+    bool ironBallChainEndOffsetValid = false;
+    cXyz ironBallChainPresentedEndOffset = cXyz::Zero;
+    bool hookshotPresentationValid = false;
+    bool hookshotLeft = true;
+    bool hookshotTopLinkAnchored = false;
+    bool hookshotSubTopLinkAnchored = false;
+    cXyz hookshotPresentedTop = cXyz::Zero;
+    cXyz hookshotPresentedSubTop = cXyz::Zero;
+    csXyz hookshotPresentedTopAngle = csXyz::Zero;
+    csXyz hookshotPresentedSubTopAngle = csXyz::Zero;
+    bool boomerangPresentationValid = false;
+    bool boomerangLinkAnchored = false;
+    cXyz boomerangPresentedPos = cXyz::Zero;
+    csXyz boomerangPresentedAngle = csXyz::Zero;
+    bool copyRodPresentationValid = false;
+    bool copyRodTopUse = false;
+    bool bowPresentationValid = false;
+    bool lanternPresentationValid = false;
+    bool lanternLinkAnchored = false;
+    bool lanternHandAttached = false;
+    bool lanternLit = false;
+    cXyz lanternPresentedPos = cXyz::Zero;
+    csXyz lanternPresentedBaseAngle = csXyz::Zero;
+    csXyz lanternJointAngle = csXyz::Zero;
 };
 
 struct RemoteBodyCollision {
@@ -168,6 +233,12 @@ void reset_semantic_presentation(RemoteLinkActorDummy& dummy,
     dummy.semanticStartYaw = static_cast<s16>(pose.angleY);
     dummy.semanticTargetYaw = dummy.semanticStartYaw;
     dummy.semanticPresentedYaw = dummy.semanticStartYaw;
+    dummy.semanticStartShapeX = static_cast<s16>(pose.shapeAngleX);
+    dummy.semanticTargetShapeX = dummy.semanticStartShapeX;
+    dummy.semanticPresentedShapeX = dummy.semanticStartShapeX;
+    dummy.semanticStartShapeZ = static_cast<s16>(pose.shapeAngleZ);
+    dummy.semanticTargetShapeZ = dummy.semanticStartShapeZ;
+    dummy.semanticPresentedShapeZ = dummy.semanticStartShapeZ;
     dummy.semanticStartHatRotA = pose.hatRotA;
     dummy.semanticTargetHatRotA = pose.hatRotA;
     dummy.semanticPresentedHatRotA = pose.hatRotA;
@@ -199,6 +270,10 @@ void update_semantic_presentation(RemoteLinkActorDummy& dummy,
         dummy.semanticTargetPos = targetPos;
         dummy.semanticStartYaw = dummy.semanticPresentedYaw;
         dummy.semanticTargetYaw = static_cast<s16>(pose.angleY);
+        dummy.semanticStartShapeX = dummy.semanticPresentedShapeX;
+        dummy.semanticTargetShapeX = static_cast<s16>(pose.shapeAngleX);
+        dummy.semanticStartShapeZ = dummy.semanticPresentedShapeZ;
+        dummy.semanticTargetShapeZ = static_cast<s16>(pose.shapeAngleZ);
         dummy.semanticStartHatRotA = dummy.semanticPresentedHatRotA;
         dummy.semanticTargetHatRotA = pose.hatRotA;
         dummy.semanticStartHatRotB = dummy.semanticPresentedHatRotB;
@@ -229,6 +304,10 @@ void update_semantic_presentation(RemoteLinkActorDummy& dummy,
         dummy.semanticStartPos.z + (dummy.semanticTargetPos.z - dummy.semanticStartPos.z) * step;
     dummy.semanticPresentedYaw =
         interpolate_angle(dummy.semanticStartYaw, dummy.semanticTargetYaw, step);
+    dummy.semanticPresentedShapeX = interpolate_angle(
+        dummy.semanticStartShapeX, dummy.semanticTargetShapeX, step);
+    dummy.semanticPresentedShapeZ = interpolate_angle(
+        dummy.semanticStartShapeZ, dummy.semanticTargetShapeZ, step);
     interpolate_angle_array(dummy.semanticStartHatRotA, dummy.semanticTargetHatRotA, step,
                             &dummy.semanticPresentedHatRotA);
     interpolate_angle_array(dummy.semanticStartHatRotB, dummy.semanticTargetHatRotB, step,
@@ -237,6 +316,295 @@ void update_semantic_presentation(RemoteLinkActorDummy& dummy,
                             &dummy.semanticPresentedHatSwing);
     dummy.semanticPresentedHatShapeY = interpolate_angle(
         dummy.semanticStartHatShapeY, dummy.semanticTargetHatShapeY, step);
+}
+
+void reset_spinner_presentation(RemoteLinkActorDummy& dummy,
+                                const PeerPoseSnapshot& pose,
+                                const cXyz& target) {
+    dummy.spinnerPresentationValid = pose.spinnerVisualValid;
+    dummy.spinnerSourceSequence = pose.sequence;
+    dummy.spinnerTicksSinceSample = 0;
+    dummy.spinnerBlendDurationTicks = 1;
+    const csXyz shape(static_cast<s16>(pose.spinnerShapeX),
+                      static_cast<s16>(pose.spinnerShapeY),
+                      static_cast<s16>(pose.spinnerShapeZ));
+    dummy.spinnerStartPos = target;
+    dummy.spinnerTargetPos = target;
+    dummy.spinnerPresentedPos = target;
+    dummy.spinnerStartShape = shape;
+    dummy.spinnerTargetShape = shape;
+    dummy.spinnerPresentedShape = shape;
+    dummy.spinnerStartRotY = static_cast<s16>(pose.spinnerRotY);
+    dummy.spinnerTargetRotY = dummy.spinnerStartRotY;
+    dummy.spinnerPresentedRotY = dummy.spinnerStartRotY;
+    dummy.spinnerStartYOffset = pose.spinnerVisualYOffset;
+    dummy.spinnerTargetYOffset = pose.spinnerVisualYOffset;
+    dummy.spinnerPresentedYOffset = pose.spinnerVisualYOffset;
+}
+
+void update_spinner_presentation(RemoteLinkActorDummy& dummy,
+                                 const PeerPoseSnapshot& pose,
+                                 const cXyz& linkPresentedPos) {
+    if (!pose.spinnerVisualValid || pose.rideActorKind != REMOTE_RIDE_ACTOR_SPINNER) {
+        dummy.spinnerPresentationValid = false;
+        return;
+    }
+    // Mounted Link and the Spinner share one exact origin in vanilla via
+    // daAlink_c::setSpinnerSyncPos(). Reuse Link's presented origin instead of
+    // running a second translation filter that starts on a different tick.
+    const cXyz target = pose.spinnerLinkAnchored ?
+        linkPresentedPos : cXyz(pose.spinnerX, pose.spinnerY, pose.spinnerZ);
+    const f32 dx = target.x - dummy.spinnerPresentedPos.x;
+    const f32 dy = target.y - dummy.spinnerPresentedPos.y;
+    const f32 dz = target.z - dummy.spinnerPresentedPos.z;
+    if (!dummy.spinnerPresentationValid || dx * dx + dy * dy + dz * dz > 600.0f * 600.0f) {
+        reset_spinner_presentation(dummy, pose, target);
+        return;
+    }
+    if (pose.sequence != dummy.spinnerSourceSequence) {
+        dummy.spinnerStartPos = dummy.spinnerPresentedPos;
+        dummy.spinnerTargetPos = target;
+        dummy.spinnerStartShape = dummy.spinnerPresentedShape;
+        dummy.spinnerTargetShape.set(static_cast<s16>(pose.spinnerShapeX),
+                                     static_cast<s16>(pose.spinnerShapeY),
+                                     static_cast<s16>(pose.spinnerShapeZ));
+        dummy.spinnerStartRotY = dummy.spinnerPresentedRotY;
+        dummy.spinnerTargetRotY = static_cast<s16>(pose.spinnerRotY);
+        dummy.spinnerStartYOffset = dummy.spinnerPresentedYOffset;
+        dummy.spinnerTargetYOffset = pose.spinnerVisualYOffset;
+        dummy.spinnerBlendDurationTicks =
+            std::clamp(dummy.spinnerTicksSinceSample + 1, uint32_t{1}, uint32_t{4});
+        dummy.spinnerTicksSinceSample = 0;
+        dummy.spinnerSourceSequence = pose.sequence;
+    }
+    if (dummy.spinnerTicksSinceSample < dummy.spinnerBlendDurationTicks) {
+        ++dummy.spinnerTicksSinceSample;
+    }
+    const f32 step = std::clamp(
+        static_cast<f32>(dummy.spinnerTicksSinceSample) /
+            static_cast<f32>(dummy.spinnerBlendDurationTicks), 0.0f, 1.0f);
+    dummy.spinnerPresentedPos.x = dummy.spinnerStartPos.x +
+        (dummy.spinnerTargetPos.x - dummy.spinnerStartPos.x) * step;
+    dummy.spinnerPresentedPos.y = dummy.spinnerStartPos.y +
+        (dummy.spinnerTargetPos.y - dummy.spinnerStartPos.y) * step;
+    dummy.spinnerPresentedPos.z = dummy.spinnerStartPos.z +
+        (dummy.spinnerTargetPos.z - dummy.spinnerStartPos.z) * step;
+    dummy.spinnerPresentedShape.x = interpolate_angle(
+        dummy.spinnerStartShape.x, dummy.spinnerTargetShape.x, step);
+    dummy.spinnerPresentedShape.y = interpolate_angle(
+        dummy.spinnerStartShape.y, dummy.spinnerTargetShape.y, step);
+    dummy.spinnerPresentedShape.z = interpolate_angle(
+        dummy.spinnerStartShape.z, dummy.spinnerTargetShape.z, step);
+    dummy.spinnerPresentedRotY = interpolate_angle(
+        dummy.spinnerStartRotY, dummy.spinnerTargetRotY, step);
+    dummy.spinnerPresentedYOffset = dummy.spinnerStartYOffset +
+        (dummy.spinnerTargetYOffset - dummy.spinnerStartYOffset) * step;
+    if (pose.spinnerLinkAnchored) {
+        // This is an identity established by the local game, not an inferred
+        // correction: the mounted Link origin is the Spinner model origin.
+        dummy.spinnerPresentedPos = linkPresentedPos;
+    }
+}
+
+void reset_iron_ball_presentation(RemoteLinkActorDummy& dummy,
+                                  const PeerPoseSnapshot& pose,
+                                  const cXyz& pos, const csXyz& angle) {
+    dummy.ironBallPresentationValid = pose.ironBallVisualValid;
+    dummy.ironBallLinkAnchored = pose.ironBallLinkAnchored;
+    dummy.ironBallSourceSequence = pose.sequence;
+    dummy.ironBallTicksSinceSample = 0;
+    dummy.ironBallBlendDurationTicks = 1;
+    dummy.ironBallStartPos = pos;
+    dummy.ironBallTargetPos = pos;
+    dummy.ironBallPresentedPos = pos;
+    dummy.ironBallStartAngle = angle;
+    dummy.ironBallTargetAngle = angle;
+    dummy.ironBallPresentedAngle = angle;
+}
+
+void update_iron_ball_presentation(RemoteLinkActorDummy& dummy,
+                                   const PeerPoseSnapshot& pose,
+                                   const cXyz& sourceActorPos,
+                                   const cXyz& presentedActorPos,
+                                   s16 presentedActorYaw) {
+    if (!pose.ironBallVisualValid) {
+        dummy.ironBallPresentationValid = false;
+        dummy.ironBallLinkAnchored = false;
+        return;
+    }
+    if (pose.ironBallLinkAnchored) {
+        // Actor reconstruction uses the presented body joint directly. Do
+        // not create a second translation/rotation interpolation timeline.
+        dummy.ironBallPresentationValid = true;
+        dummy.ironBallLinkAnchored = true;
+        dummy.ironBallSourceSequence = pose.sequence;
+        return;
+    }
+    const s16 yawDelta = static_cast<s16>(presentedActorYaw - pose.angleY);
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const f32 relativeX = pose.ironBallX - sourceActorPos.x;
+    const f32 relativeZ = pose.ironBallZ - sourceActorPos.z;
+    const cXyz target(
+        presentedActorPos.x + cosine * relativeX + sine * relativeZ,
+        pose.ironBallY + presentedActorPos.y - sourceActorPos.y,
+        presentedActorPos.z - sine * relativeX + cosine * relativeZ);
+    const csXyz targetAngle(
+        static_cast<s16>(pose.ironBallAngleX),
+        static_cast<s16>(pose.ironBallAngleY + yawDelta),
+        static_cast<s16>(pose.ironBallAngleZ));
+    // The actor retains the previous rigid transform and interpolates it at
+    // render alpha. Pre-blending here creates a second, half-tick-delayed
+    // timeline that no longer agrees with the chain or Link's hand.
+    reset_iron_ball_presentation(dummy, pose, target, targetAngle);
+}
+
+void reset_iron_ball_chain_presentation(RemoteLinkActorDummy& dummy,
+                                        const PeerPoseSnapshot& pose,
+                                        s16 yawDelta) {
+    dummy.ironBallChainPresentationValid =
+        pose.ironBallVisualValid && pose.ironBallChainCount > 0 &&
+        pose.ironBallChainDirections.size() ==
+            static_cast<size_t>(pose.ironBallChainCount) * 3;
+    dummy.ironBallChainSourceSequence = pose.sequence;
+    dummy.ironBallChainTicksSinceSample = 0;
+    dummy.ironBallChainBlendDurationTicks = 1;
+    dummy.ironBallChainCount = dummy.ironBallChainPresentationValid ?
+        pose.ironBallChainCount : 0;
+    dummy.ironBallChainEndOffsetValid =
+        dummy.ironBallChainPresentationValid && pose.ironBallChainEndOffsetValid;
+    for (size_t i = 0; i < dummy.ironBallChainCount; ++i) {
+        const size_t offset = i * 3;
+        cXyz direction(
+            static_cast<float>(static_cast<int8_t>(pose.ironBallChainDirections[offset])) /
+                127.0f,
+            static_cast<float>(static_cast<int8_t>(pose.ironBallChainDirections[offset + 1])) /
+                127.0f,
+            static_cast<float>(static_cast<int8_t>(pose.ironBallChainDirections[offset + 2])) /
+                127.0f);
+        if (direction.abs2() < 0.0001f) direction = cXyz::BaseZ;
+        direction.normalizeZP();
+        const f32 sine = cM_ssin(yawDelta);
+        const f32 cosine = cM_scos(yawDelta);
+        direction.set(cosine * direction.x + sine * direction.z, direction.y,
+                      -sine * direction.x + cosine * direction.z);
+        dummy.ironBallChainStartDirections[i] = direction;
+        dummy.ironBallChainTargetDirections[i] = direction;
+        dummy.ironBallChainPresentedDirections[i] = direction;
+    }
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const cXyz sourceEndOffset(pose.ironBallChainEndOffsetX,
+                               pose.ironBallChainEndOffsetY,
+                               pose.ironBallChainEndOffsetZ);
+    dummy.ironBallChainPresentedEndOffset.set(
+        cosine * sourceEndOffset.x + sine * sourceEndOffset.z,
+        sourceEndOffset.y,
+        -sine * sourceEndOffset.x + cosine * sourceEndOffset.z);
+}
+
+void update_iron_ball_chain_presentation(RemoteLinkActorDummy& dummy,
+                                         const PeerPoseSnapshot& pose,
+                                         s16 yawDelta) {
+    const bool valid = pose.ironBallVisualValid && pose.ironBallChainCount > 0 &&
+        pose.ironBallChainDirections.size() ==
+            static_cast<size_t>(pose.ironBallChainCount) * 3;
+    if (!valid) {
+        dummy.ironBallChainPresentationValid = false;
+        dummy.ironBallChainCount = 0;
+        return;
+    }
+    // Preserve the authoritative shape here. The remote actor interpolates
+    // absolute link positions once at render time, matching local Link.
+    reset_iron_ball_chain_presentation(dummy, pose, yawDelta);
+}
+
+void update_hookshot_presentation(RemoteLinkActorDummy& dummy,
+                                  const PeerPoseSnapshot& pose,
+                                  const cXyz& sourceActorPos,
+                                  const cXyz& presentedActorPos,
+                                  s16 presentedActorYaw) {
+    dummy.hookshotPresentationValid = pose.hookshotVisualValid;
+    if (!pose.hookshotVisualValid) return;
+    const s16 yawDelta = static_cast<s16>(presentedActorYaw - pose.angleY);
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const auto rebasePoint = [&](f32 x, f32 y, f32 z) {
+        const f32 relativeX = x - sourceActorPos.x;
+        const f32 relativeZ = z - sourceActorPos.z;
+        return cXyz(presentedActorPos.x + cosine * relativeX + sine * relativeZ,
+                    y + presentedActorPos.y - sourceActorPos.y,
+                    presentedActorPos.z - sine * relativeX + cosine * relativeZ);
+    };
+    dummy.hookshotLeft = pose.hookshotLeft;
+    dummy.hookshotTopLinkAnchored = pose.hookshotTopLinkAnchored;
+    dummy.hookshotSubTopLinkAnchored = pose.hookshotSubTopLinkAnchored;
+    dummy.hookshotPresentedTop = rebasePoint(
+        pose.hookshotTopX, pose.hookshotTopY, pose.hookshotTopZ);
+    dummy.hookshotPresentedSubTop = rebasePoint(
+        pose.hookshotSubTopX, pose.hookshotSubTopY, pose.hookshotSubTopZ);
+    dummy.hookshotPresentedTopAngle.set(
+        static_cast<s16>(pose.hookshotTopAngleX),
+        static_cast<s16>(pose.hookshotTopAngleY + yawDelta),
+        static_cast<s16>(pose.hookshotTopAngleZ));
+    dummy.hookshotPresentedSubTopAngle.set(
+        static_cast<s16>(pose.hookshotSubTopAngleX),
+        static_cast<s16>(pose.hookshotSubTopAngleY + yawDelta),
+        static_cast<s16>(pose.hookshotSubTopAngleZ));
+}
+
+void update_boomerang_presentation(RemoteLinkActorDummy& dummy,
+                                   const PeerPoseSnapshot& pose,
+                                   const cXyz& sourceActorPos,
+                                   const cXyz& presentedActorPos,
+                                   s16 presentedActorYaw) {
+    dummy.boomerangPresentationValid = pose.boomerangVisualValid;
+    dummy.boomerangLinkAnchored = pose.boomerangLinkAnchored;
+    if (!pose.boomerangVisualValid || pose.boomerangLinkAnchored) return;
+    const s16 yawDelta = static_cast<s16>(presentedActorYaw - pose.angleY);
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const f32 relativeX = pose.boomerangX - sourceActorPos.x;
+    const f32 relativeZ = pose.boomerangZ - sourceActorPos.z;
+    dummy.boomerangPresentedPos.set(
+        presentedActorPos.x + cosine * relativeX + sine * relativeZ,
+        pose.boomerangY + presentedActorPos.y - sourceActorPos.y,
+        presentedActorPos.z - sine * relativeX + cosine * relativeZ);
+    dummy.boomerangPresentedAngle.set(
+        static_cast<s16>(pose.boomerangAngleX),
+        static_cast<s16>(pose.boomerangAngleY + yawDelta),
+        static_cast<s16>(pose.boomerangAngleZ));
+}
+
+void update_lantern_presentation(RemoteLinkActorDummy& dummy,
+                                 const PeerPoseSnapshot& pose,
+                                 const cXyz& sourceActorPos,
+                                 const cXyz& presentedActorPos,
+                                 s16 presentedActorYaw) {
+    dummy.lanternPresentationValid = pose.lanternVisualValid;
+    dummy.lanternLinkAnchored = pose.lanternLinkAnchored;
+    dummy.lanternHandAttached = pose.lanternHandAttached;
+    dummy.lanternLit = pose.lanternLit;
+    dummy.lanternJointAngle.set(
+        static_cast<s16>(pose.lanternJointAngleX),
+        static_cast<s16>(pose.lanternJointAngleY),
+        static_cast<s16>(pose.lanternJointAngleZ));
+    const s16 yawDelta = static_cast<s16>(presentedActorYaw - pose.angleY);
+    dummy.lanternJointAngle.y =
+        static_cast<s16>(dummy.lanternJointAngle.y + yawDelta);
+    if (!pose.lanternVisualValid || pose.lanternLinkAnchored) return;
+    const f32 sine = cM_ssin(yawDelta);
+    const f32 cosine = cM_scos(yawDelta);
+    const f32 relativeX = pose.lanternX - sourceActorPos.x;
+    const f32 relativeZ = pose.lanternZ - sourceActorPos.z;
+    dummy.lanternPresentedPos.set(
+        presentedActorPos.x + cosine * relativeX + sine * relativeZ,
+        pose.lanternY + presentedActorPos.y - sourceActorPos.y,
+        presentedActorPos.z - sine * relativeX + cosine * relativeZ);
+    dummy.lanternPresentedBaseAngle.set(
+        static_cast<s16>(pose.lanternBaseAngleX),
+        static_cast<s16>(pose.lanternBaseAngleY + yawDelta),
+        static_cast<s16>(pose.lanternBaseAngleZ));
 }
 
 void rebase_matrix(float* matrix, const cXyz& sourcePos, const cXyz& presentedPos,
@@ -763,6 +1131,8 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         }
         cXyz presentedActorPos = actorPos;
         s16 presentedAngleY = static_cast<s16>(pose.angleY);
+        s16 presentedShapeX = static_cast<s16>(pose.shapeAngleX);
+        s16 presentedShapeZ = static_cast<s16>(pose.shapeAngleZ);
         const std::array<int16_t, 10>* presentedHatRotA = &pose.hatRotA;
         const std::array<int16_t, 10>* presentedHatRotB = &pose.hatRotB;
         const std::array<int16_t, 3>* presentedHatSwing = &pose.hatSwing;
@@ -779,8 +1149,29 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             } else {
                 update_semantic_presentation(dummy, pose, actorPos);
             }
+            update_spinner_presentation(dummy, pose, dummy.semanticPresentedPos);
+            const s16 semanticYawDelta = static_cast<s16>(
+                dummy.semanticPresentedYaw - static_cast<s16>(pose.angleY));
+            update_iron_ball_presentation(
+                dummy, pose, actorPos, dummy.semanticPresentedPos,
+                dummy.semanticPresentedYaw);
+            update_iron_ball_chain_presentation(dummy, pose, semanticYawDelta);
+            update_hookshot_presentation(dummy, pose, actorPos,
+                                         dummy.semanticPresentedPos,
+                                         dummy.semanticPresentedYaw);
+            update_boomerang_presentation(dummy, pose, actorPos,
+                                          dummy.semanticPresentedPos,
+                                          dummy.semanticPresentedYaw);
+            dummy.copyRodPresentationValid = pose.copyRodVisualValid;
+            dummy.copyRodTopUse = pose.copyRodTopUse;
+            dummy.bowPresentationValid = pose.bowVisualValid;
+            update_lantern_presentation(dummy, pose, actorPos,
+                                        dummy.semanticPresentedPos,
+                                        dummy.semanticPresentedYaw);
             presentedActorPos = dummy.semanticPresentedPos;
             presentedAngleY = dummy.semanticPresentedYaw;
+            presentedShapeX = dummy.semanticPresentedShapeX;
+            presentedShapeZ = dummy.semanticPresentedShapeZ;
             presentedHatRotA = &dummy.semanticPresentedHatRotA;
             presentedHatRotB = &dummy.semanticPresentedHatRotB;
             presentedHatSwing = &dummy.semanticPresentedHatSwing;
@@ -788,6 +1179,16 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         } else {
             dummy.semanticPresentationValid = false;
             dummy.semanticActionSequence = 0;
+            dummy.spinnerPresentationValid = false;
+            dummy.ironBallPresentationValid = false;
+            dummy.ironBallLinkAnchored = false;
+            dummy.ironBallChainPresentationValid = false;
+            dummy.ironBallChainCount = 0;
+            dummy.hookshotPresentationValid = false;
+            dummy.boomerangPresentationValid = false;
+            dummy.copyRodPresentationValid = false;
+            dummy.bowPresentationValid = false;
+            dummy.lanternPresentationValid = false;
         }
         actor->setRemotePose(presentedActorPos, presentedAngleY, static_cast<s8>(pose.room));
         const bool applyActionState =
@@ -811,7 +1212,7 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                                         pose.swordVariant, pose.shieldVariant, pose.swordDraw,
                                         pose.shieldDraw, pose.shieldGuardActive,
                                         pose.swordHandAttached, pose.shieldHandAttached,
-                                        pose.swordOut,
+                                        pose.leftHandShape, pose.rightHandShape, pose.swordOut,
                                         pose.heavyBoots, pose.itemDraw, pose.kanteraDraw,
                                         false, false, false, false, false, pose.itemActorKind,
                                         pose.itemActorBombExTime, pose.itemActorBombFlash,
@@ -839,7 +1240,7 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             presentedActorPos,
             static_cast<s16>(presentedAngleY - static_cast<s16>(pose.angleY)));
         actor->setRemoteBodyState(
-            static_cast<s16>(pose.shapeAngleX), static_cast<s16>(pose.shapeAngleZ),
+            presentedShapeX, presentedShapeZ,
             static_cast<s16>(pose.bodyAngleX), static_cast<s16>(pose.bodyAngleY),
             static_cast<s16>(pose.bodyAngleZ), static_cast<s16>(pose.bodyTwistY),
             static_cast<s16>(pose.neckJointX), static_cast<s16>(pose.neckJointY),
@@ -867,6 +1268,81 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         } else {
             actor->setRemoteMatrices(dummy.retainedMatrices);
         }
+        if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+            dummy.spinnerPresentationValid) {
+            actor->setRemoteSpinnerVisualState(
+                true, dummy.spinnerPresentedPos,
+                dummy.spinnerPresentedShape.x, dummy.spinnerPresentedShape.y,
+                dummy.spinnerPresentedShape.z, dummy.spinnerPresentedRotY,
+                pose.spinnerLinkAnchored ? 0.0f : dummy.spinnerPresentedYOffset,
+                pose.spinnerJumpEpoch);
+        } else {
+            actor->setRemoteSpinnerVisualState(false, cXyz::Zero, 0, 0, 0, 0,
+                                               90.0f, pose.spinnerJumpEpoch);
+        }
+        if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+            dummy.ironBallPresentationValid) {
+            actor->setRemoteIronBallVisualState(
+                true, dummy.ironBallLinkAnchored, dummy.ironBallPresentedPos,
+                dummy.ironBallPresentedAngle.x, dummy.ironBallPresentedAngle.y,
+                dummy.ironBallPresentedAngle.z, dummy.ironBallChainCount,
+                dummy.ironBallChainPresentedDirections,
+                dummy.ironBallChainEndOffsetValid,
+                dummy.ironBallChainPresentedEndOffset);
+        } else {
+            static const std::array<cXyz, 100> noChain{};
+            actor->setRemoteIronBallVisualState(false, false, cXyz::Zero, 0, 0, 0,
+                                                0, noChain, false, cXyz::Zero);
+        }
+        if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+            dummy.hookshotPresentationValid) {
+            actor->setRemoteHookshotVisualState(
+                true, dummy.hookshotLeft, dummy.hookshotTopLinkAnchored,
+                dummy.hookshotSubTopLinkAnchored, dummy.hookshotPresentedTop,
+                dummy.hookshotPresentedTopAngle,
+                dummy.hookshotPresentedSubTop,
+                dummy.hookshotPresentedSubTopAngle,
+                static_cast<s16>(pose.hookshotStopTime),
+                pose.hookshotItemFrame, pose.hookshotTipFrame,
+                pose.hookshotSubTipFrame);
+        } else {
+            actor->setRemoteHookshotVisualState(
+                false, true, false, false, cXyz::Zero, csXyz::Zero, cXyz::Zero,
+                csXyz::Zero, 0, 0.0f, 0.0f, 0.0f);
+        }
+        if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+            dummy.boomerangPresentationValid) {
+            actor->setRemoteBoomerangVisualState(
+                true, dummy.boomerangLinkAnchored, dummy.boomerangPresentedPos,
+                dummy.boomerangPresentedAngle);
+        } else {
+            actor->setRemoteBoomerangVisualState(false, false, cXyz::Zero,
+                                                  csXyz::Zero);
+        }
+        actor->setRemoteCopyRodVisualState(
+            presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+                dummy.copyRodPresentationValid,
+            dummy.copyRodTopUse);
+        actor->setRemoteBowVisualState(
+            presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+                dummy.bowPresentationValid,
+            pose.bowGrabLeft, static_cast<u16>(pose.bowBck), pose.bowFrame,
+            pose.bowArrowVisible, pose.bowArrowBomb);
+        actor->setRemoteLanternVisualState(
+            presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+                dummy.lanternPresentationValid,
+            dummy.lanternLinkAnchored, dummy.lanternHandAttached,
+            dummy.lanternLit, dummy.lanternPresentedPos,
+            dummy.lanternPresentedBaseAngle, dummy.lanternJointAngle);
+        actor->setRemoteBottleVisualState(
+            presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+                pose.bottleVisualValid,
+            pose.bottleOilRightAttached, pose.bottleJointRightAttached,
+            pose.bottleDrinkMaterialSet, pose.bottleMaterialStage,
+            pose.bottleBrkFrame, pose.bottleBtpFrame,
+            pose.bottleBtkSwingFrame, pose.bottleBtkActionFrame,
+            pose.bottleBtkFinishFrame, pose.bottleContentKind,
+            pose.bottleContentFrame);
         dummy.presentationMode = presentationMode;
         RemoteBombObjectSnapshot bombObject;
         if (get_remote_bomb_object_for_peer(peerId, &bombObject)) {

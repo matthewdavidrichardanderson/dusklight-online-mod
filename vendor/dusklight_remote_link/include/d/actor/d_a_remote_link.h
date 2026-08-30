@@ -50,7 +50,7 @@ public:
                               u16 i_equipItem, int i_swordVariant, int i_shieldVariant,
                               bool i_swordDraw, bool i_shieldDraw, bool i_shieldGuardActive,
                               bool i_swordHandAttached, bool i_shieldHandAttached,
-                              bool i_swordOut,
+                              int i_leftHandShape, int i_rightHandShape, bool i_swordOut,
                               bool i_heavyBoots, bool i_itemDraw, bool i_kanteraDraw,
                               bool i_midnaDraw, bool i_midnaMaskDraw, bool i_midnaHandDraw,
                               bool i_midnaHairDraw, bool i_midnaShadowForm, int i_itemActorKind,
@@ -63,6 +63,41 @@ public:
     void setRemoteMatrices(const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
     void setRemoteAttachmentMatrices(
         const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
+    void setRemoteSpinnerVisualState(bool i_valid, const cXyz& i_pos,
+                                     s16 i_shapeX, s16 i_shapeY, s16 i_shapeZ,
+                                     s16 i_rotY, f32 i_visualYOffset,
+                                     u32 i_jumpEpoch);
+    void setRemoteIronBallVisualState(bool i_valid, bool i_linkAnchored, const cXyz& i_pos,
+                                      s16 i_angleX, s16 i_angleY, s16 i_angleZ,
+                                      uint8_t i_chainCount,
+                                      const std::array<cXyz, 100>& i_chainDirections,
+                                      bool i_chainEndOffsetValid,
+                                      const cXyz& i_chainEndOffset);
+    void setRemoteHookshotVisualState(bool i_valid, bool i_left,
+                                      bool i_topLinkAnchored,
+                                      bool i_subTopLinkAnchored,
+                                      const cXyz& i_top, const csXyz& i_topAngle,
+                                      const cXyz& i_subTop, const csXyz& i_subTopAngle,
+                                      s16 i_stopTime, f32 i_itemFrame,
+                                      f32 i_tipFrame, f32 i_subTipFrame);
+    void setRemoteBoomerangVisualState(bool i_valid, bool i_linkAnchored,
+                                       const cXyz& i_pos, const csXyz& i_angle);
+    void setRemoteCopyRodVisualState(bool i_valid, bool i_topUse);
+    void setRemoteBowVisualState(bool i_valid, bool i_grabLeft, u16 i_bck,
+                                 f32 i_frame, bool i_arrowVisible,
+                                 bool i_arrowBomb);
+    void setRemoteLanternVisualState(bool i_valid, bool i_linkAnchored,
+                                     bool i_handAttached, bool i_lit,
+                                     const cXyz& i_pos,
+                                     const csXyz& i_baseAngle,
+                                     const csXyz& i_jointAngle);
+    void setRemoteBottleVisualState(bool i_valid, bool i_oilRightAttached,
+                                    bool i_jointRightAttached,
+                                    bool i_drinkMaterialSet, int i_materialStage,
+                                    f32 i_brkFrame, f32 i_btpFrame,
+                                    f32 i_btkSwingFrame, f32 i_btkActionFrame,
+                                    f32 i_btkFinishFrame, int i_contentKind,
+                                    f32 i_contentFrame);
     void setRemotePresentationVisible(bool i_visible);
     bool isRemotePresentationVisible() const { return mRemotePresentationVisible; }
     void setRemoteBombObjectState(const dusk::multiplayer::RemoteBombObjectSnapshot& i_bomb);
@@ -92,6 +127,26 @@ public:
     static bool canReserveSlot();
 
 private:
+    class IronBallChainPacket : public J3DPacket {
+    public:
+        IronBallChainPacket() : mpOwner(NULL) {}
+        void setOwner(daRemoteLink_c* i_owner) { mpOwner = i_owner; }
+        virtual void draw();
+
+    private:
+        daRemoteLink_c* mpOwner;
+    };
+
+    class HookshotChainPacket : public J3DPacket {
+    public:
+        HookshotChainPacket() : mpOwner(NULL) {}
+        void setOwner(daRemoteLink_c* i_owner) { mpOwner = i_owner; }
+        virtual void draw();
+
+    private:
+        daRemoteLink_c* mpOwner;
+    };
+
     enum VisualForm {
         FORM_HUMAN_KOKIRI,
         FORM_WOLF,
@@ -160,7 +215,11 @@ private:
     void* loadAramResource(u16 i_resId, u32 i_bufSize, bool i_isModel);
     J3DModelData* loadAramBmd(u16 i_resId, u32 i_bufSize);
     J3DAnmTevRegKey* loadAramItemBrk(u16 i_resId, J3DModel* i_model);
+    J3DAnmTextureSRTKey* loadAramItemBtk(u16 i_resId, J3DModel* i_model);
+    J3DAnmTexPattern* loadAramItemBtp(u16 i_resId, J3DModel* i_model);
     void setupHeldItemModel();
+    void drawIronBallChain();
+    void drawHookshotChains();
     void clearHeldItemExtras();
     void setupLinkedItemModels();
     void setupSwordMaterialAnm(J3DModel* i_model, int i_swordVariant);
@@ -201,7 +260,15 @@ private:
     bool copyRemoteModelMatrices(J3DModel* i_model,
                                  const dusk::multiplayer::RemoteModelMatrixSnapshot& i_source);
     void applyRemoteAttachmentMatrices();
+    void applyHumanHandMatrices(bool i_presentation);
     void applyHumanEquipmentMatrices(bool i_presentation);
+    void updateRemoteIronBallVisual(bool i_presentation);
+    void updateRemoteHookshotVisual(bool i_presentation);
+    void updateRemoteBoomerangVisual(bool i_presentation);
+    void updateRemoteCopyRodVisual(bool i_presentation);
+    void updateRemoteBowVisual(bool i_presentation);
+    void updateRemoteLanternVisual(bool i_presentation);
+    void updateRemoteBottleVisual(bool i_presentation);
     void captureRemoteModelMatrixSnapshot(
         J3DModel* i_model, const dusk::multiplayer::RemoteModelMatrixSnapshot& i_source,
         RemoteModelMatrixInterpState& io_state);
@@ -264,6 +331,11 @@ private:
     /* 0x95C */ J3DModel* mpKanteraGlowModel;
     /* 0x960 */ J3DModel* mpItemActorModel;
     /* 0x964 */ J3DModel* mpRideActorModel;
+    mDoExt_bckAnm* mpSpinnerBck;
+    mDoExt_bckAnm* mpHookshotItemBck;
+    mDoExt_bckAnm* mpHookshotTipBck;
+    mDoExt_bckAnm* mpBowBck;
+    mDoExt_bckAnm* mpBottleContentBck;
     dKy_tevstr_c mRemoteMidnaTevStr;
     /* 0x968 */ J3DModel* mpMidnaModel;
     /* 0x96C */ J3DModel* mpMidnaMaskModel;
@@ -280,6 +352,10 @@ private:
     /* 0x9A4 */ mDoExt_invisibleModel mShadowMidnaHairInvModel;
     /* 0x9AC */ J3DModel* mpHeavyBootModels[2];
     /* 0x988 */ J3DAnmTevRegKey* mpHeldItemBrk;
+    J3DAnmTexPattern* mpBottleBtp;
+    J3DAnmTextureSRTKey* mpBottleBtkSwing;
+    J3DAnmTextureSRTKey* mpBottleBtkAction;
+    J3DAnmTextureSRTKey* mpBottleBtkFinish;
     /* 0x98C */ AramResourceCacheEntry mAramResourceCache[16];
     /* 0xA0C */ J3DAnmTevRegKey* mpMagicArmorBodyBrk;
     /* 0xA10 */ J3DAnmTevRegKey* mpMagicArmorHeadBrk;
@@ -437,10 +513,111 @@ private:
     /* 0xC14 */ int mClothesVariant;
     /* 0xC08 */ J3DShape* mpLeftBodyHandShape;
     /* 0xC0C */ J3DShape* mpRightBodyHandShape;
+    int mRemoteLeftHandShape;
+    int mRemoteRightHandShape;
     /* 0xC10 */ int mRemoteItemActorKind;
     /* 0xC14 */ int mRemoteRideActorKind;
     /* 0xC18 */ int mLoadedItemActorKind;
     /* 0xC1C */ int mLoadedRideActorKind;
+    bool mRemoteSpinnerVisualValid;
+    bool mSpinnerBckInitialized;
+    bool mHookshotItemBckInitialized;
+    bool mHookshotTipBckInitialized;
+    cXyz mRemoteSpinnerVisualPos;
+    csXyz mRemoteSpinnerVisualShape;
+    s16 mRemoteSpinnerVisualRotY;
+    f32 mRemoteSpinnerVisualYOffset;
+    u32 mRemoteSpinnerJumpEpoch;
+    u32 mAppliedSpinnerJumpEpoch;
+    bool mRemoteIronBallVisualValid;
+    bool mRemoteIronBallLinkAnchored;
+    cXyz mRemoteIronBallVisualPos;
+    csXyz mRemoteIronBallVisualAngle;
+    cXyz mRemoteIronBallPreviousVisualPos;
+    csXyz mRemoteIronBallPreviousVisualAngle;
+    bool mRemoteIronBallPreviousVisualValid;
+    J3DModelData* mpIronBallChainModelData;
+    IronBallChainPacket mIronBallChainPacket;
+    uint8_t mRemoteIronBallChainCount;
+    std::array<cXyz, 100> mRemoteIronBallChainDirections;
+    std::array<cXyz, 100> mRemoteIronBallChainPreviousDirections;
+    uint8_t mRemoteIronBallChainPreviousCount;
+    bool mRemoteIronBallChainPreviousValid;
+    bool mRemoteIronBallChainEndOffsetValid;
+    bool mRemoteIronBallChainPreviousEndOffsetValid;
+    cXyz mRemoteIronBallChainEndOffset;
+    cXyz mRemoteIronBallChainPreviousEndOffset;
+    cXyz mRemoteIronBallRenderedPos;
+    csXyz mRemoteIronBallRenderedAngle;
+    cXyz mRemoteIronBallHandRoot;
+    bool mRemoteHookshotVisualValid;
+    bool mRemoteHookshotLeft;
+    bool mRemoteHookshotTopLinkAnchored;
+    bool mRemoteHookshotSubTopLinkAnchored;
+    cXyz mRemoteHookshotTop;
+    cXyz mRemoteHookshotPreviousTop;
+    cXyz mRemoteHookshotSubTop;
+    cXyz mRemoteHookshotPreviousSubTop;
+    csXyz mRemoteHookshotTopAngle;
+    csXyz mRemoteHookshotPreviousTopAngle;
+    csXyz mRemoteHookshotSubTopAngle;
+    csXyz mRemoteHookshotPreviousSubTopAngle;
+    bool mRemoteHookshotPreviousValid;
+    s16 mRemoteHookshotStopTime;
+    f32 mRemoteHookshotItemFrame;
+    f32 mRemoteHookshotTipFrame;
+    f32 mRemoteHookshotSubTipFrame;
+    cXyz mRemoteHookshotRenderedTop;
+    cXyz mRemoteHookshotRenderedSubTop;
+    cXyz mRemoteHookshotRoot;
+    cXyz mRemoteHookshotSubRoot;
+    J3DModelData* mpHookshotChainModelData;
+    HookshotChainPacket mHookshotChainPacket;
+    bool mRemoteBoomerangVisualValid;
+    bool mRemoteBoomerangLinkAnchored;
+    cXyz mRemoteBoomerangVisualPos;
+    cXyz mRemoteBoomerangPreviousVisualPos;
+    csXyz mRemoteBoomerangVisualAngle;
+    csXyz mRemoteBoomerangPreviousVisualAngle;
+    bool mRemoteBoomerangPreviousVisualValid;
+    cXyz mRemoteBoomerangRenderedPos;
+    csXyz mRemoteBoomerangRenderedAngle;
+    bool mRemoteCopyRodVisualValid;
+    bool mRemoteCopyRodTopUse;
+    bool mRemoteBowVisualValid;
+    bool mRemoteBowGrabLeft;
+    u16 mRemoteBowBck;
+    u16 mLoadedBowBck;
+    f32 mRemoteBowFrame;
+    bool mRemoteBowArrowVisible;
+    bool mRemoteBowArrowBomb;
+    int mLoadedArrowBomb;
+    bool mRemoteLanternVisualValid;
+    bool mRemoteLanternLinkAnchored;
+    bool mRemoteLanternHandAttached;
+    bool mRemoteLanternLit;
+    cXyz mRemoteLanternPos;
+    cXyz mRemoteLanternPreviousPos;
+    csXyz mRemoteLanternBaseAngle;
+    csXyz mRemoteLanternPreviousBaseAngle;
+    csXyz mRemoteLanternJointAngle;
+    csXyz mRemoteLanternPreviousJointAngle;
+    bool mRemoteLanternPreviousValid;
+    cXyz mRemoteLanternRenderedPos;
+    csXyz mRemoteLanternRenderedBaseAngle;
+    bool mRemoteBottleVisualValid;
+    bool mRemoteBottleOilRightAttached;
+    bool mRemoteBottleJointRightAttached;
+    bool mRemoteBottleDrinkMaterialSet;
+    s8 mRemoteBottleMaterialStage;
+    f32 mRemoteBottleBrkFrame;
+    f32 mRemoteBottleBtpFrame;
+    f32 mRemoteBottleBtkSwingFrame;
+    f32 mRemoteBottleBtkActionFrame;
+    f32 mRemoteBottleBtkFinishFrame;
+    s8 mRemoteBottleContentKind;
+    f32 mRemoteBottleContentFrame;
+    int mLoadedBottleContentKind;
     /* 0xC20 */ int mRemoteBombFlashTicks;
     int mRemoteBombExTime;
     int mRemoteBombFlash;
