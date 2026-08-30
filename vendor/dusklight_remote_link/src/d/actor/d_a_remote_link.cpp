@@ -24,6 +24,8 @@
 #include "JSystem/J3DGraphLoader/J3DModelLoader.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JKernel/JKRMemArchive.h"
+#include "JSystem/JParticle/JPABaseShape.h"
+#include "JSystem/JParticle/JPAParticle.h"
 #include "SSystem/SComponent/c_math.h"
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_midna.h"
@@ -237,6 +239,46 @@ static void zeroColor(GXColorS10* o_color) {
     o_color->g = 0;
     o_color->b = 0;
     o_color->a = 0;
+}
+
+static void initRemoteLinkTevCustomColor(dKy_tevstr_c* i_tevStr) {
+    // Match daAlink_c::initTevCustomColor exactly. The alpha and green
+    // constant channel intentionally remain environment-derived.
+    i_tevStr->mLightInf.a = 0;
+    i_tevStr->TevColor.r = 0;
+    i_tevStr->TevColor.g = 0;
+    i_tevStr->TevColor.b = 0;
+    i_tevStr->TevKColor.r = 0;
+    i_tevStr->TevKColor.b = 0;
+}
+
+class RemoteTransformDepthParticleCallback : public JPAParticleCallBack {
+public:
+    ~RemoteTransformDepthParticleCallback() override {}
+
+    void draw(JPABaseEmitter*, JPABaseParticle*) override {
+        GXSetZMode(GX_ENABLE, GX_LEQUAL, GX_DISABLE);
+    }
+};
+
+static RemoteTransformDepthParticleCallback l_remoteTransformDepthParticleCallback;
+
+static void enableRemoteTransformModelDepthTest(J3DModel* i_model) {
+    if (i_model == NULL || i_model->getModelData() == NULL) {
+        return;
+    }
+
+    J3DModelData* modelData = i_model->getModelData();
+    for (u16 i = 0; i < modelData->getMaterialNum(); ++i) {
+        J3DMaterial* material = modelData->getMaterialNodePointer(i);
+        J3DZMode* zMode = material != NULL ? material->getZMode() : NULL;
+        if (zMode != NULL &&
+            (!zMode->getCompareEnable() || zMode->getFunc() == GX_ALWAYS))
+        {
+            zMode->setCompareEnable(GX_ENABLE);
+            zMode->setFunc(GX_LEQUAL);
+        }
+    }
 }
 
 static void setRemoteMatrixWorldAxisRot(daRemoteLink_c* i_actor, MtxP i_mtx, s16 i_rotX,
@@ -665,11 +707,14 @@ daRemoteLink_c::daRemoteLink_c()
       mpKanteraGlowModel(NULL),
       mpItemActorModel(NULL),
       mpRideActorModel(NULL),
+      mpTransformBridgeModel(NULL),
+      mpTransformEffectModel(NULL),
       mpSpinnerBck(NULL),
       mpHookshotItemBck(NULL),
       mpHookshotTipBck(NULL),
       mpBowBck(NULL),
       mpBottleContentBck(NULL),
+      mpTransformEffectBck(NULL),
       mpMidnaModel(NULL),
       mpMidnaMaskModel(NULL),
       mpMidnaHandModel(NULL),
@@ -990,6 +1035,20 @@ daRemoteLink_c::daRemoteLink_c()
       mPvpTargetCyl(),
       mPvpTargetCollisionInitialized(false),
       mRemotePresentationVisible(true),
+      mRemoteTransformBridgeVisible(false),
+      mRemoteTransformBridgeSenderWolf(false),
+      mRemoteTransformBridgeColor(0),
+      mRemoteTransformBridgePos(cXyz::Zero),
+      mRemoteTransformEffectActive(false),
+      mRemoteTransformToWolf(false),
+      mRemoteTransformSenderWolf(false),
+      mRemoteTransformEffectProcVar1(0),
+      mRemoteTransformEffectColor(0),
+      mRemoteTransformEffectProcVar5(0),
+      mRemoteTransformEffectFrame(0.0f),
+      mRemoteTransformEffectPos(cXyz::Zero),
+      mTransformEffectBckResId(0),
+      mRemoteTransformEmitterIds(),
       mPvpShieldFrontAngle(0),
       mPvpMidnaBindIds(),
       mPvpMidnaBindActive(false),
@@ -3123,6 +3182,21 @@ int daRemoteLink_c::CreateHeap() {
         }
     }
 
+    // TP draws this one-joint model in place of Link while the player archive is
+    // being swapped. It is distinct from the animated AL_WF overlay and needs no
+    // additional network state.
+    mpTransformBridgeModel = initModel(static_cast<J3DModelData*>(
+        getArchiveObjectRes(mEquipmentArchives[l_eqArcAlink],
+                            dRes_ID_ALINK_BMD_WL_CHANGE_e)), 0);
+    enableRemoteTransformModelDepthTest(mpTransformBridgeModel);
+
+    // This is TP's animated metamorphosis shell. It is attached to joint four
+    // and driven by the same transform frame as the body; the surrounding
+    // particles are submitted separately below.
+    mpTransformEffectModel = initModel(
+        loadAramBmd(dRes_ID_ALANM_BMD_AL_WF_e, 0x6000), 0);
+    enableRemoteTransformModelDepthTest(mpTransformEffectModel);
+
     setupMotionAnimation();
     if (mpMotionBck == NULL) {
         DuskLog.warn("RemoteLink: failed to create motion animation");
@@ -3619,6 +3693,7 @@ void daRemoteLink_c::calcModels() {
     // placement that is not fully represented by actor position or the BCK.
     // This matters for both wolf root motion and human ledge/jump/death poses.
     alignSemanticBodyRootToRemoteRoot();
+    updateRemoteTransformEffectModel(false);
 
     if (mVisualState.form == FORM_WOLF) {
         if (mpMidnaModel != NULL) {
@@ -3735,6 +3810,9 @@ int daRemoteLink_c::Execute() {
     }
 
     if (!mRemotePresentationVisible) {
+        if (mRemoteTransformBridgeVisible) {
+            updateRemoteTransformParticles();
+        }
         if (mPvpTargetCollisionInitialized) {
             mPvpTargetCyl.OffTgSetBit();
             mPvpTargetCyl.ResetTgHit();
@@ -3763,7 +3841,10 @@ int daRemoteLink_c::Execute() {
     if (!mHasRemoteMatrices) {
         setBaseMtx();
         calcModels();
+    } else {
+        updateRemoteTransformEffectModel(false);
     }
+    updateRemoteTransformParticles();
     // Model calc produces this simulation tick's neck matrix. Updating before
     // calc leaves the target marker one complete tick behind the rendered body.
     updatePvpAttentionTarget();
@@ -3907,11 +3988,9 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
     }
     mRemoteRideActorKind = i_rideActorKind;
     if (isRemoteTransformProc(mRemoteProcId)) {
-        mRemoteSwordDraw = false;
-        mRemoteShieldDraw = false;
-        mRemoteSwordOut = false;
-        mRemoteSwordHandAttached = false;
-        mRemoteShieldHandAttached = false;
+        // TP keeps Link's ordinary equipped sword, sheath, and shield attached
+        // throughout metamorphosis. Their models receive the same transform
+        // tint as the body; only held/active items are removed here.
         mRemoteHeavyBoots = false;
         mRemoteItemDraw = false;
         mRemoteKanteraDraw = false;
@@ -3933,6 +4012,7 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
         mRemoteBombExTime = -1;
         mRemoteBombFlash = -1;
         mRideActorMatrixValid = false;
+        setupEquipmentModels();
         return;
     }
 
@@ -4380,6 +4460,7 @@ bool daRemoteLink_c::applyInterpolatedRemoteModelMatrices(
 }
 
 void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
+    updateRemoteTransformEffectModel(true);
     if (mpHeadModel != NULL && mpBodyModel != NULL) {
         Mtx interpolatedNeckMtx;
         MtxP presentationNeckMtx = mpBodyModel->getAnmMtx(4);
@@ -5852,6 +5933,180 @@ void daRemoteLink_c::setRemotePresentationVisible(bool i_visible) {
     }
 }
 
+void daRemoteLink_c::setRemoteTransformBridgeState(
+    bool i_visible, bool i_senderWolf, const cXyz& i_pos, s16 i_shapeX,
+    s16 i_shapeY, s16 i_shapeZ, int i_transformColor) {
+    mRemoteTransformBridgeVisible = i_visible && mpTransformBridgeModel != NULL;
+    mRemoteTransformBridgeSenderWolf = i_senderWolf;
+    mRemoteTransformBridgeColor = i_transformColor;
+    mRemoteTransformBridgePos = i_pos;
+    if (!mRemoteTransformBridgeVisible) {
+        return;
+    }
+
+    mDoMtx_stack_c::transS(i_pos);
+    mDoMtx_stack_c::ZXYrotM(i_shapeX, i_shapeY, i_shapeZ);
+    if (!i_senderWolf) {
+        mDoMtx_stack_c::transM(0.0f, 0.0f, 30.0f);
+    }
+    mpTransformBridgeModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    mpTransformBridgeModel->calc();
+}
+
+void daRemoteLink_c::setRemoteTransformPresentationState(
+    bool i_active, bool i_toWolf, bool i_senderWolf, int i_procVar1,
+    int i_procVar3, int i_procVar5, f32 i_frame, const cXyz& i_pos) {
+    mRemoteTransformEffectActive = i_active;
+    if (!i_active) {
+        return;
+    }
+
+    mRemoteTransformToWolf = i_toWolf;
+    mRemoteTransformSenderWolf = i_senderWolf;
+    mRemoteTransformEffectProcVar1 = i_procVar1;
+    mRemoteTransformEffectColor = i_procVar3;
+    mRemoteTransformEffectProcVar5 = i_procVar5;
+    mRemoteTransformEffectFrame = i_frame;
+    mRemoteTransformEffectPos = i_pos;
+}
+
+void daRemoteLink_c::handoffRemoteTransformEffectsTo(daRemoteLink_c* i_target) {
+    if (i_target == NULL || i_target == this) {
+        return;
+    }
+
+    // The real player actor survives its model archive swap, so its level
+    // emitters also survive. Transfer their IDs to the staged target actor to
+    // avoid restarting the human-to-wolf emitters at the handoff boundary.
+    for (u32 i = 0; i < mRemoteTransformEmitterIds.size(); ++i) {
+        if (i_target->mRemoteTransformEmitterIds[i] == 0) {
+            i_target->mRemoteTransformEmitterIds[i] =
+                mRemoteTransformEmitterIds[i];
+        }
+        mRemoteTransformEmitterIds[i] = 0;
+    }
+}
+
+void daRemoteLink_c::updateRemoteTransformEffectModel(bool i_presentation) {
+    if (!mRemoteTransformEffectActive || mpTransformEffectModel == NULL ||
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 4)
+    {
+        return;
+    }
+
+    const u16 bckResId = mRemoteTransformToWolf ?
+        dRes_ID_ALANM_BCK_WFCHANGEATOW_e :
+        dRes_ID_ALANM_BCK_WFCHANGEWTOA_e;
+    if (mTransformEffectBckResId != bckResId || mpTransformEffectBck == NULL) {
+        J3DAnmTransform* bck = getMotionBck(bckResId);
+        const bool modifyExisting = mpTransformEffectBck != NULL &&
+                                    mTransformEffectBckResId != 0;
+        if (mpTransformEffectBck == NULL) {
+            mpTransformEffectBck = JKR_NEW mDoExt_bckAnm();
+        }
+        if (mpTransformEffectBck == NULL || bck == NULL ||
+            !mpTransformEffectBck->init(bck, FALSE, 2, 1.0f, 0, -1,
+                                        modifyExisting))
+        {
+            mTransformEffectBckResId = 0;
+            return;
+        }
+        mTransformEffectBckResId = bckResId;
+    }
+
+    J3DAnmTransform* effectBck = mpTransformEffectBck->getBckAnm();
+    if (effectBck == NULL) {
+        return;
+    }
+    f32 frame = mRemoteTransformFrameValid ? mRemoteTransformFrame :
+                                                  mRemoteTransformEffectFrame;
+    frame = std::clamp(frame, 0.0f,
+                       static_cast<f32>(effectBck->getFrameMax()));
+    mpTransformEffectBck->entry(mpTransformEffectModel->getModelData(), frame);
+
+    Mtx presentationJoint;
+    MtxP jointMtx = mpBodyModel->getAnmMtx(4);
+    if (i_presentation &&
+        dusk::frame_interp::lookup_replacement(jointMtx, presentationJoint))
+    {
+        jointMtx = presentationJoint;
+    }
+    mpTransformEffectModel->setBaseTRMtx(jointMtx);
+    mpTransformEffectModel->calc();
+    if (i_presentation) {
+        overrideRemoteModelMatrices(mpTransformEffectModel);
+    }
+}
+
+u32 daRemoteLink_c::setRemoteTransformEmitter(int i_slot, u16 i_effectId,
+                                               const cXyz& i_pos) {
+    if (i_slot < 0 || i_slot >= static_cast<int>(mRemoteTransformEmitterIds.size())) {
+        return 0;
+    }
+    u32& emitterId = mRemoteTransformEmitterIds[i_slot];
+    emitterId = dComIfGp_particle_set(
+        emitterId, i_effectId, &i_pos, &tevStr, NULL, NULL, 0xFF, NULL,
+        static_cast<s8>(0xFF), NULL, NULL, NULL);
+    dComIfGp_particle_levelEmitterOnEventMove(emitterId);
+    JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(emitterId);
+    if (emitter != NULL && emitter->pRes != NULL && emitter->pRes->getBsp() != NULL &&
+        !emitter->pRes->getBsp()->getZEnable() &&
+        emitter->getParticleCallBackPtr() == NULL)
+    {
+        emitter->setParticleCallBackPtr(&l_remoteTransformDepthParticleCallback);
+    }
+    return emitterId;
+}
+
+void daRemoteLink_c::updateRemoteTransformParticles() {
+    if (!mRemoteTransformEffectActive || mRemoteTransformEffectProcVar1 != 0 ||
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 2)
+    {
+        return;
+    }
+
+    g_env_light.settingTevStruct(mRemoteTransformSenderWolf ? 9 : 10,
+                                 &mRemoteTransformEffectPos, &tevStr);
+    initRemoteLinkTevCustomColor(&tevStr);
+    const s16 transformColor =
+        static_cast<s16>(mRemoteTransformEffectColor);
+    tevStr.TevColor.r = transformColor;
+    tevStr.TevColor.g = transformColor;
+    tevStr.TevColor.b = transformColor;
+
+    MtxP bodyJoint = mpBodyModel->getAnmMtx(2);
+    cXyz bodyPos(bodyJoint[0][3], bodyJoint[1][3], bodyJoint[2][3]);
+    const auto startLinkEffects = [&]() {
+        setRemoteTransformEmitter(0, ID_ZI_J_ATOW_A, bodyPos);
+        setRemoteTransformEmitter(1, ID_ZI_J_ATOW_B, bodyPos);
+        const u32 emitterId =
+            setRemoteTransformEmitter(2, ID_ZI_J_ATOW_C, cXyz::Zero);
+        JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(emitterId);
+        if (emitter != NULL) {
+            emitter->setGlobalParticleScale(mDoGph_gInf_c::getScale(), 1.0f);
+        }
+    };
+
+    if (mRemoteTransformEffectProcVar5 != 0) {
+        if (mRemoteTransformSenderWolf) {
+            startLinkEffects();
+        } else {
+            setRemoteTransformEmitter(1, ID_ZI_J_WTOA_A, bodyPos);
+        }
+    } else if (mRemoteTransformSenderWolf) {
+        const u32 emitterId = setRemoteTransformEmitter(
+            0, ID_ZI_J_WTOA_B, mRemoteTransformEffectPos);
+        JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(emitterId);
+        if (emitter != NULL) {
+            emitter->setGlobalRTMatrix(bodyJoint);
+        }
+    } else {
+        startLinkEffects();
+    }
+}
+
 void daRemoteLink_c::setRemoteMatrices(
     const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices) {
     if (!i_matrices.valid || !i_matrices.body.valid) {
@@ -6138,6 +6393,84 @@ void daRemoteLink_c::drawModel(J3DModel* i_model) {
 
     g_env_light.setLightTevColorType_MAJI(i_model, &tevStr);
     mDoExt_modelEntryDL(i_model);
+}
+
+void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
+    if (mVisualState.form == FORM_WOLF || mpBodyModel == NULL || mpHeadModel == NULL) {
+        return;
+    }
+
+    J3DModelData* bodyData = mpBodyModel->getModelData();
+    J3DModelData* headData = mpHeadModel->getModelData();
+    if (bodyData == NULL || headData == NULL) {
+        return;
+    }
+
+    static const GXColorS10 noColor = {0, 0, 0, 0};
+    const J3DGXColorS10* color =
+        i_active ? reinterpret_cast<const J3DGXColorS10*>(&tevStr.TevColor)
+                 : reinterpret_cast<const J3DGXColorS10*>(&noColor);
+
+    const auto setMaterialColor = [color](J3DModelData* i_modelData, u16 i_index) {
+        if (i_modelData == NULL || i_index >= i_modelData->getMaterialNum()) {
+            return;
+        }
+        J3DMaterial* material = i_modelData->getMaterialNodePointer(i_index);
+        if (material != NULL) {
+            material->setTevColor(1, color);
+        }
+    };
+
+    // daAlink_c::draw temporarily removes Magic Armor's BRK while a custom
+    // colour is active, then restores it once the colour clears.
+    if (mClothesVariant == 3 && mpMagicArmorBodyBrk != NULL &&
+        mpMagicArmorHeadBrk != NULL)
+    {
+        if (i_active) {
+            bodyData->removeTevRegAnimator(mpMagicArmorBodyBrk);
+            headData->removeTevRegAnimator(mpMagicArmorHeadBrk);
+        } else {
+            bodyData->entryTevRegAnimator(mpMagicArmorBodyBrk);
+            headData->entryTevRegAnimator(mpMagicArmorHeadBrk);
+        }
+    }
+
+    // Mirror daAlink_c::setWaterDropColor's outfit-specific material map.
+    // These are the materials TP colours during metamorphosis; applying the
+    // same register to every material would incorrectly tint eyes and layers.
+    switch (mClothesVariant) {
+    case 1: // Casual clothes
+        setMaterialColor(bodyData, 7);
+        setMaterialColor(headData, 0);
+        setMaterialColor(bodyData, 5);
+        break;
+    case 2: // Zora Armor
+        setMaterialColor(bodyData, 13);
+        setMaterialColor(bodyData, 0);
+        setMaterialColor(bodyData, 1);
+        setMaterialColor(headData, 1);
+        break;
+    case 3: // Magic Armor
+        setMaterialColor(bodyData, 11);
+        setMaterialColor(bodyData, 10);
+        setMaterialColor(bodyData, 9);
+        setMaterialColor(bodyData, 8);
+        setMaterialColor(bodyData, 6);
+        setMaterialColor(headData, 2);
+        setMaterialColor(headData, 1);
+        break;
+    default: // Hero's Clothes
+        setMaterialColor(bodyData, 17);
+        setMaterialColor(bodyData, 9);
+        setMaterialColor(bodyData, 0);
+        setMaterialColor(bodyData, 1);
+        setMaterialColor(bodyData, 2);
+        setMaterialColor(headData, 0);
+        setMaterialColor(bodyData, 16);
+        setMaterialColor(bodyData, 15);
+        setMaterialColor(bodyData, 14);
+        break;
+    }
 }
 
 void daRemoteLink_c::drawIronBallChain() {
@@ -6642,7 +6975,11 @@ void daRemoteLink_c::stopRemoteActiveSounds() {
 }
 
 int daRemoteLink_c::Draw() {
-    if (!mRemotePresentationVisible || isRemoteLinkSceneUnsafe()) {
+    if (isRemoteLinkSceneUnsafe()) {
+        return TRUE;
+    }
+    if (!mRemotePresentationVisible) {
+        drawRemoteTransformBridge();
         return TRUE;
     }
 
@@ -6662,13 +6999,6 @@ int daRemoteLink_c::Draw() {
         sDrawLogCount++;
     }
 
-    tevStr.mLightInf.a = 0;
-    zeroColor(&tevStr.TevColor);
-    tevStr.TevKColor.r = 0;
-    tevStr.TevKColor.g = 0;
-    tevStr.TevKColor.b = 0;
-    tevStr.TevKColor.a = 0;
-
     const u8 savedLightInitTimer = g_env_light.light_init_timer;
     const bool forceRemoteLightInit = tevStr.mInitTimer != 0;
     if (forceRemoteLightInit) {
@@ -6686,6 +7016,15 @@ int daRemoteLink_c::Draw() {
     if (forceRemoteLightInit) {
         g_env_light.light_init_timer = savedLightInitTimer;
     }
+    initRemoteLinkTevCustomColor(&tevStr);
+    if (mRemoteTransformEffectActive) {
+        const s16 transformColor =
+            static_cast<s16>(mRemoteTransformEffectColor);
+        tevStr.TevColor.r = transformColor;
+        tevStr.TevColor.g = transformColor;
+        tevStr.TevColor.b = transformColor;
+    }
+    applyRemoteTransformMaterialColor(mRemoteTransformEffectActive);
     const bool drawHumanShadowMidna =
         mRemoteMidnaShadowForm && mVisualState.form != FORM_WOLF;
 
@@ -6711,6 +7050,10 @@ int daRemoteLink_c::Draw() {
     drawModel(mpHeadModel);
     drawModel(mpFaceModel);
     if (isRemoteTransformProc(mRemoteProcId)) {
+        drawModel(mpSwordModel);
+        drawModel(mpSheathModel);
+        drawModel(mpShieldModel);
+        drawRemoteTransformEffectModel();
         if (mVisualState.form == FORM_WOLF) {
             dComIfGd_setList();
         }
@@ -6775,6 +7118,30 @@ int daRemoteLink_c::Draw() {
         dComIfGd_setList();
     }
     return TRUE;
+}
+
+void daRemoteLink_c::drawRemoteTransformBridge() {
+    if (!mRemoteTransformBridgeVisible || mpTransformBridgeModel == NULL) {
+        return;
+    }
+
+    g_env_light.settingTevStruct(mRemoteTransformBridgeSenderWolf ? 9 : 10,
+                                 &mRemoteTransformBridgePos, &tevStr);
+    initRemoteLinkTevCustomColor(&tevStr);
+    const s16 transformColor = mRemoteTransformBridgeColor > 0 ? 255 : -255;
+    tevStr.TevColor.r = transformColor;
+    tevStr.TevColor.g = transformColor;
+    tevStr.TevColor.b = transformColor;
+    g_env_light.setLightTevColorType_MAJI(mpTransformBridgeModel, &tevStr);
+    dComIfGd_setList();
+    mDoExt_modelEntryDL(mpTransformBridgeModel);
+}
+
+void daRemoteLink_c::drawRemoteTransformEffectModel() {
+    if (!mRemoteTransformEffectActive || mpTransformEffectModel == NULL) {
+        return;
+    }
+    drawModel(mpTransformEffectModel);
 }
 
 int daRemoteLink_c::Delete() {

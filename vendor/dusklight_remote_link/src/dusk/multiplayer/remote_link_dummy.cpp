@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cmath>
 #include <map>
+#include <sstream>
 #include <string>
 
 #include "SSystem/SComponent/c_math.h"
@@ -13,6 +14,7 @@
 #include "d/d_bg_s_acch.h"
 #include "d/d_com_inf_game.h"
 #include "dusk/logging.h"
+#include "dusklight_online/logging.hpp"
 #include "f_op/f_op_overlap_mng.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_layer.h"
@@ -31,6 +33,7 @@ enum class ReceiverPresentationMode : uint8_t {
 
 struct RemoteLinkActorDummy {
     fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
+    fpc_ProcID preparedTransformActorId = fpcM_ERROR_PROCESS_ID_e;
     uint32_t logCount = 0;
     uint32_t traceApplyTicks = 0;
     uint32_t lastTraceSequence = 0;
@@ -169,6 +172,16 @@ constexpr f32 kRemotePushMaxGroundDelta = 80.0f;
 // them removable after the recreated handoff has been playtested.
 constexpr bool kTransformAuditLogging = true;
 constexpr uint32_t kTransformAuditLogLimit = 240;
+
+void transform_audit_log(RemoteLinkActorDummy& dummy, const std::string& message) {
+    if (!kTransformAuditLogging ||
+        dummy.transformAuditLogCount >= kTransformAuditLogLimit)
+    {
+        return;
+    }
+    ++dummy.transformAuditLogCount;
+    dusklight_online::log_info(message);
+}
 
 bool dummy_trace_enabled() {
     const char* value = std::getenv("DUSK_MP_DUMMY_TRACE");
@@ -864,27 +877,31 @@ bool remote_link_actor_pose_supported(const PeerPoseSnapshot& pose) {
     return pose.valid && pose.ageTicks <= 30;
 }
 
-daRemoteLink_c* find_remote_link_actor(RemoteLinkActorDummy& dummy) {
-    if (dummy.actorId == fpcM_ERROR_PROCESS_ID_e) {
+daRemoteLink_c* find_remote_link_actor_by_id(fpc_ProcID& actorId) {
+    if (actorId == fpcM_ERROR_PROCESS_ID_e) {
         return nullptr;
     }
 
-    fopAc_ac_c* actor = fopAcM_SearchByID(dummy.actorId);
+    fopAc_ac_c* actor = fopAcM_SearchByID(actorId);
     if (actor == nullptr) {
-        if (!fpcM_IsCreating(dummy.actorId)) {
-            dummy.actorId = fpcM_ERROR_PROCESS_ID_e;
+        if (!fpcM_IsCreating(actorId)) {
+            actorId = fpcM_ERROR_PROCESS_ID_e;
         }
         return nullptr;
     }
 
     if (fopAcM_GetName(actor) != fpcNm_REMOTE_LINK_e) {
         DuskLog.warn("Multiplayer remote Link actor: proc id {} resolved to unexpected actor {}",
-                     dummy.actorId, fopAcM_GetName(actor));
-        dummy.actorId = fpcM_ERROR_PROCESS_ID_e;
+                     actorId, fopAcM_GetName(actor));
+        actorId = fpcM_ERROR_PROCESS_ID_e;
         return nullptr;
     }
 
     return static_cast<daRemoteLink_c*>(actor);
+}
+
+daRemoteLink_c* find_remote_link_actor(RemoteLinkActorDummy& dummy) {
+    return find_remote_link_actor_by_id(dummy.actorId);
 }
 
 void destroy_remote_link_actor_dummy(const std::string& peerId) {
@@ -896,6 +913,11 @@ void destroy_remote_link_actor_dummy(const std::string& peerId) {
 
     if (it->second.actorId != fpcM_ERROR_PROCESS_ID_e) {
         fopAcM_delete(it->second.actorId);
+    }
+    if (it->second.preparedTransformActorId != fpcM_ERROR_PROCESS_ID_e &&
+        it->second.preparedTransformActorId != it->second.actorId)
+    {
+        fopAcM_delete(it->second.preparedTransformActorId);
     }
     sActorDummies.erase(it);
     sBodyCollision.erase(peerId);
@@ -970,6 +992,14 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         }
         daRemoteLink_c* actor = find_remote_link_actor(dummy);
         const ReceiverPresentationMode presentationMode = choose_presentation_mode(pose);
+        if (actor != nullptr) {
+            actor->setRemoteTransformPresentationState(
+                pose.isTransforming &&
+                    pose.procId == daAlink_c::PROC_METAMORPHOSE,
+                pose.transformToWolf, pose.isWolf, pose.procVar1,
+                pose.transformProcVar3, pose.transformProcVar5,
+                pose.transformFrame, cXyz(pose.x, pose.y, pose.z));
+        }
         if (presentationMode == ReceiverPresentationMode::HiddenUnsupported) {
             sBodyCollision.erase(peerId);
             const bool transformModelSwap = pose.isTransforming &&
@@ -982,92 +1012,94 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                                         dummy.transformTargetWolf != targetWolf ||
                                         dummy.transformTargetClothesVariant != targetClothes;
                 if (newHandoff) {
+                    if (dummy.preparedTransformActorId != fpcM_ERROR_PROCESS_ID_e) {
+                        fopAcM_delete(dummy.preparedTransformActorId);
+                        dummy.preparedTransformActorId = fpcM_ERROR_PROCESS_ID_e;
+                    }
                     dummy.transformRecreateActive = true;
                     dummy.transformTargetWolf = targetWolf;
                     dummy.transformTargetClothesVariant = targetClothes;
                     dummy.pendingClothesVariant = targetClothes;
                     dummy.pendingIsWolf = targetWolf;
                     dummy.recreateDelayTicks = 0;
-                    dummy.recreatePending = true;
+                    dummy.recreatePending = false;
 
-                    const bool actorAlreadyTargetsForm =
-                        actor != nullptr && dummy.isWolf == targetWolf &&
-                        dummy.clothesVariant == targetClothes;
-                    if (actor != nullptr) {
-                        actor->setRemotePresentationVisible(false);
-                    }
-                    if (actorAlreadyTargetsForm) {
-                        dummy.recreatePending = false;
-                    }
-                    if (!actorAlreadyTargetsForm &&
-                        dummy.actorId != fpcM_ERROR_PROCESS_ID_e)
-                    {
-                        fopAcM_delete(dummy.actorId);
-                        actor = nullptr;
-                    }
+                    std::ostringstream log;
+                    log << "PERF_TRANSFORM handoff_begin peer=" << peerId
+                        << " seq=" << pose.sequence << " proc=" << pose.procId
+                        << " from_wolf=" << pose.transformFromWolf
+                        << " to_wolf=" << pose.transformToWolf
+                        << " sender_wolf=" << pose.isWolf
+                        << " wait=" << pose.transformClothesWait
+                        << " actor_id=" << dummy.actorId
+                        << " actor_wolf=" << dummy.isWolf
+                        << " target_clothes=" << targetClothes;
+                    transform_audit_log(dummy, log.str());
+                }
 
-                    if (kTransformAuditLogging &&
-                        dummy.transformAuditLogCount < kTransformAuditLogLimit)
-                    {
-                        ++dummy.transformAuditLogCount;
-                        DuskLog.info(
-                            "Performance transform handoff begin peer={} seq={} proc={} "
-                            "from_wolf={} to_wolf={} sender_wolf={} wait={} actor_id={} "
-                            "actor_wolf={} target_clothes={}",
-                            peerId, pose.sequence, pose.procId, pose.transformFromWolf,
-                            pose.transformToWolf, pose.isWolf, pose.transformClothesWait,
-                            dummy.actorId, dummy.isWolf, targetClothes);
-                    }
-                } else if (actor != nullptr) {
+                if (actor != nullptr) {
+                    actor->setRemoteTransformBridgeState(
+                        pose.procId == daAlink_c::PROC_METAMORPHOSE, pose.isWolf,
+                        cXyz(pose.x, pose.y, pose.z),
+                        static_cast<s16>(pose.shapeAngleX),
+                        static_cast<s16>(pose.angleY),
+                        static_cast<s16>(pose.shapeAngleZ),
+                        pose.transformProcVar3);
                     actor->setRemotePresentationVisible(false);
                 }
 
-                // TP uses this four-tick window to destroy the old form's resources
-                // and load the new model. Do the same work while Link is intentionally
-                // invisible instead of adding a second delay after the sender reappears.
-                if (actor == nullptr && dummy.actorId == fpcM_ERROR_PROCESS_ID_e) {
+                const bool actorAlreadyTargetsForm =
+                    actor != nullptr && dummy.isWolf == targetWolf &&
+                    dummy.clothesVariant == targetClothes;
+                daRemoteLink_c* prepared = find_remote_link_actor_by_id(
+                    dummy.preparedTransformActorId);
+                if (!actorAlreadyTargetsForm && prepared == nullptr &&
+                    dummy.preparedTransformActorId == fpcM_ERROR_PROCESS_ID_e)
+                {
                     csXyz angle(0, static_cast<s16>(pose.angleY), 0);
                     cXyz scale(1.0f, 1.0f, 1.0f);
                     cXyz spawnPos(pose.x, pose.y, pose.z);
                     const u32 actorParams = static_cast<u32>(targetClothes & 0xFF) |
                                             (targetWolf ? 0x100 : 0) | 0x200;
-                    dummy.actorId = create_remote_link_actor(
+                    dummy.preparedTransformActorId = create_remote_link_actor(
                         actorParams, &spawnPos, static_cast<s8>(pose.room), &angle, &scale);
-                    if (dummy.actorId != fpcM_ERROR_PROCESS_ID_e) {
-                        dummy.clothesVariant = targetClothes;
-                        dummy.isWolf = targetWolf;
-                        dummy.recreatePending = false;
-                        if (kTransformAuditLogging &&
-                            dummy.transformAuditLogCount < kTransformAuditLogLimit)
-                        {
-                            ++dummy.transformAuditLogCount;
-                            DuskLog.info(
-                                "Performance transform target create peer={} seq={} id={} "
-                                "wolf={} wait={} pos=({}, {}, {})",
-                                peerId, pose.sequence, dummy.actorId, targetWolf,
-                                pose.transformClothesWait, pose.x, pose.y, pose.z);
-                        }
+                    if (dummy.preparedTransformActorId != fpcM_ERROR_PROCESS_ID_e) {
+                        std::ostringstream log;
+                        log << "PERF_TRANSFORM target_create peer=" << peerId
+                            << " seq=" << pose.sequence
+                            << " prepared_id=" << dummy.preparedTransformActorId
+                            << " wolf=" << targetWolf
+                            << " wait=" << pose.transformClothesWait
+                            << " pos=(" << pose.x << ',' << pose.y << ',' << pose.z << ')';
+                        transform_audit_log(dummy, log.str());
                     }
+                } else if (prepared != nullptr) {
+                    prepared->setRemoteTransformBridgeState(false, pose.isWolf,
+                        cXyz(pose.x, pose.y, pose.z), 0,
+                        static_cast<s16>(pose.angleY), 0, 0);
+                    prepared->setRemotePresentationVisible(false);
                 }
             } else if (actor != nullptr) {
+                actor->setRemoteTransformBridgeState(false, pose.isWolf,
+                    cXyz(pose.x, pose.y, pose.z), 0,
+                    static_cast<s16>(pose.angleY), 0, 0);
                 actor->setRemotePresentationVisible(false);
             }
-            if (kTransformAuditLogging && pose.isTransforming &&
-                dummy.transformAuditLogCount < kTransformAuditLogLimit)
-            {
-                ++dummy.transformAuditLogCount;
-                DuskLog.info(
-                    "Performance transform hidden peer={} seq={} proc={} sender_wolf={} "
-                    "from_wolf={} to_wolf={} wait={} v0={} v5={} frame={} "
-                    "under_bck={} under_frame={} actor_id={} actor_wolf={} "
-                    "pos=({}, {}, {}) root_valid={} root=({}, {}, {})",
-                    peerId, pose.sequence, pose.procId, pose.isWolf,
-                    pose.transformFromWolf, pose.transformToWolf,
-                    pose.transformClothesWait, pose.transformProcVar0,
-                    pose.transformProcVar5, pose.transformFrame, pose.underBck0,
-                    pose.underFrame0, dummy.actorId, dummy.isWolf, pose.x, pose.y,
-                    pose.z, pose.bodyRootValid, pose.bodyRootX, pose.bodyRootY,
-                    pose.bodyRootZ);
+            if (pose.isTransforming) {
+                std::ostringstream log;
+                log << "PERF_TRANSFORM hidden peer=" << peerId
+                    << " seq=" << pose.sequence << " proc=" << pose.procId
+                    << " sender_wolf=" << pose.isWolf
+                    << " from_wolf=" << pose.transformFromWolf
+                    << " to_wolf=" << pose.transformToWolf
+                    << " wait=" << pose.transformClothesWait
+                    << " v0=" << pose.transformProcVar0
+                    << " v5=" << pose.transformProcVar5
+                    << " frame=" << pose.transformFrame
+                    << " actor_id=" << dummy.actorId
+                    << " prepared_id=" << dummy.preparedTransformActorId
+                    << " pos=(" << pose.x << ',' << pose.y << ',' << pose.z << ')';
+                transform_audit_log(dummy, log.str());
             }
             dummy.presentationMode = presentationMode;
             dummy.semanticPresentationValid = false;
@@ -1085,20 +1117,94 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             pose.isWolf == dummy.transformTargetWolf &&
             pose.clothesVariant == dummy.transformTargetClothesVariant)
         {
-            dummy.transformRecreateActive = false;
-            if (kTransformAuditLogging &&
-                dummy.transformAuditLogCount < kTransformAuditLogLimit)
+            const bool currentActorTargetsForm =
+                actor != nullptr && dummy.isWolf == pose.isWolf &&
+                dummy.clothesVariant == pose.clothesVariant;
+            daRemoteLink_c* prepared = find_remote_link_actor_by_id(
+                dummy.preparedTransformActorId);
+            if (!currentActorTargetsForm && prepared != nullptr) {
+                const fpc_ProcID oldActorId = dummy.actorId;
+                if (actor != nullptr) {
+                    actor->handoffRemoteTransformEffectsTo(prepared);
+                    actor->setRemoteTransformBridgeState(false, pose.isWolf,
+                        cXyz(pose.x, pose.y, pose.z), 0,
+                        static_cast<s16>(pose.angleY), 0, 0);
+                    actor->setRemotePresentationVisible(false);
+                }
+                dummy.actorId = dummy.preparedTransformActorId;
+                dummy.preparedTransformActorId = fpcM_ERROR_PROCESS_ID_e;
+                dummy.clothesVariant = pose.clothesVariant;
+                dummy.isWolf = pose.isWolf;
+                dummy.recreatePending = false;
+                dummy.recreateDelayTicks = 0;
+                dummy.semanticPresentationValid = false;
+                dummy.semanticActionSequence = 0;
+                actor = prepared;
+                actor->setRemoteTransformPresentationState(
+                    pose.isTransforming &&
+                        pose.procId == daAlink_c::PROC_METAMORPHOSE,
+                    pose.transformToWolf, pose.isWolf, pose.procVar1,
+                    pose.transformProcVar3, pose.transformProcVar5,
+                    pose.transformFrame, cXyz(pose.x, pose.y, pose.z));
+                if (oldActorId != fpcM_ERROR_PROCESS_ID_e &&
+                    oldActorId != dummy.actorId)
+                {
+                    fopAcM_delete(oldActorId);
+                }
+
+                std::ostringstream log;
+                log << "PERF_TRANSFORM target_promote peer=" << peerId
+                    << " seq=" << pose.sequence << " old_id=" << oldActorId
+                    << " new_id=" << dummy.actorId << " wolf=" << pose.isWolf
+                    << " frame=" << pose.transformFrame
+                    << " under_bck=" << pose.underBck0
+                    << " pos=(" << pose.x << ',' << pose.y << ',' << pose.z << ')'
+                    << " root=(" << pose.bodyRootX << ',' << pose.bodyRootY << ','
+                    << pose.bodyRootZ << ')';
+                transform_audit_log(dummy, log.str());
+            } else if (!currentActorTargetsForm &&
+                       dummy.preparedTransformActorId != fpcM_ERROR_PROCESS_ID_e)
             {
-                ++dummy.transformAuditLogCount;
-                DuskLog.info(
-                    "Performance transform target visible peer={} seq={} proc={} id={} "
-                    "wolf={} frame={} under_bck={} pos=({}, {}, {}) "
-                    "root_valid={} root=({}, {}, {})",
-                    peerId, pose.sequence, pose.procId, dummy.actorId, pose.isWolf,
-                    pose.transformFrame, pose.underBck0, pose.x, pose.y, pose.z,
-                    pose.bodyRootValid, pose.bodyRootX, pose.bodyRootY, pose.bodyRootZ);
+                // The target actor is still being created. Keep TP's bridge visible
+                // instead of exposing a second blank interval.
+                if (actor != nullptr) {
+                    actor->setRemoteTransformBridgeState(
+                        pose.procId == daAlink_c::PROC_METAMORPHOSE, pose.isWolf,
+                        cXyz(pose.x, pose.y, pose.z),
+                        static_cast<s16>(pose.shapeAngleX),
+                        static_cast<s16>(pose.angleY),
+                        static_cast<s16>(pose.shapeAngleZ),
+                        pose.transformProcVar3);
+                    actor->setRemotePresentationVisible(false);
+                }
+                sBodyCollision.erase(peerId);
+                for (const RemoteAudioEvent& event : pose.audioEvents) {
+                    dummy.lastAudioEventSequence =
+                        std::max(dummy.lastAudioEventSequence, event.sequence);
+                }
+                continue;
+            } else if (!currentActorTargetsForm) {
+                // Actor capacity should leave one transform staging slot. If it
+                // does not, retain the old zero-delay recreation as a safe fallback.
+                if (dummy.actorId != fpcM_ERROR_PROCESS_ID_e) {
+                    fopAcM_delete(dummy.actorId);
+                }
+                dummy.pendingClothesVariant = pose.clothesVariant;
+                dummy.pendingIsWolf = pose.isWolf;
+                dummy.recreateDelayTicks = 0;
+                dummy.recreatePending = true;
+                actor = nullptr;
             }
+            if (dummy.preparedTransformActorId != fpcM_ERROR_PROCESS_ID_e) {
+                fopAcM_delete(dummy.preparedTransformActorId);
+                dummy.preparedTransformActorId = fpcM_ERROR_PROCESS_ID_e;
+            }
+            dummy.transformRecreateActive = false;
         } else if (!pose.isTransforming) {
+            if (dummy.preparedTransformActorId != fpcM_ERROR_PROCESS_ID_e) {
+                fopAcM_delete(dummy.preparedTransformActorId);
+                dummy.preparedTransformActorId = fpcM_ERROR_PROCESS_ID_e;
+            }
             dummy.transformRecreateActive = false;
             dummy.transformTargetClothesVariant = -1;
         }
@@ -1210,6 +1316,8 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             dummy.retainedMatrices = pose.linkMatrices;
             dummy.retainedMatrixSequence = pose.sequence;
         }
+        actor->setRemoteTransformBridgeState(false, pose.isWolf, actorPos, 0,
+                                             static_cast<s16>(pose.angleY), 0, 0);
         actor->setRemotePresentationVisible(true);
         const bool matricesRequired =
             presentationMode == ReceiverPresentationMode::FullMatrices;

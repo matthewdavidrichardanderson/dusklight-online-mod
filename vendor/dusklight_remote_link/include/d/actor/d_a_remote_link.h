@@ -101,6 +101,15 @@ public:
                                     f32 i_contentFrame);
     void setRemotePresentationVisible(bool i_visible);
     bool isRemotePresentationVisible() const { return mRemotePresentationVisible; }
+    void setRemoteTransformBridgeState(bool i_visible, bool i_senderWolf,
+                                       const cXyz& i_pos, s16 i_shapeX,
+                                       s16 i_shapeY, s16 i_shapeZ,
+                                       int i_transformColor);
+    void setRemoteTransformPresentationState(bool i_active, bool i_toWolf,
+                                             bool i_senderWolf, int i_procVar1,
+                                             int i_procVar3, int i_procVar5,
+                                             f32 i_frame, const cXyz& i_pos);
+    void handoffRemoteTransformEffectsTo(daRemoteLink_c* i_target);
     void setRemoteBombObjectState(const dusk::multiplayer::RemoteBombObjectSnapshot& i_bomb);
     void setRemoteHatState(const std::array<int16_t, 10>& i_rotA,
                            const std::array<int16_t, 10>& i_rotB,
@@ -286,9 +295,16 @@ private:
     void setBaseMtx();
     void calcModels();
     void drawModel(J3DModel* i_model);
+    void applyRemoteTransformMaterialColor(bool i_active);
     void updateKanteraGlowOcclusion();
     void resetKanteraGlowOcclusion();
     void drawLinkedItemActorModel();
+    void drawRemoteTransformBridge();
+    void drawRemoteTransformEffectModel();
+    void updateRemoteTransformEffectModel(bool i_presentation);
+    void updateRemoteTransformParticles();
+    u32 setRemoteTransformEmitter(int i_slot, u16 i_effectId,
+                                  const cXyz& i_pos);
     void drawShadowMidnaModels();
     void updateRemoteBombActor();
     void stopRemoteBombActor(bool i_explode);
@@ -332,11 +348,14 @@ private:
     /* 0x95C */ J3DModel* mpKanteraGlowModel;
     /* 0x960 */ J3DModel* mpItemActorModel;
     /* 0x964 */ J3DModel* mpRideActorModel;
+    J3DModel* mpTransformBridgeModel;
+    J3DModel* mpTransformEffectModel;
     mDoExt_bckAnm* mpSpinnerBck;
     mDoExt_bckAnm* mpHookshotItemBck;
     mDoExt_bckAnm* mpHookshotTipBck;
     mDoExt_bckAnm* mpBowBck;
     mDoExt_bckAnm* mpBottleContentBck;
+    mDoExt_bckAnm* mpTransformEffectBck;
     dKy_tevstr_c mRemoteMidnaTevStr;
     /* 0x968 */ J3DModel* mpMidnaModel;
     /* 0x96C */ J3DModel* mpMidnaMaskModel;
@@ -662,6 +681,20 @@ private:
     dCcD_Cyl mPvpTargetCyl;
     bool mPvpTargetCollisionInitialized;
     bool mRemotePresentationVisible;
+    bool mRemoteTransformBridgeVisible;
+    bool mRemoteTransformBridgeSenderWolf;
+    int mRemoteTransformBridgeColor;
+    cXyz mRemoteTransformBridgePos;
+    bool mRemoteTransformEffectActive;
+    bool mRemoteTransformToWolf;
+    bool mRemoteTransformSenderWolf;
+    int mRemoteTransformEffectProcVar1;
+    int mRemoteTransformEffectColor;
+    int mRemoteTransformEffectProcVar5;
+    f32 mRemoteTransformEffectFrame;
+    cXyz mRemoteTransformEffectPos;
+    u16 mTransformEffectBckResId;
+    std::array<u32, 3> mRemoteTransformEmitterIds;
     s16 mPvpShieldFrontAngle;
     std::array<u32, 3> mPvpMidnaBindIds;
     bool mPvpMidnaBindActive;
