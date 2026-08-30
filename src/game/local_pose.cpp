@@ -249,8 +249,14 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
                               link->mProcID == daAlink_c::PROC_METAMORPHOSE_ONLY;
     if (transforming && !sLocalTransformObserved) {
         sLocalTransformObserved = true;
-        sLocalTransformFromWolf = wolf;
-        sLocalTransformToWolf = !wolf;
+        // In the normal two-phase transformation, proc var 5 becomes nonzero only
+        // after the model has changed and the target-form animation has begun. This
+        // matters if the online mod starts observing halfway through the procedure:
+        // checkWolf() then describes the destination, not the origin.
+        const bool targetPhase = link->mProcID == daAlink_c::PROC_METAMORPHOSE &&
+                                 link->mProcVar5.field_0x3012 != 0;
+        sLocalTransformFromWolf = targetPhase ? !wolf : wolf;
+        sLocalTransformToWolf = targetPhase ? wolf : !wolf;
     } else if (!transforming) {
         sLocalTransformObserved = false;
     }

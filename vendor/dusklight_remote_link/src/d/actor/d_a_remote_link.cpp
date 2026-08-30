@@ -3151,6 +3151,10 @@ cPhs_Step daRemoteLink_c::create() {
     const u32 params = fopAcM_GetParam(this);
     mClothesVariant = static_cast<int>(params & 0xFF);
     mVisualState.form = (params & 0x100) != 0 ? FORM_WOLF : FORM_HUMAN_KOKIRI;
+    // A transformation target can be created during TP's own hidden model-load
+    // window. It must remain invisible until the first target-form semantic pose
+    // is applied; otherwise the newly loaded model can flash for one frame.
+    mRemotePresentationVisible = (params & 0x200) == 0;
     setOriginalHeap(&mpArcHeap, 0x400000);
     cPhs_Step step = cPhs_COMPLEATE_e;
     if (step == cPhs_COMPLEATE_e) {

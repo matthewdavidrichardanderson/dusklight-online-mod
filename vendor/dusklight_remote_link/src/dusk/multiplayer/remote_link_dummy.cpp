@@ -38,6 +38,10 @@ struct RemoteLinkActorDummy {
     int pendingClothesVariant = -1;
     bool isWolf = false;
     bool pendingIsWolf = false;
+    bool transformRecreateActive = false;
+    bool transformTargetWolf = false;
+    int transformTargetClothesVariant = -1;
+    uint32_t transformAuditLogCount = 0;
     bool transformAnchorValid = false;
     cXyz transformAnchorPos;
     uint32_t lastAudioEventSequence = 0;
@@ -161,6 +165,10 @@ constexpr f32 kLocalLinkBodyRadius = 35.0f;
 constexpr uint8_t kRemoteSpawnVisibleWarmupTicks = 3;
 constexpr f32 kRemotePushMaxCorrection = 20.0f;
 constexpr f32 kRemotePushMaxGroundDelta = 80.0f;
+// Source-only diagnostic switch. Keep transform traces out of the UI and make
+// them removable after the recreated handoff has been playtested.
+constexpr bool kTransformAuditLogging = true;
+constexpr uint32_t kTransformAuditLogLimit = 240;
 
 bool dummy_trace_enabled() {
     const char* value = std::getenv("DUSK_MP_DUMMY_TRACE");
@@ -964,8 +972,102 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         const ReceiverPresentationMode presentationMode = choose_presentation_mode(pose);
         if (presentationMode == ReceiverPresentationMode::HiddenUnsupported) {
             sBodyCollision.erase(peerId);
-            if (actor != nullptr) {
+            const bool transformModelSwap = pose.isTransforming &&
+                                            pose.transformClothesWait > 0 &&
+                                            pose.transformFromWolf != pose.transformToWolf;
+            if (transformModelSwap) {
+                const bool targetWolf = pose.transformToWolf;
+                const int targetClothes = pose.clothesVariant;
+                const bool newHandoff = !dummy.transformRecreateActive ||
+                                        dummy.transformTargetWolf != targetWolf ||
+                                        dummy.transformTargetClothesVariant != targetClothes;
+                if (newHandoff) {
+                    dummy.transformRecreateActive = true;
+                    dummy.transformTargetWolf = targetWolf;
+                    dummy.transformTargetClothesVariant = targetClothes;
+                    dummy.pendingClothesVariant = targetClothes;
+                    dummy.pendingIsWolf = targetWolf;
+                    dummy.recreateDelayTicks = 0;
+                    dummy.recreatePending = true;
+
+                    const bool actorAlreadyTargetsForm =
+                        actor != nullptr && dummy.isWolf == targetWolf &&
+                        dummy.clothesVariant == targetClothes;
+                    if (actor != nullptr) {
+                        actor->setRemotePresentationVisible(false);
+                    }
+                    if (actorAlreadyTargetsForm) {
+                        dummy.recreatePending = false;
+                    }
+                    if (!actorAlreadyTargetsForm &&
+                        dummy.actorId != fpcM_ERROR_PROCESS_ID_e)
+                    {
+                        fopAcM_delete(dummy.actorId);
+                        actor = nullptr;
+                    }
+
+                    if (kTransformAuditLogging &&
+                        dummy.transformAuditLogCount < kTransformAuditLogLimit)
+                    {
+                        ++dummy.transformAuditLogCount;
+                        DuskLog.info(
+                            "Performance transform handoff begin peer={} seq={} proc={} "
+                            "from_wolf={} to_wolf={} sender_wolf={} wait={} actor_id={} "
+                            "actor_wolf={} target_clothes={}",
+                            peerId, pose.sequence, pose.procId, pose.transformFromWolf,
+                            pose.transformToWolf, pose.isWolf, pose.transformClothesWait,
+                            dummy.actorId, dummy.isWolf, targetClothes);
+                    }
+                } else if (actor != nullptr) {
+                    actor->setRemotePresentationVisible(false);
+                }
+
+                // TP uses this four-tick window to destroy the old form's resources
+                // and load the new model. Do the same work while Link is intentionally
+                // invisible instead of adding a second delay after the sender reappears.
+                if (actor == nullptr && dummy.actorId == fpcM_ERROR_PROCESS_ID_e) {
+                    csXyz angle(0, static_cast<s16>(pose.angleY), 0);
+                    cXyz scale(1.0f, 1.0f, 1.0f);
+                    cXyz spawnPos(pose.x, pose.y, pose.z);
+                    const u32 actorParams = static_cast<u32>(targetClothes & 0xFF) |
+                                            (targetWolf ? 0x100 : 0) | 0x200;
+                    dummy.actorId = create_remote_link_actor(
+                        actorParams, &spawnPos, static_cast<s8>(pose.room), &angle, &scale);
+                    if (dummy.actorId != fpcM_ERROR_PROCESS_ID_e) {
+                        dummy.clothesVariant = targetClothes;
+                        dummy.isWolf = targetWolf;
+                        dummy.recreatePending = false;
+                        if (kTransformAuditLogging &&
+                            dummy.transformAuditLogCount < kTransformAuditLogLimit)
+                        {
+                            ++dummy.transformAuditLogCount;
+                            DuskLog.info(
+                                "Performance transform target create peer={} seq={} id={} "
+                                "wolf={} wait={} pos=({}, {}, {})",
+                                peerId, pose.sequence, dummy.actorId, targetWolf,
+                                pose.transformClothesWait, pose.x, pose.y, pose.z);
+                        }
+                    }
+                }
+            } else if (actor != nullptr) {
                 actor->setRemotePresentationVisible(false);
+            }
+            if (kTransformAuditLogging && pose.isTransforming &&
+                dummy.transformAuditLogCount < kTransformAuditLogLimit)
+            {
+                ++dummy.transformAuditLogCount;
+                DuskLog.info(
+                    "Performance transform hidden peer={} seq={} proc={} sender_wolf={} "
+                    "from_wolf={} to_wolf={} wait={} v0={} v5={} frame={} "
+                    "under_bck={} under_frame={} actor_id={} actor_wolf={} "
+                    "pos=({}, {}, {}) root_valid={} root=({}, {}, {})",
+                    peerId, pose.sequence, pose.procId, pose.isWolf,
+                    pose.transformFromWolf, pose.transformToWolf,
+                    pose.transformClothesWait, pose.transformProcVar0,
+                    pose.transformProcVar5, pose.transformFrame, pose.underBck0,
+                    pose.underFrame0, dummy.actorId, dummy.isWolf, pose.x, pose.y,
+                    pose.z, pose.bodyRootValid, pose.bodyRootX, pose.bodyRootY,
+                    pose.bodyRootZ);
             }
             dummy.presentationMode = presentationMode;
             dummy.semanticPresentationValid = false;
@@ -979,6 +1081,27 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         const bool semanticTransform =
             presentationMode == ReceiverPresentationMode::SemanticGameplay &&
             pose.isTransforming;
+        if (dummy.transformRecreateActive && pose.transformClothesWait == 0 &&
+            pose.isWolf == dummy.transformTargetWolf &&
+            pose.clothesVariant == dummy.transformTargetClothesVariant)
+        {
+            dummy.transformRecreateActive = false;
+            if (kTransformAuditLogging &&
+                dummy.transformAuditLogCount < kTransformAuditLogLimit)
+            {
+                ++dummy.transformAuditLogCount;
+                DuskLog.info(
+                    "Performance transform target visible peer={} seq={} proc={} id={} "
+                    "wolf={} frame={} under_bck={} pos=({}, {}, {}) "
+                    "root_valid={} root=({}, {}, {})",
+                    peerId, pose.sequence, pose.procId, dummy.actorId, pose.isWolf,
+                    pose.transformFrame, pose.underBck0, pose.x, pose.y, pose.z,
+                    pose.bodyRootValid, pose.bodyRootX, pose.bodyRootY, pose.bodyRootZ);
+            }
+        } else if (!pose.isTransforming) {
+            dummy.transformRecreateActive = false;
+            dummy.transformTargetClothesVariant = -1;
+        }
         const bool anchorWolfToHumanTransform =
             !semanticTransform && pose.isTransforming && pose.transformFromWolf &&
             !pose.transformToWolf;
