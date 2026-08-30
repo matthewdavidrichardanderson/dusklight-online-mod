@@ -820,6 +820,12 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                 static_cast<u16>(pose.underBckArc0), static_cast<u16>(pose.underBckArc1),
                 static_cast<u16>(pose.underBckArc2), static_cast<u16>(pose.upperBckArc0),
                 static_cast<u16>(pose.upperBckArc1), static_cast<u16>(pose.upperBckArc2));
+            actor->setRemoteFaceState(
+                static_cast<u16>(pose.faceBck), static_cast<u16>(pose.faceBckArc),
+                pose.faceBckFrame, static_cast<u16>(pose.faceBtp),
+                static_cast<u16>(pose.faceBtpArc), pose.faceBtpFrame,
+                static_cast<u16>(pose.faceBtk), static_cast<u16>(pose.faceBtkArc),
+                pose.faceBtkFrame);
             if (presentationMode == ReceiverPresentationMode::SemanticGameplay) {
                 dummy.semanticActionSequence = pose.sequence;
             }

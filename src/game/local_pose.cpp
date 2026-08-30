@@ -369,6 +369,13 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     const bool bodyRootValid = link->mpLinkModel->getModelData() != nullptr &&
                                link->mpLinkModel->getModelData()->getJointNum() > 0;
     MtxP bodyRoot = bodyRootValid ? link->mpLinkModel->getAnmMtx(0) : nullptr;
+    const auto activeFaceResource = [](const daPy_anmHeap_c& heap) {
+        return heap.checkNoSetPriIdx() ? heap.getIdx() : heap.mPriIdx;
+    };
+    const auto faceArc = [](const daPy_anmHeap_c& heap) {
+        return heap.checkNoSetPriIdx() ? heap.getArcNo() : u16(0xFFFF);
+    };
+    J3DAnmTransform* faceBck = link->mFaceBck.getBckAnm();
 
     const bool semanticGameplay = visualUnsupportedReasons == 0;
     json state = {
@@ -407,6 +414,17 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"upper_bck2", upperSlots[2].bck}, {"upper_arc2", upperSlots[2].arc},
         {"upper_frame2", upperSlots[2].frame}, {"upper_rate2", upperSlots[2].rate},
         {"upper_ratio2", upperSlots[2].ratio},
+        // Face geometry (mouth/expression) and texture animation (eyes/blinks)
+        // are separate from Link's body BCK and must be recreated explicitly.
+        {"face_bck", int(activeFaceResource(link->mFaceBckHeap))},
+        {"face_bck_arc", int(faceArc(link->mFaceBckHeap))},
+        {"face_bck_frame", faceBck != nullptr ? faceBck->getFrame() : 0.0f},
+        {"face_btp", int(activeFaceResource(link->mFaceBtpHeap))},
+        {"face_btp_arc", int(faceArc(link->mFaceBtpHeap))},
+        {"face_btp_frame", link->mpFaceBtp != nullptr ? link->mpFaceBtp->getFrame() : 0.0f},
+        {"face_btk", int(activeFaceResource(link->mFaceBtkHeap))},
+        {"face_btk_arc", int(faceArc(link->mFaceBtkHeap))},
+        {"face_btk_frame", link->mpFaceBtk != nullptr ? link->mpFaceBtk->getFrame() : 0.0f},
         {"hat_rot_a", i16_array<10>(link->field_0x302c)},
         {"hat_rot_b", i16_array<10>(link->field_0x3040)},
         {"hat_swing", i16_array<3>(link->field_0x3066)},

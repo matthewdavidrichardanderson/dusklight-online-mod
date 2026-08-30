@@ -16,6 +16,7 @@ class JKRMemArchive;
 class J3DAnmTransform;
 class J3DAnmTevRegKey;
 class J3DAnmTextureSRTKey;
+class J3DAnmTexPattern;
 class J3DShape;
 
 /**
@@ -56,6 +57,9 @@ public:
                               int i_itemActorBombExTime, int i_itemActorBombFlash, int i_rideActorKind);
     void setRemoteAnimationSourceState(u16 i_underArc0, u16 i_underArc1, u16 i_underArc2,
                                        u16 i_upperArc0, u16 i_upperArc1, u16 i_upperArc2);
+    void setRemoteFaceState(u16 i_bck, u16 i_bckArc, f32 i_bckFrame,
+                            u16 i_btp, u16 i_btpArc, f32 i_btpFrame,
+                            u16 i_btk, u16 i_btkArc, f32 i_btkFrame);
     void setRemoteMatrices(const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
     void setRemoteAttachmentMatrices(
         const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
@@ -168,6 +172,8 @@ private:
     void applyRemoteFootMatrix();
     void applyRemoteArmMatrix();
     J3DAnmTransform* loadMotionBck(u16 i_resId, u8** o_buffer);
+    void* loadFaceAnimation(u16 i_resId, u16 i_arcNo, u8** o_buffer);
+    void updateFaceAnimation();
     void releaseBckCacheEntry(BckCacheEntry& i_entry);
     J3DAnmTransform* getMotionBck(u16 i_resId);
     J3DAnmTransform* getBlendSlotBck(int i_slot, u16 i_resId);
@@ -278,6 +284,18 @@ private:
     /* 0xA0C */ J3DAnmTevRegKey* mpMagicArmorBodyBrk;
     /* 0xA10 */ J3DAnmTevRegKey* mpMagicArmorHeadBrk;
     /* 0xA14 */ mDoExt_bckAnm* mpMotionBck;
+    mDoExt_bckAnm* mpFaceBckAnm;
+    mDoExt_btpAnm* mpFaceBtpAnm;
+    mDoExt_btkAnm* mpFaceBtkAnm;
+    u8* mpFaceBckBuffer;
+    u8* mpFaceBtpBuffer;
+    u8* mpFaceBtkBuffer;
+    u16 mLoadedFaceBck;
+    u16 mLoadedFaceBckArc;
+    u16 mLoadedFaceBtp;
+    u16 mLoadedFaceBtpArc;
+    u16 mLoadedFaceBtk;
+    u16 mLoadedFaceBtkArc;
     mDoExt_MtxCalcAnmBlendTbl* mpBlendMtxCalc;
     mDoExt_MtxCalcAnmBlendTbl* mpUpperBlendMtxCalc;
     mDoExt_MtxCalcOldFrame* mpOldFrameCalc;
@@ -334,6 +352,15 @@ private:
     /* 0xBC8 */ f32 mRemoteUpperFrame2;
     /* 0xBCC */ f32 mRemoteUpperRate2;
     f32 mRemoteUpperRatio2;
+    u16 mRemoteFaceBck;
+    u16 mRemoteFaceBckArc;
+    f32 mRemoteFaceBckFrame;
+    u16 mRemoteFaceBtp;
+    u16 mRemoteFaceBtpArc;
+    f32 mRemoteFaceBtpFrame;
+    u16 mRemoteFaceBtk;
+    u16 mRemoteFaceBtkArc;
+    f32 mRemoteFaceBtkFrame;
     s16 mRemoteShapeX;
     s16 mRemoteShapeZ;
     s16 mRemoteBodyAngleX;

@@ -667,6 +667,18 @@ daRemoteLink_c::daRemoteLink_c()
       mpMagicArmorBodyBrk(NULL),
       mpMagicArmorHeadBrk(NULL),
       mpMotionBck(NULL),
+      mpFaceBckAnm(NULL),
+      mpFaceBtpAnm(NULL),
+      mpFaceBtkAnm(NULL),
+      mpFaceBckBuffer(NULL),
+      mpFaceBtpBuffer(NULL),
+      mpFaceBtkBuffer(NULL),
+      mLoadedFaceBck(0),
+      mLoadedFaceBckArc(0xFFFF),
+      mLoadedFaceBtp(0),
+      mLoadedFaceBtpArc(0xFFFF),
+      mLoadedFaceBtk(0),
+      mLoadedFaceBtkArc(0xFFFF),
       mpBlendMtxCalc(NULL),
       mpUpperBlendMtxCalc(NULL),
       mpOldFrameCalc(NULL),
@@ -723,6 +735,15 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteUpperFrame2(0.0f),
       mRemoteUpperRate2(1.0f),
       mRemoteUpperRatio2(0.0f),
+      mRemoteFaceBck(0),
+      mRemoteFaceBckArc(0xFFFF),
+      mRemoteFaceBckFrame(0.0f),
+      mRemoteFaceBtp(0),
+      mRemoteFaceBtpArc(0xFFFF),
+      mRemoteFaceBtpFrame(0.0f),
+      mRemoteFaceBtk(0),
+      mRemoteFaceBtkArc(0xFFFF),
+      mRemoteFaceBtkFrame(0.0f),
       mRemoteShapeX(0),
       mRemoteShapeZ(0),
       mRemoteBodyAngleX(0),
@@ -1922,6 +1943,140 @@ J3DAnmTransform* daRemoteLink_c::loadMotionBck(u16 i_resId, u8** o_buffer) {
         *o_buffer = static_cast<u8*>(bckBuffer);
     }
     return bck;
+}
+
+void* daRemoteLink_c::loadFaceAnimation(u16 i_resId, u16 i_arcNo, u8** o_buffer) {
+    if (o_buffer != NULL) *o_buffer = NULL;
+    if (!isValidRemoteBck(i_resId)) return NULL;
+
+    // Demo and special-action face resources already belong to an object
+    // archive. Default gameplay face resources live in the global animation
+    // archive and need an owned backing buffer for the converted J3D object.
+    if (i_arcNo != 0xFFFF) {
+        static const char* const arcNames[] = {
+            "alSumou", "B_oh", "TWGate_Lk", "TWGate_Wf",
+            "B_DR", "Lv6Gate", "B_gnd", "B_mgn",
+        };
+        // A room-specific demo archive is not a stable public mod interface.
+        // Leave that rare face state unchanged instead of importing another
+        // host symbol; ordinary and priority gameplay faces use 0xFFFF.
+        if (i_arcNo == 0) return NULL;
+        if (i_arcNo <= ARRAY_SIZE(arcNames)) {
+            return dComIfG_getObjectRes(arcNames[i_arcNo - 1], i_resId);
+        }
+        return NULL;
+    }
+
+    JKRArchive* anmArchive = dComIfGp_getAnmArchive();
+    if (anmArchive == NULL) return NULL;
+    u8* buffer = JKR_NEW_ARRAY_ARGS(u8, l_remoteLinkAnimBufferSize, 0x20);
+    if (buffer == NULL) return NULL;
+    if (JKRReadIdxResource(buffer, l_remoteLinkAnimBufferSize, i_resId, anmArchive) == 0) {
+        JKR_DELETE_ARRAY(buffer);
+        return NULL;
+    }
+    void* animation = J3DAnmLoaderDataBase::load(buffer);
+    if (animation == NULL) {
+        JKR_DELETE_ARRAY(buffer);
+        return NULL;
+    }
+    if (o_buffer != NULL) *o_buffer = buffer;
+    return animation;
+}
+
+void daRemoteLink_c::updateFaceAnimation() {
+    if (mpFaceModel == NULL || mVisualState.form == FORM_WOLF) return;
+    J3DModelData* modelData = mpFaceModel->getModelData();
+    JKRHeap* previousHeap = mDoExt_setCurrentHeap(mpArcHeap);
+
+    if (mLoadedFaceBck != mRemoteFaceBck || mLoadedFaceBckArc != mRemoteFaceBckArc) {
+        if (mpFaceBckAnm != NULL) mpFaceBckAnm->remove(modelData);
+        if (mpFaceBckBuffer != NULL) JKR_DELETE_ARRAY(mpFaceBckBuffer);
+        mpFaceBckBuffer = NULL;
+        mLoadedFaceBck = mRemoteFaceBck;
+        mLoadedFaceBckArc = mRemoteFaceBckArc;
+        J3DAnmTransform* bck = static_cast<J3DAnmTransform*>(
+            loadFaceAnimation(mRemoteFaceBck, mRemoteFaceBckArc, &mpFaceBckBuffer));
+        if (bck != NULL) {
+            const bool modifyExisting = mpFaceBckAnm != NULL;
+            if (!modifyExisting) mpFaceBckAnm = JKR_NEW mDoExt_bckAnm();
+            if (mpFaceBckAnm == NULL ||
+                !mpFaceBckAnm->init(bck, FALSE, bck->getAttribute(), 0.0f, 0, -1,
+                                    modifyExisting))
+            {
+                mpFaceBckAnm = NULL;
+            }
+        }
+        if (bck == NULL || mpFaceBckAnm == NULL) {
+            // Do not enter an older animation whose backing buffer was just released.
+            mLoadedFaceBck = 0;
+            mLoadedFaceBckArc = 0;
+        }
+    }
+    if (mLoadedFaceBck == mRemoteFaceBck && mLoadedFaceBckArc == mRemoteFaceBckArc &&
+        mpFaceBckAnm != NULL && mpFaceBckAnm->getBckAnm() != NULL)
+    {
+        const f32 maxFrame = mpFaceBckAnm->getBckAnm()->getFrameMax();
+        mpFaceBckAnm->entry(modelData, std::clamp(mRemoteFaceBckFrame, 0.0f, maxFrame));
+    }
+
+    if (mLoadedFaceBtp != mRemoteFaceBtp || mLoadedFaceBtpArc != mRemoteFaceBtpArc) {
+        if (mpFaceBtpAnm != NULL) mpFaceBtpAnm->remove(modelData);
+        if (mpFaceBtpBuffer != NULL) JKR_DELETE_ARRAY(mpFaceBtpBuffer);
+        mpFaceBtpBuffer = NULL;
+        mLoadedFaceBtp = mRemoteFaceBtp;
+        mLoadedFaceBtpArc = mRemoteFaceBtpArc;
+        J3DAnmTexPattern* btp = static_cast<J3DAnmTexPattern*>(
+            loadFaceAnimation(mRemoteFaceBtp, mRemoteFaceBtpArc, &mpFaceBtpBuffer));
+        if (btp != NULL) {
+            if (mpFaceBtpAnm == NULL) mpFaceBtpAnm = JKR_NEW mDoExt_btpAnm();
+            if (mpFaceBtpAnm == NULL ||
+                !mpFaceBtpAnm->init(modelData, btp, FALSE, btp->getAttribute(), 0.0f, 0, -1))
+            {
+                mpFaceBtpAnm = NULL;
+            }
+        }
+        if (btp == NULL || mpFaceBtpAnm == NULL) {
+            mLoadedFaceBtp = 0;
+            mLoadedFaceBtpArc = 0;
+        }
+    }
+    if (mLoadedFaceBtp == mRemoteFaceBtp && mLoadedFaceBtpArc == mRemoteFaceBtpArc &&
+        mpFaceBtpAnm != NULL && mpFaceBtpAnm->getBtpAnm() != NULL)
+    {
+        const f32 maxFrame = mpFaceBtpAnm->getBtpAnm()->getFrameMax();
+        mpFaceBtpAnm->entry(modelData, static_cast<s16>(
+            std::clamp(mRemoteFaceBtpFrame, 0.0f, maxFrame)));
+    }
+
+    if (mLoadedFaceBtk != mRemoteFaceBtk || mLoadedFaceBtkArc != mRemoteFaceBtkArc) {
+        if (mpFaceBtkAnm != NULL) mpFaceBtkAnm->remove(modelData);
+        if (mpFaceBtkBuffer != NULL) JKR_DELETE_ARRAY(mpFaceBtkBuffer);
+        mpFaceBtkBuffer = NULL;
+        mLoadedFaceBtk = mRemoteFaceBtk;
+        mLoadedFaceBtkArc = mRemoteFaceBtkArc;
+        J3DAnmTextureSRTKey* btk = static_cast<J3DAnmTextureSRTKey*>(
+            loadFaceAnimation(mRemoteFaceBtk, mRemoteFaceBtkArc, &mpFaceBtkBuffer));
+        if (btk != NULL) {
+            if (mpFaceBtkAnm == NULL) mpFaceBtkAnm = JKR_NEW mDoExt_btkAnm();
+            if (mpFaceBtkAnm == NULL ||
+                !mpFaceBtkAnm->init(modelData, btk, FALSE, btk->getAttribute(), 0.0f, 0, -1))
+            {
+                mpFaceBtkAnm = NULL;
+            }
+        }
+        if (btk == NULL || mpFaceBtkAnm == NULL) {
+            mLoadedFaceBtk = 0;
+            mLoadedFaceBtkArc = 0;
+        }
+    }
+    if (mLoadedFaceBtk == mRemoteFaceBtk && mLoadedFaceBtkArc == mRemoteFaceBtkArc &&
+        mpFaceBtkAnm != NULL && mpFaceBtkAnm->getBtkAnm() != NULL)
+    {
+        const f32 maxFrame = mpFaceBtkAnm->getBtkAnm()->getFrameMax();
+        mpFaceBtkAnm->entry(modelData, std::clamp(mRemoteFaceBtkFrame, 0.0f, maxFrame));
+    }
+    mDoExt_setCurrentHeap(previousHeap);
 }
 
 void daRemoteLink_c::releaseBckCacheEntry(BckCacheEntry& i_entry) {
@@ -3154,6 +3309,7 @@ void daRemoteLink_c::calcModels() {
 
     if (mpFaceModel != NULL) {
         mpFaceModel->setBaseTRMtx(mpBodyModel->getAnmMtx(4));
+        updateFaceAnimation();
         mpFaceModel->calc();
     }
 
@@ -3426,6 +3582,20 @@ void daRemoteLink_c::setRemoteAnimationSourceState(u16 i_underArc0, u16 i_underA
     mRemoteUpperBckArc0 = i_upperArc0;
     mRemoteUpperBckArc1 = i_upperArc1;
     mRemoteUpperBckArc2 = i_upperArc2;
+}
+
+void daRemoteLink_c::setRemoteFaceState(u16 i_bck, u16 i_bckArc, f32 i_bckFrame,
+                                        u16 i_btp, u16 i_btpArc, f32 i_btpFrame,
+                                        u16 i_btk, u16 i_btkArc, f32 i_btkFrame) {
+    mRemoteFaceBck = i_bck;
+    mRemoteFaceBckArc = i_bckArc;
+    mRemoteFaceBckFrame = i_bckFrame;
+    mRemoteFaceBtp = i_btp;
+    mRemoteFaceBtpArc = i_btpArc;
+    mRemoteFaceBtpFrame = i_btpFrame;
+    mRemoteFaceBtk = i_btk;
+    mRemoteFaceBtkArc = i_btkArc;
+    mRemoteFaceBtkFrame = i_btkFrame;
 }
 
 void daRemoteLink_c::maybeSpawnRemoteBombExplosion(int i_nextItemActorKind) {
@@ -5044,6 +5214,12 @@ int daRemoteLink_c::Delete() {
     for (u32 i = 0; i < ARRAY_SIZE(mBckCache); ++i) {
         releaseBckCacheEntry(mBckCache[i]);
     }
+    if (mpFaceBckBuffer != NULL) JKR_DELETE_ARRAY(mpFaceBckBuffer);
+    if (mpFaceBtpBuffer != NULL) JKR_DELETE_ARRAY(mpFaceBtpBuffer);
+    if (mpFaceBtkBuffer != NULL) JKR_DELETE_ARRAY(mpFaceBtkBuffer);
+    mpFaceBckBuffer = NULL;
+    mpFaceBtpBuffer = NULL;
+    mpFaceBtkBuffer = NULL;
     releaseSlot();
     destroyEquipmentModels();
     for (u32 i = 0; i < ARRAY_SIZE(mEquipmentArchives); ++i) {

@@ -171,6 +171,15 @@ struct PeerPoseSnapshot {
     float upperFrame2 = 0.0f;
     float upperRate2 = 1.0f;
     float upperRatio2 = 0.0f;
+    int faceBck = 0;
+    int faceBckArc = 0xFFFF;
+    float faceBckFrame = 0.0f;
+    int faceBtp = 0;
+    int faceBtpArc = 0xFFFF;
+    float faceBtpFrame = 0.0f;
+    int faceBtk = 0;
+    int faceBtkArc = 0xFFFF;
+    float faceBtkFrame = 0.0f;
     std::array<int16_t, 10> hatRotA{};
     std::array<int16_t, 10> hatRotB{};
     std::array<int16_t, 3> hatSwing{};

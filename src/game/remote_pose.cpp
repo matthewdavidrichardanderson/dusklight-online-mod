@@ -680,12 +680,22 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.upperFrame2 = state.value("upper_frame2", 0.0f);
         pose.upperRate2 = state.value("upper_rate2", 1.0f);
         pose.upperRatio2 = state.value("upper_ratio2", 0.0f);
+        pose.faceBck = state.value("face_bck", 0);
+        pose.faceBckArc = state.value("face_bck_arc", 0xFFFF);
+        pose.faceBckFrame = state.value("face_bck_frame", 0.0f);
+        pose.faceBtp = state.value("face_btp", 0);
+        pose.faceBtpArc = state.value("face_btp_arc", 0xFFFF);
+        pose.faceBtpFrame = state.value("face_btp_frame", 0.0f);
+        pose.faceBtk = state.value("face_btk", 0);
+        pose.faceBtkArc = state.value("face_btk_arc", 0xFFFF);
+        pose.faceBtkFrame = state.value("face_btk_frame", 0.0f);
         const float animationValues[] = {
             pose.underFrame, pose.underFrame0, pose.underRate0, pose.underRatio0,
             pose.underFrame1, pose.underRate1, pose.underRatio1, pose.underFrame2,
             pose.underRate2, pose.underRatio2, pose.upperFrame0, pose.upperRate0,
             pose.upperRatio0, pose.upperFrame1, pose.upperRate1, pose.upperRatio1,
             pose.upperFrame2, pose.upperRate2, pose.upperRatio2,
+            pose.faceBckFrame, pose.faceBtpFrame, pose.faceBtkFrame,
         };
         if (std::any_of(std::begin(animationValues), std::end(animationValues),
                         [](float value) { return !std::isfinite(value); })) {
