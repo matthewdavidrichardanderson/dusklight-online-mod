@@ -84,6 +84,10 @@ private:
     std::map<std::string, uint32_t> latestAckSequence_;
     std::map<std::string, uint32_t> ackStressUntilSequence_;
     std::map<std::string, uint32_t> pvpRemoteHitLastSequence_;
+    // Link exposes several sword attack objects during one swing. Remember
+    // contacts already reported during this game update so those colliders
+    // produce one network hit without imposing a cross-frame cooldown.
+    std::set<std::pair<std::string, uintptr_t>> pvpLocalHitContactsThisUpdate_;
     std::deque<nlohmann::json> deferredSwitches_;
     std::map<std::string, uint32_t> permanentPickupSequence_;
     std::map<std::string, uint32_t> fishCatchSequence_;

@@ -2017,6 +2017,15 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
                                         "direct" : status.clientId;
     if (targetPeerId == localPeerId) return;
 
+    // A normal sword swing enables three attack capsules. More than one can
+    // touch the same remote target cylinder in a single collision pass; each
+    // callback carries a different dCcD_GObjInf and would otherwise become a
+    // distinct sequence. Deduplicate only the same attacking actor/target in
+    // this game update, preserving separate attacks on later updates.
+    const auto contact = std::make_pair(targetPeerId,
+        reinterpret_cast<uintptr_t>(attackActor));
+    if (!pvpLocalHitContactsThisUpdate_.insert(contact).second) return;
+
     int attackClass = kPvpAttackLight;
     if (!attackInfo->ChkAtType(AT_TYPE_HEAVY_BOOTS) &&
         (attackInfo->GetAtSpl() != dCcG_At_Spl_UNK_0 ||
@@ -2460,6 +2469,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                          bool semanticRenderingExperimentEnabled,
                          bool remoteCollisionEnabled,
                          bool pvpEnabled, bool playerListEnabled) {
+    pvpLocalHitContactsThisUpdate_.clear();
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
     syncFlagsEnabled_ = syncFlagsEnabled;
     syncWorldEnabled_ = syncWorldEnabled;
@@ -3115,6 +3125,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
         manualSyncState_ = ManualSyncState::Failed;
     }
     pvpRemoteHitLastSequence_.erase(key);
+    pvpLocalHitContactsThisUpdate_.clear();
     fishCatchSequence_.erase(key);
     const std::string prefix = key + ':';
     const auto erasePrefixedMap = [&](auto& values) {
@@ -3160,6 +3171,7 @@ void GameAdapter::reset_session() {
     latestAckSequence_.clear();
     ackStressUntilSequence_.clear();
     pvpRemoteHitLastSequence_.clear();
+    pvpLocalHitContactsThisUpdate_.clear();
     localPvpHitSequence_ = 0;
     visualPoseSendTick_ = 0;
     visualPoseSendInterval_ = 1;
