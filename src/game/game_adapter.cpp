@@ -414,16 +414,15 @@ bool apply_pvp_player_damage(int attackClass, bool ironBallLaunch, int damage,
 
     const s16 hitAngle = static_cast<s16>(
         angle_y_from_delta(player->current.pos.x - sourceX, player->current.pos.z - sourceZ));
+    if (!player->checkWolf() && player->checkModeFlg(daAlink_c::MODE_SWIMMING)) {
+        player->setDamagePointNormal(damage);
+        player->current.angle.y = hitAngle;
+        return player->procSwimDamageInit(nullptr) != 0;
+    }
     if (ironBallLaunch) {
         player->current.angle.y = hitAngle;
         player->setDamagePointNormal(damage);
         return player->procCoLargeDamageInit(-1, FALSE, 0, 0, nullptr, 0) != 0;
-    }
-    if (attackClass == kPvpAttackLight && !player->checkWolf() &&
-        player->checkModeFlg(daAlink_c::MODE_SWIMMING)) {
-        player->setDamagePointNormal(damage);
-        player->current.angle.y = hitAngle;
-        return player->procSwimDamageInit(nullptr) != 0;
     }
     if (attackClass == kPvpAttackHeavy ||
         player->checkModeFlg(daAlink_c::MODE_PLAYER_FLY)) {
