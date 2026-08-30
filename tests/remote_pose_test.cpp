@@ -94,18 +94,25 @@ int main() {
         return 1;
     }
 
-    // Even malformed/malicious type-7 input cannot restore body matrix
-    // streaming. Legitimate attachment slots survive the representation gate.
+    // Even malformed/malicious type-7 input cannot restore body or ordinary
+    // equipped-gear matrix streaming. Independently moving props survive the
+    // representation gate.
     json injected = pose_message(4, "semantic_gameplay");
     injected["state"]["link_matrices"] = {
         {"body", identity_model()},
         {"sword", identity_model()},
+        {"sheath", identity_model()},
+        {"shield", identity_model()},
+        {"held_item", identity_model()},
         {"midna", identity_model()},
     };
     PeerPoseSnapshot injectedPose;
     if (!decode_and_enforce(injected, &facialPose, injectedPose, error) ||
         injectedPose.linkMatrices.body.valid ||
-        !injectedPose.linkMatrices.sword.valid ||
+        injectedPose.linkMatrices.sword.valid ||
+        injectedPose.linkMatrices.sheath.valid ||
+        injectedPose.linkMatrices.shield.valid ||
+        !injectedPose.linkMatrices.heldItem.valid ||
         injectedPose.linkMatrices.midna.valid) {
         std::cerr << "semantic matrix representation gate failed: " << error << '\n';
         return 1;

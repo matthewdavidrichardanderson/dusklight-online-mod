@@ -515,9 +515,11 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         }
         state["link_matrices"] = pack_matrices({
             {nullptr}, {nullptr}, {nullptr}, {nullptr},
-            {humanParts ? link->mSwordModel : nullptr},
-            {humanParts ? link->mSheathModel : nullptr},
-            {humanParts ? link->mShieldModel : nullptr},
+            // Ordinary sword, sheath, and shield placement is fully described
+            // by the body pose plus the hand-attachment flags above. Streaming
+            // these slots would let a stale prop snapshot override the current
+            // semantic body joints (notably while the owning game is paused).
+            {nullptr}, {nullptr}, {nullptr},
             {humanParts ? link->mHeldItemModel : nullptr},
             {humanParts ? link->mpHookTipModel : nullptr},
             {humanParts ? link->field_0x0710 : nullptr},

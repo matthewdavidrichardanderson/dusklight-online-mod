@@ -4047,15 +4047,6 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
         applyInterpolatedRemoteModelMatrices(mpSheathModel, mSheathMatrixInterp, "sheath");
         applyInterpolatedRemoteModelMatrices(mpShieldModel, mShieldMatrixInterp, "shield");
     }
-    if (!mHasRemoteMatrices && mHasRemoteAttachmentMatrices) {
-        // Per-slot validity is authoritative. A present streamed equipment
-        // matrix refines the semantic joint anchor; a missing slot simply
-        // leaves the locally reconstructed sword/sheath/shield in place.
-        applyInterpolatedRemoteModelMatrices(mpSwordModel, mSwordMatrixInterp, "sword");
-        applyInterpolatedRemoteModelMatrices(mpSheathModel, mSheathMatrixInterp, "sheath");
-        applyInterpolatedRemoteModelMatrices(mpShieldModel, mShieldMatrixInterp, "shield");
-    }
-
     applyInterpolatedRemoteModelMatrices(mpHeldItemModel, mHeldItemMatrixInterp, "held_item");
     applyInterpolatedRemoteModelMatrices(mpHookTipModel, mHookTipMatrixInterp, "hook_tip");
     applyInterpolatedRemoteModelMatrices(mpHookSubItemModel, mHookSubItemMatrixInterp,

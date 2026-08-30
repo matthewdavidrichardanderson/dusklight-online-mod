@@ -103,7 +103,7 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "1F81A5F8391F56DF80FA000CC39F96B86CF9775B13C50048FAE8735112BD9CCC")
+    "AB665CEB95A0E5DF8955CD4428F03357FEECEC8462354F9FEC4710EB576454F3")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
     "3493D3F66E1CE3B3221431A60FFAB3D8794BF047653100DD88E75DF05081424C")

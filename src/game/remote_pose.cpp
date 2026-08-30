@@ -813,12 +813,17 @@ bool enforce_semantic_pose_invariants(PeerPoseSnapshot& pose, std::string& error
         return true;
     }
 
-    // Type-7 owns Link through semantic animation state. Only the inexpensive
-    // attachment slots 4..15 may remain matrix-driven.
+    // Type-7 owns Link and ordinary equipped gear through semantic animation
+    // state. Only independently moving props may remain matrix-driven. Clear
+    // gear slots from older peers as well so stale snapshots cannot override
+    // sword/sheath/shield matrices reconstructed from the current body pose.
     pose.linkMatrices.body = {};
     pose.linkMatrices.hat = {};
     pose.linkMatrices.face = {};
     pose.linkMatrices.hand = {};
+    pose.linkMatrices.sword = {};
+    pose.linkMatrices.sheath = {};
+    pose.linkMatrices.shield = {};
     pose.linkMatrices.midna = {};
     pose.linkMatrices.midnaMask = {};
     pose.linkMatrices.midnaHand = {};
