@@ -219,6 +219,7 @@ def hello(
     action: str = "join",
     settings: dict[str, bool] | None = None,
     semantic_visuals: bool | None = True,
+    snapshot_deltas: bool | None = True,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {
         "type": "hello",
@@ -231,8 +232,13 @@ def hello(
         "want_puppet": True,
         "want_midna": False,
     }
+    capabilities: dict[str, bool] = {}
     if semantic_visuals is not None:
-        message["capabilities"] = {"semantic_visual_v1": semantic_visuals}
+        capabilities["semantic_visual_v1"] = semantic_visuals
+    if snapshot_deltas is not None:
+        capabilities["semantic_snapshot_delta_v1"] = snapshot_deltas
+    if capabilities:
+        message["capabilities"] = capabilities
     if settings is not None:
         message["settings"] = settings
     return message
@@ -657,13 +663,17 @@ class RelayTests(unittest.TestCase):
         owner.send(hello("Owner", "semantic-capability", action="create"))
         owner_welcome = owner.expect_type("welcome")
         self.assertTrue(owner_welcome["semantic_visuals_ready"])
+        self.assertTrue(owner_welcome["snapshot_deltas_ready"])
 
         legacy = self.client()
-        legacy.send(hello("Legacy", "semantic-capability", semantic_visuals=None))
+        legacy.send(hello("Legacy", "semantic-capability", semantic_visuals=None,
+                          snapshot_deltas=None))
         legacy_welcome = legacy.expect_type("welcome")
         joined = owner.expect_type("peer_joined")
         self.assertFalse(legacy_welcome["semantic_visuals_ready"])
         self.assertFalse(joined["semantic_visuals_ready"])
+        self.assertFalse(legacy_welcome["snapshot_deltas_ready"])
+        self.assertFalse(joined["snapshot_deltas_ready"])
 
         owner.register_udp(owner_welcome)
         legacy.register_udp(legacy_welcome)
@@ -678,6 +688,7 @@ class RelayTests(unittest.TestCase):
         self.clients.remove(legacy)
         left = owner.expect_type("peer_left")
         self.assertTrue(left["semantic_visuals_ready"])
+        self.assertTrue(left["snapshot_deltas_ready"])
 
 
 def main() -> int:

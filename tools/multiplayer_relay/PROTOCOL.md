@@ -66,9 +66,16 @@ Clients explicitly create or join rooms. A successful connection is:
 | `session_id` | string | no; currently client metadata |
 | `want_puppet` | boolean | no; reserved for preference routing |
 | `want_midna` | boolean | no; reserved for preference routing |
+| `capabilities.semantic_visual_v1` | boolean | no |
+| `capabilities.semantic_snapshot_delta_v1` | boolean | no |
 
 Calling `hello` again after joining returns `already_joined`; it cannot move a
 socket between rooms.
+
+`welcome` includes `semantic_visuals_ready` and `snapshot_deltas_ready`.
+Each readiness field is true only when every room member advertises the
+corresponding capability. Missing snapshot-delta support keeps clients on
+complete semantic snapshots.
 
 Nicknames are not connection identities and may be duplicated. Every joined
 socket receives a unique opaque `client_id`, which is used for routing.
@@ -112,6 +119,11 @@ The following messages may be broadcast or may include `target_client_id`:
 The relay transports these payloads but does not interpret or persist their
 gameplay state. Late join synchronization remains client-to-client.
 
+Semantic Performance Mode snapshots use UDP packet type 7. The relay does not
+decode snapshot deltas; clients select a snapshot acknowledged by every
+eligible receiver and broadcast one delta against that explicitly named
+baseline.
+
 ## Room settings
 
 The owner sends all current values in one `room_settings` message:
@@ -119,6 +131,7 @@ The owner sends all current values in one `room_settings` message:
 - `dummy_model`
 - `sync_flags`
 - `sync_world`
+- `performance_mode`
 - `remote_collision`
 - `pvp`
 

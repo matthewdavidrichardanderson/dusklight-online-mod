@@ -93,7 +93,8 @@ int main(int argc, char** argv) {
     if (!owner.status().isOwner || joiner.status().isOwner ||
         !joiner.status().settings.syncWorld ||
         !joiner.status().settings.performanceMode || !joiner.status().settings.pvp ||
-        !owner.status().semanticVisualsReady || !joiner.status().semanticVisualsReady) {
+        !owner.status().semanticVisualsReady || !joiner.status().semanticVisualsReady ||
+        !owner.status().snapshotDeltasReady || !joiner.status().snapshotDeltasReady) {
         fail("relay owner/settings state was not normalized from welcome");
     }
 

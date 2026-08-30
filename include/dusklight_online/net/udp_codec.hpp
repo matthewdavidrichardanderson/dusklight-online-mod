@@ -31,6 +31,7 @@ enum AckStressFlags : uint8_t {
     AckParityRecovered = 1 << 0,
     AckSequenceGap = 1 << 1,
     AckReassemblyEvicted = 1 << 2,
+    AckBaselineReset = 1 << 3,
 };
 
 enum RemoteObjectFlags : uint8_t {

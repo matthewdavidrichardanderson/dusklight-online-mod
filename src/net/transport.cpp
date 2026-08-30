@@ -184,6 +184,7 @@ RoomSettings parse_settings(const json& value, RoomSettings fallback) {
 }
 
 constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
+constexpr const char* kSnapshotDeltaCapability = "semantic_snapshot_delta_v1";
 
 bool has_semantic_visual_capability(const json& message) {
     const auto capabilities = message.find("capabilities");
@@ -191,6 +192,27 @@ bool has_semantic_visual_capability(const json& message) {
     const auto capability = capabilities->find(kSemanticVisualCapability);
     return capability != capabilities->end() && capability->is_boolean() &&
            capability->get<bool>();
+}
+
+bool has_snapshot_delta_capability(const json& message) {
+    const auto capabilities = message.find("capabilities");
+    if (capabilities == message.end() || !capabilities->is_object()) return false;
+    const auto capability = capabilities->find(kSnapshotDeltaCapability);
+    return capability != capabilities->end() && capability->is_boolean() &&
+           capability->get<bool>();
+}
+
+std::vector<std::string> take_snapshot_debug_keys(json& message, const char* name) {
+    std::vector<std::string> result;
+    const auto value = message.find(name);
+    if (value != message.end() && value->is_array()) {
+        result.reserve(value->size());
+        for (const auto& key : *value) {
+            if (key.is_string()) result.push_back(key.get<std::string>());
+        }
+    }
+    message.erase(name);
+    return result;
 }
 
 bool should_forward_direct(const std::string& type) {
@@ -212,6 +234,7 @@ struct Transport::Impl {
         bool wantPuppet = true;
         bool wantMidna = false;
         bool supportsSemanticVisuals = false;
+        bool supportsSnapshotDeltas = false;
     };
 
     struct PeerPresence {
@@ -249,6 +272,8 @@ struct Transport::Impl {
     bool wantPuppet = true;
     bool wantMidna = false;
     bool supportsSemanticVisuals = true;
+    bool supportsSnapshotDeltas = true;
+    bool visualWireDiagnostics = false;
     std::string password;
     std::string sessionId;
     std::string sessionKey;
@@ -257,6 +282,7 @@ struct Transport::Impl {
     Transport::MatrixExpandCallback matrixExpand = nullptr;
     Transport::MatrixPrepareCallback matrixPrepare = nullptr;
     std::map<std::string, uint32_t> matrixAckSequences;
+    std::map<std::string, uint32_t> matrixAckResetFloors;
     std::mutex udpTxMutex;
     std::condition_variable udpTxCv;
     std::deque<PacedDatagram> udpTxQueue;
@@ -279,7 +305,8 @@ struct Transport::Impl {
     bool push_event(Event event) {
         event.ingress = {
             connectionEpoch, status.mode, status.welcomed,
-            status.semanticVisualsReady, status.settings, status.clientId,
+            status.semanticVisualsReady, status.snapshotDeltasReady,
+            status.settings, status.clientId,
         };
         if (event.kind == EventKind::UdpMessage) {
             for (auto it = events.rbegin(); it != events.rend(); ++it) {
@@ -548,6 +575,7 @@ struct Transport::Impl {
         peerStages.clear();
         peerPoseStages.clear();
         matrixAckSequences.clear();
+        matrixAckResetFloors.clear();
         status.clientId.clear();
         status.ownerClientId.clear();
         status.udpToken.clear();
@@ -555,6 +583,7 @@ struct Transport::Impl {
         status.welcomed = false;
         status.isOwner = false;
         status.semanticVisualsReady = false;
+        status.snapshotDeltasReady = false;
         status.state = State::Disconnected;
         nextDirectPeerId = 1;
         reconnectTicks = 0;
@@ -646,10 +675,12 @@ struct Transport::Impl {
         status.welcomed = std::any_of(directPeers.begin(), directPeers.end(),
                                      [](const auto& item) { return item.second.welcomed; });
         status.semanticVisualsReady = status.welcomed && direct_semantic_visuals_ready();
+        status.snapshotDeltasReady = status.welcomed && direct_snapshot_deltas_ready();
         const json left = {
             {"type", "peer_left"},
             {"client_id", peerId},
             {"semantic_visuals_ready", status.semanticVisualsReady},
+            {"snapshot_deltas_ready", status.snapshotDeltasReady},
         };
         emit(EventKind::PeerLeft, peerId, reason,
              left);
@@ -708,11 +739,23 @@ struct Transport::Impl {
         return true;
     }
 
+    bool direct_snapshot_deltas_ready(const Peer* pendingPeer = nullptr) const {
+        if (!supportsSnapshotDeltas) return false;
+        for (const auto& [id, peer] : directPeers) {
+            (void)id;
+            if ((peer.welcomed || &peer == pendingPeer) && !peer.supportsSnapshotDeltas) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void welcome_direct_peer(Peer& peer) {
         if (peer.welcomed) {
             return;
         }
         const bool semanticVisualsReady = direct_semantic_visuals_ready(&peer);
+        const bool snapshotDeltasReady = direct_snapshot_deltas_ready(&peer);
         const json welcome = {
             {"type", "welcome"},
             {"protocol_version", 1},
@@ -726,6 +769,7 @@ struct Transport::Impl {
             {"remote_collision", status.settings.remoteCollision},
             {"pvp", status.settings.pvp && status.settings.remoteCollision},
             {"semantic_visuals_ready", semanticVisualsReady},
+            {"snapshot_deltas_ready", snapshotDeltasReady},
             {"want_puppet", status.settings.dummyModel},
             {"want_midna", wantMidna},
             {"peers", direct_peer_list(peer.id)},
@@ -733,6 +777,7 @@ struct Transport::Impl {
         peer.welcomed = queue_peer(peer, welcome);
         status.welcomed = status.welcomed || peer.welcomed;
         status.semanticVisualsReady = status.welcomed && direct_semantic_visuals_ready();
+        status.snapshotDeltasReady = status.welcomed && direct_snapshot_deltas_ready();
     }
 
     void send_hello() {
@@ -748,7 +793,10 @@ struct Transport::Impl {
             {"name", status.name},
             {"want_puppet", wantPuppet},
             {"want_midna", wantMidna},
-            {"capabilities", {{kSemanticVisualCapability, supportsSemanticVisuals}}},
+            {"capabilities", {
+                {kSemanticVisualCapability, supportsSemanticVisuals},
+                {kSnapshotDeltaCapability, supportsSnapshotDeltas},
+            }},
         };
         if (status.mode == Mode::Relay) {
             hello["action"] = relayCreateRoom ? "create" : "join";
@@ -904,6 +952,22 @@ struct Transport::Impl {
         return it == matrixAckSequences.end() ? 0 : it->second;
     }
 
+    uint32_t relay_common_ack_sequence(std::string_view senderId,
+                                       udp::PacketType type) const {
+        if (!status.snapshotDeltasReady || peerNames.empty()) return 0;
+        uint32_t common = std::numeric_limits<uint32_t>::max();
+        bool hasRecipient = false;
+        for (const auto& [peerId, name] : peerNames) {
+            (void)name;
+            if (peerId == senderId) continue;
+            hasRecipient = true;
+            const uint32_t ack = matrix_ack_sequence(peerId, senderId, type);
+            if (ack == 0) return 0;
+            common = std::min(common, ack);
+        }
+        return hasRecipient ? common : 0;
+    }
+
     bool stages_match(const json& message, const std::string& peerId,
                       std::string_view senderId) const {
         std::string source = message.value("stage", "");
@@ -939,13 +1003,53 @@ struct Transport::Impl {
             }
             json wireMessage = message;
             const uint32_t sequence = wireMessage.value("sequence", 0U);
+            const uint32_t baseline = matrix_ack_sequence(id, senderId, type);
+            const bool allowSnapshotDelta =
+                supportsSnapshotDeltas && peer.supportsSnapshotDeltas;
             std::string error;
+            uint64_t legacyPreparedBytes = 0;
+            uint64_t legacyWireBytes = 0;
+            if (visualWireDiagnostics &&
+                type == udp::PacketType::SemanticPoseMsgpack) {
+                json legacyWireMessage = message;
+                std::string diagnosticError;
+                if (matrixPrepare == nullptr ||
+                    matrixPrepare(legacyWireMessage, std::string(senderId),
+                                  static_cast<uint8_t>(type), sequence, baseline,
+                                  false, false, diagnosticError)) {
+                    legacyWireMessage.erase("_snapshot_debug_reason");
+                    legacyPreparedBytes = json::to_msgpack(legacyWireMessage).size();
+                    const auto legacyDatagrams = udp::encode_message(
+                        legacyWireMessage, senderId, type, &diagnosticError);
+                    for (const auto& datagram : legacyDatagrams) {
+                        legacyWireBytes += datagram.bytes.size();
+                    }
+                }
+            }
             if (matrixPrepare != nullptr &&
                 !matrixPrepare(wireMessage, std::string(senderId),
                                static_cast<uint8_t>(type), sequence,
-                               matrix_ack_sequence(id, senderId, type), error)) {
+                               baseline, allowSnapshotDelta, visualWireDiagnostics,
+                               error)) {
                 emit(EventKind::Error, id, error);
                 continue;
+            }
+            const std::string decision = wireMessage.value("_snapshot_debug_reason", "none");
+            wireMessage.erase("_snapshot_debug_reason");
+            lastVisualSend.snapshotChangedKeys = take_snapshot_debug_keys(
+                wireMessage, "_snapshot_debug_changed_keys");
+            lastVisualSend.snapshotUnchangedKeys = take_snapshot_debug_keys(
+                wireMessage, "_snapshot_debug_unchanged_keys");
+            lastVisualSend.snapshotRemovedKeys = take_snapshot_debug_keys(
+                wireMessage, "_snapshot_debug_removed_keys");
+            lastVisualSend.fullMsgpackBytes += json::to_msgpack(message).size();
+            lastVisualSend.preparedMsgpackBytes += json::to_msgpack(wireMessage).size();
+            lastVisualSend.snapshotBaseline = baseline;
+            lastVisualSend.snapshotDecision = decision;
+            if (wireMessage.value("snapshot_delta_v1", false)) {
+                ++lastVisualSend.snapshotDeltas;
+            } else {
+                ++lastVisualSend.snapshotFulls;
             }
             const auto datagrams = udp::encode_message(wireMessage, senderId, type, &error);
             if (datagrams.empty()) {
@@ -956,6 +1060,8 @@ struct Transport::Impl {
                 peer.udpAddress, datagrams, senderId, id, type);
             if (peerOk) {
                 ++lastVisualSend.recipients;
+                lastVisualSend.legacyPreparedMsgpackBytes += legacyPreparedBytes;
+                lastVisualSend.legacyWireBytes += legacyWireBytes;
                 lastVisualSend.datagrams += static_cast<uint32_t>(datagrams.size());
                 for (const auto& datagram : datagrams) {
                     lastVisualSend.wireBytes += datagram.bytes.size();
@@ -1020,6 +1126,11 @@ struct Transport::Impl {
                                   static_cast<uint8_t>(decoded.type), decoded.sequence,
                                   error)) {
                     udpDecoder.discard_message(decoded.messageToken);
+                    if (error.rfind("semantic snapshot delta", 0) == 0) {
+                        send_udp_datagram(from, udp::encode_ack(
+                            local_udp_sender_id(), decoded.senderId, decoded.type,
+                            decoded.sequence, udp::AckBaselineReset));
+                    }
                     emit(EventKind::Error, decoded.senderId,
                          error.empty() ? "matrix delta expansion failed" : error);
                     return;
@@ -1077,6 +1188,17 @@ struct Transport::Impl {
             const std::string ackedSender = udp::acked_sender_id(decoded.ack);
             const std::string key = matrix_ack_key(decoded.senderId, ackedSender, ackedType);
             uint32_t& ackedSequence = matrixAckSequences[key];
+            if ((decoded.ack.stressFlags & udp::AckBaselineReset) != 0) {
+                matrixAckResetFloors[key] = std::max(matrixAckResetFloors[key],
+                                                     decoded.ack.sequence);
+                ackedSequence = 0;
+                return;
+            }
+            const auto resetFloor = matrixAckResetFloors.find(key);
+            if (resetFloor != matrixAckResetFloors.end()) {
+                if (decoded.ack.sequence <= resetFloor->second) return;
+                matrixAckResetFloors.erase(resetFloor);
+            }
             if (decoded.ack.sequence <= ackedSequence) return;
             ackedSequence = decoded.ack.sequence;
             Event event;
@@ -1212,11 +1334,13 @@ struct Transport::Impl {
             sender.wantPuppet = input.value("want_puppet", sender.wantPuppet);
             sender.wantMidna = false;
             sender.supportsSemanticVisuals = has_semantic_visual_capability(input);
+            sender.supportsSnapshotDeltas = has_snapshot_delta_capability(input);
             peerNames[sender.id] = sender.name;
             welcome_direct_peer(sender);
             const json joined = {
                 {"type", "peer_joined"}, {"client_id", sender.id}, {"name", sender.name},
-                {"semantic_visuals_ready", status.semanticVisualsReady}};
+                {"semantic_visuals_ready", status.semanticVisualsReady},
+                {"snapshot_deltas_ready", status.snapshotDeltasReady}};
             broadcast(joined, sender.id);
             emit(EventKind::PeerJoined, sender.id, sender.name, joined);
             return;
@@ -1286,6 +1410,8 @@ struct Transport::Impl {
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
+            status.snapshotDeltasReady =
+                message.value("snapshot_deltas_ready", false);
             if (status.mode == Mode::Relay) {
                 if (relayCreateRoom) {
                     relayMayRecreateRoom = true;
@@ -1330,6 +1456,8 @@ struct Transport::Impl {
             }
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
+            status.snapshotDeltasReady =
+                message.value("snapshot_deltas_ready", false);
             emit(EventKind::PeerJoined, id, message.value("name", id), message);
         } else if (type == "peer_left") {
             const std::string id = message.value("client_id", "");
@@ -1338,6 +1466,8 @@ struct Transport::Impl {
             peerPoseStages.erase(id);
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
+            status.snapshotDeltasReady =
+                message.value("snapshot_deltas_ready", false);
             emit(EventKind::PeerLeft, id, {}, message);
         } else if (type == "owner_changed") {
             status.ownerClientId = message.value("owner_client_id", "");
@@ -1350,6 +1480,8 @@ struct Transport::Impl {
                                              status.settings);
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", status.semanticVisualsReady);
+            status.snapshotDeltasReady =
+                message.value("snapshot_deltas_ready", status.snapshotDeltasReady);
             emit(EventKind::Message, {}, {}, message);
         } else if (type == "udp_ready") {
             status.udpReady = true;
@@ -1558,6 +1690,7 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
     impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
+    impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
     impl_->automaticReconnect = true;
     if (!impl_->begin_host()) {
         impl_->status.enabled = false;
@@ -1593,6 +1726,7 @@ bool Transport::start_direct_join(const DirectJoinConfig& config, std::string* e
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
     impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
+    impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
     impl_->automaticReconnect = true;
     if (!impl_->begin_connect() && impl_->status.state == State::Disconnected) {
         if (error != nullptr) {
@@ -1636,6 +1770,7 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
     impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
+    impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
     impl_->automaticReconnect = true;
     if (!impl_->begin_connect() && impl_->status.state == State::Disconnected) {
         if (error != nullptr) {
@@ -1704,12 +1839,54 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
     const std::string senderId = impl_->local_udp_sender_id();
     const std::string receiverId = impl_->status.mode == Mode::DirectJoin ? "direct" : "";
     const uint32_t sequence = wireMessage.value("sequence", 0U);
+    const uint32_t baseline = impl_->status.mode == Mode::Relay ?
+        impl_->relay_common_ack_sequence(senderId, type) :
+        impl_->matrix_ack_sequence(receiverId, senderId, type);
+    const bool allowSnapshotDelta = impl_->status.snapshotDeltasReady;
     std::string error;
+    uint64_t legacyPreparedBytes = 0;
+    uint64_t legacyWireBytes = 0;
+    if (impl_->visualWireDiagnostics &&
+        type == udp::PacketType::SemanticPoseMsgpack) {
+        nlohmann::json legacyWireMessage = message;
+        std::string diagnosticError;
+        if (impl_->matrixPrepare == nullptr ||
+            impl_->matrixPrepare(legacyWireMessage, senderId,
+                                 static_cast<uint8_t>(type), sequence, baseline,
+                                 false, false, diagnosticError)) {
+            legacyWireMessage.erase("_snapshot_debug_reason");
+            legacyPreparedBytes = nlohmann::json::to_msgpack(legacyWireMessage).size();
+            const auto legacyDatagrams = udp::encode_message(
+                legacyWireMessage, senderId, type, &diagnosticError);
+            for (const auto& datagram : legacyDatagrams) {
+                legacyWireBytes += datagram.bytes.size();
+            }
+        }
+    }
     if (impl_->matrixPrepare != nullptr &&
         !impl_->matrixPrepare(wireMessage, senderId, static_cast<uint8_t>(type), sequence,
-                              impl_->matrix_ack_sequence(receiverId, senderId, type), error)) {
+                              baseline, allowSnapshotDelta, impl_->visualWireDiagnostics,
+                              error)) {
         impl_->emit(EventKind::Error, {}, error);
         return false;
+    }
+    impl_->lastVisualSend.snapshotDecision =
+        wireMessage.value("_snapshot_debug_reason", "none");
+    wireMessage.erase("_snapshot_debug_reason");
+    impl_->lastVisualSend.snapshotChangedKeys = take_snapshot_debug_keys(
+        wireMessage, "_snapshot_debug_changed_keys");
+    impl_->lastVisualSend.snapshotUnchangedKeys = take_snapshot_debug_keys(
+        wireMessage, "_snapshot_debug_unchanged_keys");
+    impl_->lastVisualSend.snapshotRemovedKeys = take_snapshot_debug_keys(
+        wireMessage, "_snapshot_debug_removed_keys");
+    impl_->lastVisualSend.fullMsgpackBytes = nlohmann::json::to_msgpack(message).size();
+    impl_->lastVisualSend.preparedMsgpackBytes =
+        nlohmann::json::to_msgpack(wireMessage).size();
+    impl_->lastVisualSend.snapshotBaseline = baseline;
+    if (wireMessage.value("snapshot_delta_v1", false)) {
+        impl_->lastVisualSend.snapshotDeltas = 1;
+    } else {
+        impl_->lastVisualSend.snapshotFulls = 1;
     }
     const auto datagrams =
         udp::encode_message(wireMessage, senderId, type, &error);
@@ -1721,6 +1898,8 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
                                                         senderId, receiverId, type);
     if (queued) {
         impl_->lastVisualSend.recipients = 1;
+        impl_->lastVisualSend.legacyPreparedMsgpackBytes = legacyPreparedBytes;
+        impl_->lastVisualSend.legacyWireBytes = legacyWireBytes;
         impl_->lastVisualSend.datagrams = static_cast<uint32_t>(datagrams.size());
         for (const auto& datagram : datagrams) {
             impl_->lastVisualSend.wireBytes += datagram.bytes.size();
@@ -1834,6 +2013,10 @@ void Transport::set_matrix_codec(MatrixExpandCallback expand,
                                  MatrixPrepareCallback prepare) {
     impl_->matrixExpand = expand;
     impl_->matrixPrepare = prepare;
+}
+
+void Transport::set_visual_wire_diagnostics(bool enabled) {
+    impl_->visualWireDiagnostics = enabled;
 }
 
 }  // namespace dusklight_online::net

@@ -30,7 +30,9 @@ constexpr uint8_t kResidualSmall = 1;
 constexpr uint8_t kResidualFull = 2;
 constexpr float kResidualTranslationScale = 16.0f;
 constexpr size_t kMatrixHistoryLimit = 300;
+constexpr uint32_t kSnapshotFullInterval = 120;
 std::map<std::string, std::map<uint32_t, std::string>> sMatrixHistory;
+std::map<std::string, std::map<uint32_t, json>> sSemanticSnapshotHistory;
 
 bool decode_base64(std::string_view text, std::string& out) {
     static constexpr char alphabet[] =
@@ -75,6 +77,64 @@ bool packed_bytes(const json& source, std::string& out) {
 
 std::string history_key(const std::string& peerId, uint8_t packetType) {
     return peerId + '\x1f' + std::to_string(packetType);
+}
+
+void store_semantic_snapshot(const std::string& key, uint32_t sequence,
+                             const json& message) {
+    if (sequence == 0 || !message.is_object()) return;
+    auto& history = sSemanticSnapshotHistory[key];
+    history[sequence] = message;
+    while (history.size() > kMatrixHistoryLimit) history.erase(history.begin());
+}
+
+bool expand_semantic_snapshot_delta(json& message, const std::string& key,
+                                    uint32_t sequence, std::string& error) {
+    if (!message.value("snapshot_delta_v1", false)) return true;
+    const uint32_t baselineSequence = message.value("snapshot_base", 0U);
+    if (baselineSequence == 0 || baselineSequence >= sequence) {
+        error = "semantic snapshot delta has an invalid baseline";
+        return false;
+    }
+    const auto history = sSemanticSnapshotHistory.find(key);
+    if (history == sSemanticSnapshotHistory.end()) {
+        error = "semantic snapshot delta has no baseline history";
+        return false;
+    }
+    const auto baseline = history->second.find(baselineSequence);
+    if (baseline == history->second.end()) {
+        error = "semantic snapshot delta baseline is unavailable";
+        return false;
+    }
+    const auto baselineState = baseline->second.find("state");
+    const auto patch = message.find("state");
+    if (baselineState == baseline->second.end() || !baselineState->is_object() ||
+        patch == message.end() || !patch->is_object()) {
+        error = "semantic snapshot delta state is invalid";
+        return false;
+    }
+    json expandedState = *baselineState;
+    for (auto it = patch->begin(); it != patch->end(); ++it) {
+        expandedState[it.key()] = it.value();
+    }
+    const auto removed = message.find("snapshot_removed");
+    if (removed != message.end()) {
+        if (!removed->is_array()) {
+            error = "semantic snapshot delta removals are invalid";
+            return false;
+        }
+        for (const auto& name : *removed) {
+            if (!name.is_string()) {
+                error = "semantic snapshot delta removal key is invalid";
+                return false;
+            }
+            expandedState.erase(name.get_ref<const std::string&>());
+        }
+    }
+    message["state"] = std::move(expandedState);
+    message.erase("snapshot_delta_v1");
+    message.erase("snapshot_base");
+    message.erase("snapshot_removed");
+    return true;
 }
 
 std::optional<std::string> base_format_for_delta(const std::string& format) {
@@ -845,46 +905,54 @@ bool expand_remote_matrix_delta(json& message, const std::string& peerId,
                                 uint8_t packetType, uint32_t sequence,
                                 std::string& error) {
     try {
-        auto state = message.find("state");
-        if (state == message.end() || !state->is_object()) return true;
-        auto matrices = state->find("link_matrices");
-        if (matrices == state->end() || !matrices->is_object()) return true;
-        std::string format = matrices->value("format", "");
         const std::string key = history_key(peerId, packetType);
-        if (const auto baseFormat = base_format_for_delta(format)) {
-            const uint32_t baselineSequence = matrices->value("baseline_sequence", 0U);
-            const auto history = sMatrixHistory.find(key);
-            if (history == sMatrixHistory.end()) {
-                error = "matrix delta has no baseline history";
-                return false;
-            }
-            const auto baseline = history->second.find(baselineSequence);
-            if (baseline == history->second.end()) {
-                error = "matrix delta baseline is unavailable";
-                return false;
-            }
-            std::string delta, expanded;
-            if (!packed_bytes(*matrices, delta) ||
-                !apply_slot_delta(format, delta, baseline->second, baselineSequence, expanded)) {
-                error = "matrix delta payload is invalid";
-                return false;
-            }
-            (*matrices)["format"] = *baseFormat;
-            matrices->erase("baseline_sequence");
-            std::vector<uint8_t> bytes(expanded.begin(), expanded.end());
-            (*matrices)["data"] = json::binary(std::move(bytes));
-            format = *baseFormat;
+        if (packetType == 7 &&
+            !expand_semantic_snapshot_delta(message, key, sequence, error)) {
+            return false;
         }
-        if (sequence != 0 && is_delta_capable_base(format)) {
-            std::string packed;
-            if (!packed_bytes(*matrices, packed)) {
-                error = "matrix baseline payload is invalid";
-                return false;
+        auto state = message.find("state");
+        if (state != message.end() && state->is_object()) {
+            auto matrices = state->find("link_matrices");
+            if (matrices != state->end() && matrices->is_object()) {
+                std::string format = matrices->value("format", "");
+                if (const auto baseFormat = base_format_for_delta(format)) {
+                    const uint32_t baselineSequence = matrices->value("baseline_sequence", 0U);
+                    const auto history = sMatrixHistory.find(key);
+                    if (history == sMatrixHistory.end()) {
+                        error = "matrix delta has no baseline history";
+                        return false;
+                    }
+                    const auto baseline = history->second.find(baselineSequence);
+                    if (baseline == history->second.end()) {
+                        error = "matrix delta baseline is unavailable";
+                        return false;
+                    }
+                    std::string delta, expanded;
+                    if (!packed_bytes(*matrices, delta) ||
+                        !apply_slot_delta(format, delta, baseline->second,
+                                          baselineSequence, expanded)) {
+                        error = "matrix delta payload is invalid";
+                        return false;
+                    }
+                    (*matrices)["format"] = *baseFormat;
+                    matrices->erase("baseline_sequence");
+                    std::vector<uint8_t> bytes(expanded.begin(), expanded.end());
+                    (*matrices)["data"] = json::binary(std::move(bytes));
+                    format = *baseFormat;
+                }
+                if (sequence != 0 && is_delta_capable_base(format)) {
+                    std::string packed;
+                    if (!packed_bytes(*matrices, packed)) {
+                        error = "matrix baseline payload is invalid";
+                        return false;
+                    }
+                    auto& history = sMatrixHistory[key];
+                    history[sequence] = std::move(packed);
+                    while (history.size() > kMatrixHistoryLimit) history.erase(history.begin());
+                }
             }
-            auto& history = sMatrixHistory[key];
-            history[sequence] = std::move(packed);
-            while (history.size() > kMatrixHistoryLimit) history.erase(history.begin());
         }
+        if (packetType == 7) store_semantic_snapshot(key, sequence, message);
         error.clear();
         return true;
     } catch (const json::exception& ex) {
@@ -895,37 +963,140 @@ bool expand_remote_matrix_delta(json& message, const std::string& peerId,
 
 bool prepare_remote_matrix_delta(json& message, const std::string& peerId,
                                  uint8_t packetType, uint32_t sequence,
-                                 uint32_t baselineSequence, std::string& error) {
+                                 uint32_t baselineSequence,
+                                 bool allowSemanticSnapshotDelta,
+                                 bool collectSnapshotDiagnostics,
+                                 std::string& error) {
     try {
+        const std::string key = history_key(peerId, packetType);
+        const json fullMessage = message;
+        if (packetType == 7) store_semantic_snapshot(key, sequence, fullMessage);
+        const bool independentFullSnapshot = packetType == 7 &&
+            allowSemanticSnapshotDelta &&
+            (baselineSequence == 0 || sequence == 0 || baselineSequence >= sequence ||
+             sequence - baselineSequence >= kMatrixHistoryLimit ||
+             (sequence % kSnapshotFullInterval) == 0);
+        const uint32_t matrixBaselineSequence =
+            independentFullSnapshot ? 0 : baselineSequence;
+
         auto state = message.find("state");
-        if (state == message.end() || !state->is_object()) return true;
-        auto matrices = state->find("link_matrices");
-        if (matrices == state->end() || !matrices->is_object()) return true;
-        const std::string format = matrices->value("format", "");
-        const auto deltaFormat = delta_format_for_base(format);
-        if (!deltaFormat) return true;
-
-        std::string current;
-        if (!packed_bytes(*matrices, current)) {
-            error = "matrix baseline payload is invalid";
-            return false;
+        if (state != message.end() && state->is_object()) {
+            auto matrices = state->find("link_matrices");
+            if (matrices != state->end() && matrices->is_object()) {
+                const std::string format = matrices->value("format", "");
+                const auto deltaFormat = delta_format_for_base(format);
+                if (deltaFormat) {
+                    std::string current;
+                    if (!packed_bytes(*matrices, current)) {
+                        error = "matrix baseline payload is invalid";
+                        return false;
+                    }
+                    auto& history = sMatrixHistory[key];
+                    if (sequence != 0) {
+                        history[sequence] = current;
+                        while (history.size() > kMatrixHistoryLimit) history.erase(history.begin());
+                    }
+                    const auto baseline = history.find(matrixBaselineSequence);
+                    if (matrixBaselineSequence != 0 && baseline != history.end()) {
+                        std::string delta;
+                        if (build_slot_delta(format, current, baseline->second,
+                                             matrixBaselineSequence, delta) &&
+                            delta.size() < current.size()) {
+                            (*matrices)["format"] = *deltaFormat;
+                            (*matrices)["baseline_sequence"] = matrixBaselineSequence;
+                            std::vector<uint8_t> bytes(delta.begin(), delta.end());
+                            (*matrices)["data"] = json::binary(std::move(bytes));
+                        }
+                    }
+                }
+            }
         }
-        auto& history = sMatrixHistory[history_key(peerId, packetType)];
-        if (sequence != 0) {
-            history[sequence] = current;
-            while (history.size() > kMatrixHistoryLimit) history.erase(history.begin());
-        }
-        if (baselineSequence == 0) return true;
-        const auto baseline = history.find(baselineSequence);
-        if (baseline == history.end()) return true;
 
-        std::string delta;
-        if (!build_slot_delta(format, current, baseline->second, baselineSequence, delta) ||
-            delta.size() >= current.size()) return true;
-        (*matrices)["format"] = *deltaFormat;
-        (*matrices)["baseline_sequence"] = baselineSequence;
-        std::vector<uint8_t> bytes(delta.begin(), delta.end());
-        (*matrices)["data"] = json::binary(std::move(bytes));
+        if (packetType != 7) {
+            error.clear();
+            return true;
+        }
+        if (!allowSemanticSnapshotDelta) {
+            message["_snapshot_debug_reason"] = "snapshot_capability_off";
+            error.clear();
+            return true;
+        }
+        if (baselineSequence == 0) {
+            message["_snapshot_debug_reason"] = "no_common_ack_or_capability";
+            error.clear();
+            return true;
+        }
+        if (sequence == 0 || baselineSequence >= sequence ||
+            sequence - baselineSequence >= kMatrixHistoryLimit) {
+            message["_snapshot_debug_reason"] = "stale_baseline";
+            error.clear();
+            return true;
+        }
+        if ((sequence % kSnapshotFullInterval) == 0) {
+            message["_snapshot_debug_reason"] = "periodic_full";
+            error.clear();
+            return true;
+        }
+        const auto history = sSemanticSnapshotHistory.find(key);
+        if (history == sSemanticSnapshotHistory.end()) {
+            message = fullMessage;
+            message["_snapshot_debug_reason"] = "missing_history";
+            error.clear();
+            return true;
+        }
+        const auto baseline = history->second.find(baselineSequence);
+        if (baseline == history->second.end()) {
+            message = fullMessage;
+            message["_snapshot_debug_reason"] = "missing_baseline";
+            error.clear();
+            return true;
+        }
+        const auto currentState = fullMessage.find("state");
+        const auto baselineState = baseline->second.find("state");
+        const auto preparedState = message.find("state");
+        if (currentState == fullMessage.end() || !currentState->is_object() ||
+            baselineState == baseline->second.end() || !baselineState->is_object() ||
+            preparedState == message.end() || !preparedState->is_object()) {
+            message = fullMessage;
+            message["_snapshot_debug_reason"] = "invalid_state";
+            error.clear();
+            return true;
+        }
+
+        json patch = json::object();
+        json changedKeys = json::array();
+        json unchangedKeys = json::array();
+        for (auto it = currentState->begin(); it != currentState->end(); ++it) {
+            const auto old = baselineState->find(it.key());
+            if (old == baselineState->end() || *old != it.value()) {
+                const auto prepared = preparedState->find(it.key());
+                patch[it.key()] = prepared == preparedState->end() ? it.value() : *prepared;
+                if (collectSnapshotDiagnostics) changedKeys.push_back(it.key());
+            } else if (collectSnapshotDiagnostics) {
+                unchangedKeys.push_back(it.key());
+            }
+        }
+        json removed = json::array();
+        for (auto it = baselineState->begin(); it != baselineState->end(); ++it) {
+            if (currentState->find(it.key()) == currentState->end()) removed.push_back(it.key());
+        }
+
+        json candidate = message;
+        candidate["state"] = std::move(patch);
+        candidate["snapshot_delta_v1"] = true;
+        candidate["snapshot_base"] = baselineSequence;
+        if (!removed.empty()) candidate["snapshot_removed"] = removed;
+        if (json::to_msgpack(candidate).size() < json::to_msgpack(message).size()) {
+            message = std::move(candidate);
+            message["_snapshot_debug_reason"] = "delta";
+            if (collectSnapshotDiagnostics) {
+                message["_snapshot_debug_changed_keys"] = std::move(changedKeys);
+                message["_snapshot_debug_unchanged_keys"] = std::move(unchangedKeys);
+                message["_snapshot_debug_removed_keys"] = removed;
+            }
+        } else {
+            message["_snapshot_debug_reason"] = "not_smaller";
+        }
         error.clear();
         return true;
     } catch (const json::exception& ex) {
@@ -937,11 +1108,19 @@ bool prepare_remote_matrix_delta(json& message, const std::string& peerId,
 void clear_remote_matrix_history(const std::string& peerId) {
     if (peerId.empty()) {
         sMatrixHistory.clear();
+        sSemanticSnapshotHistory.clear();
         return;
     }
     for (auto it = sMatrixHistory.begin(); it != sMatrixHistory.end();) {
         if (it->first.rfind(peerId + '\x1f', 0) == 0) it = sMatrixHistory.erase(it);
         else ++it;
+    }
+    for (auto it = sSemanticSnapshotHistory.begin(); it != sSemanticSnapshotHistory.end();) {
+        if (it->first.rfind(peerId + '\x1f', 0) == 0) {
+            it = sSemanticSnapshotHistory.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

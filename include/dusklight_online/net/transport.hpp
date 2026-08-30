@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -56,6 +57,7 @@ struct DirectHostConfig {
     bool wantPuppet = true;
     bool wantMidna = false;
     bool supportsSemanticVisuals = true;
+    bool supportsSnapshotDeltas = true;
 };
 
 struct DirectJoinConfig {
@@ -69,6 +71,7 @@ struct DirectJoinConfig {
     bool wantPuppet = true;
     bool wantMidna = false;
     bool supportsSemanticVisuals = true;
+    bool supportsSnapshotDeltas = true;
 };
 
 struct RelayConfig {
@@ -84,6 +87,7 @@ struct RelayConfig {
     bool wantPuppet = true;
     bool wantMidna = false;
     bool supportsSemanticVisuals = true;
+    bool supportsSnapshotDeltas = true;
 };
 
 enum class EventKind : uint8_t {
@@ -103,6 +107,7 @@ struct EventContext {
     Mode mode = Mode::Disabled;
     bool welcomed = false;
     bool semanticVisualsReady = false;
+    bool snapshotDeltasReady = false;
     RoomSettings settings;
     std::string clientId;
 };
@@ -127,6 +132,7 @@ struct Status {
     bool udpReady = false;
     bool isOwner = false;
     bool semanticVisualsReady = false;
+    bool snapshotDeltasReady = false;
     std::string name;
     std::string room;
     std::string host;
@@ -146,6 +152,17 @@ struct VisualSendStats {
     uint32_t recipients = 0;
     uint32_t datagrams = 0;
     uint64_t wireBytes = 0;
+    uint64_t fullMsgpackBytes = 0;
+    uint64_t preparedMsgpackBytes = 0;
+    uint64_t legacyPreparedMsgpackBytes = 0;
+    uint64_t legacyWireBytes = 0;
+    uint32_t snapshotDeltas = 0;
+    uint32_t snapshotFulls = 0;
+    uint32_t snapshotBaseline = 0;
+    std::string snapshotDecision;
+    std::vector<std::string> snapshotChangedKeys;
+    std::vector<std::string> snapshotUnchangedKeys;
+    std::vector<std::string> snapshotRemovedKeys;
 };
 
 // Non-blocking reliable transport for every JSON gameplay lane. tick() is
@@ -155,7 +172,7 @@ public:
     using MatrixExpandCallback = bool (*)(nlohmann::json&, const std::string&, uint8_t,
                                           uint32_t, std::string&);
     using MatrixPrepareCallback = bool (*)(nlohmann::json&, const std::string&, uint8_t,
-                                           uint32_t, uint32_t, std::string&);
+                                           uint32_t, uint32_t, bool, bool, std::string&);
     Transport();
     ~Transport();
 
@@ -186,6 +203,7 @@ public:
     bool publish_room_settings(const RoomSettings& settings);
     bool publish_visual_preferences(bool wantPuppet, bool wantMidna);
     void set_matrix_codec(MatrixExpandCallback expand, MatrixPrepareCallback prepare);
+    void set_visual_wire_diagnostics(bool enabled);
 
 private:
     struct Impl;

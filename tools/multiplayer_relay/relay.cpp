@@ -54,6 +54,7 @@ using json = nlohmann::json;
 
 constexpr int kProtocolVersion = 2;
 constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
+constexpr const char* kSnapshotDeltaCapability = "semantic_snapshot_delta_v1";
 constexpr size_t kMaxLineBytes = 512 * 1024;
 constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxRoomClients = 8;
@@ -165,6 +166,14 @@ bool has_semantic_visual_capability(const json& message) {
     const auto capabilities = message.find("capabilities");
     if (capabilities == message.end() || !capabilities->is_object()) return false;
     const auto capability = capabilities->find(kSemanticVisualCapability);
+    return capability != capabilities->end() && capability->is_boolean() &&
+           capability->get<bool>();
+}
+
+bool has_snapshot_delta_capability(const json& message) {
+    const auto capabilities = message.find("capabilities");
+    if (capabilities == message.end() || !capabilities->is_object()) return false;
+    const auto capability = capabilities->find(kSnapshotDeltaCapability);
     return capability != capabilities->end() && capability->is_boolean() &&
            capability->get<bool>();
 }
@@ -288,6 +297,7 @@ struct Client {
     bool wantsPuppet = true;
     bool wantsMidna = false;
     bool supportsSemanticVisuals = false;
+    bool supportsSnapshotDeltas = false;
     bool udpAddrKnown = false;
 };
 
@@ -301,6 +311,7 @@ struct Room {
     bool syncWorld = false;
     bool performanceMode = false;
     bool semanticVisualsReady = false;
+    bool snapshotDeltasReady = false;
     bool remoteCollision = true;
     bool pvp = false;
 };
@@ -692,6 +703,7 @@ private:
                 {"type", "room_settings"},
                 {"owner_client_id", room.ownerClientId},
                 {"semantic_visuals_ready", room.semanticVisualsReady},
+                {"snapshot_deltas_ready", room.snapshotDeltasReady},
                 {"settings", room_settings_json(room)},
             };
             send_json(client, routed);
@@ -842,6 +854,7 @@ private:
         client.wantsPuppet = hello.value("want_puppet", true);
         client.wantsMidna = hello.value("want_midna", false);
         client.supportsSemanticVisuals = has_semantic_visual_capability(hello);
+        client.supportsSnapshotDeltas = has_snapshot_delta_capability(hello);
 
         json peers = json::array();
         for (const std::string& peerId : roomIt->second.clientIds) {
@@ -854,6 +867,8 @@ private:
         roomIt->second.clientIds.push_back(client.id);
         roomIt->second.semanticVisualsReady =
             room_semantic_visuals_ready(roomIt->second);
+        roomIt->second.snapshotDeltasReady =
+            room_snapshot_deltas_ready(roomIt->second);
         log("join room=" + roomId + " client=" + client.id + " name=" + client.name);
 
         send_json(client, {
@@ -864,6 +879,7 @@ private:
             {"udp_token", client.udpToken},
             {"owner_client_id", roomIt->second.ownerClientId},
             {"semantic_visuals_ready", roomIt->second.semanticVisualsReady},
+            {"snapshot_deltas_ready", roomIt->second.snapshotDeltasReady},
             {"settings", room_settings_json(roomIt->second)},
             {"peers", peers},
         });
@@ -872,6 +888,7 @@ private:
             {"client_id", client.id},
             {"name", client.name},
             {"semantic_visuals_ready", roomIt->second.semanticVisualsReady},
+            {"snapshot_deltas_ready", roomIt->second.snapshotDeltasReady},
         });
     }
 
@@ -880,6 +897,17 @@ private:
         for (const std::string& clientId : room.clientIds) {
             const auto client = mClients.find(clientId);
             if (client == mClients.end() || !client->second.supportsSemanticVisuals) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool room_snapshot_deltas_ready(const Room& room) const {
+        if (room.clientIds.empty()) return false;
+        for (const std::string& clientId : room.clientIds) {
+            const auto client = mClients.find(clientId);
+            if (client == mClients.end() || !client->second.supportsSnapshotDeltas) {
                 return false;
             }
         }
@@ -1122,11 +1150,13 @@ private:
                     std::remove(room.clientIds.begin(), room.clientIds.end(), clientId),
                     room.clientIds.end());
                 room.semanticVisualsReady = room_semantic_visuals_ready(room);
+                room.snapshotDeltasReady = room_snapshot_deltas_ready(room);
                 log("leave room=" + roomId + " client=" + clientId);
                 broadcast(departed, {
                     {"type", "peer_left"},
                     {"client_id", clientId},
                     {"semantic_visuals_ready", room.semanticVisualsReady},
+                    {"snapshot_deltas_ready", room.snapshotDeltasReady},
                 });
                 if (room.clientIds.empty()) {
                     mRooms.erase(roomIt);

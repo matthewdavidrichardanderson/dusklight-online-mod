@@ -8,9 +8,11 @@
     #include <unistd.h>
 #endif
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 
 using dusklight_online::net::DirectHostConfig;
 using dusklight_online::net::DirectJoinConfig;
@@ -105,6 +107,7 @@ void pump(Transport& host, Transport& first, Transport& second, int ticks = 300)
         host.tick();
         first.tick();
         second.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -152,6 +155,7 @@ int main() {
     // A missing capability is the legacy-client case. The host preference may
     // remain enabled, but semantic visuals must not become effective room-wide.
     bobConfig.supportsSemanticVisuals = false;
+    bobConfig.supportsSnapshotDeltas = false;
     if (!bob.start_direct_join(bobConfig, &error)) {
         fail("Bob start: " + error);
     }
@@ -167,6 +171,10 @@ int main() {
     if (host.status().semanticVisualsReady || alice.status().semanticVisualsReady ||
         bob.status().semanticVisualsReady) {
         fail("legacy direct peer did not disable semantic visual negotiation");
+    }
+    if (host.status().snapshotDeltasReady || alice.status().snapshotDeltasReady ||
+        bob.status().snapshotDeltasReady) {
+        fail("legacy direct peer did not disable snapshot delta negotiation");
     }
 
     while (host.has_events()) host.pop_event();
@@ -282,6 +290,9 @@ int main() {
     }
     if (!host.status().semanticVisualsReady || !alice.status().semanticVisualsReady) {
         fail("semantic visual negotiation did not recover after legacy peer left");
+    }
+    if (!host.status().snapshotDeltasReady || !alice.status().snapshotDeltasReady) {
+        fail("snapshot delta negotiation did not recover after legacy peer left");
     }
 
     alice.disconnect();

@@ -28,7 +28,10 @@ bool expand_remote_matrix_delta(nlohmann::json& message, const std::string& peer
                                 std::string& error);
 bool prepare_remote_matrix_delta(nlohmann::json& message, const std::string& peerId,
                                  uint8_t packetType, uint32_t sequence,
-                                 uint32_t baselineSequence, std::string& error);
+                                 uint32_t baselineSequence,
+                                 bool allowSemanticSnapshotDelta,
+                                 bool collectSnapshotDiagnostics,
+                                 std::string& error);
 void clear_remote_matrix_history(const std::string& peerId = {});
 
 }  // namespace dusklight_online::game

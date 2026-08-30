@@ -139,11 +139,27 @@ bool visual_wire_trace_enabled() {
     return enabled;
 }
 
+std::string visual_wire_trace_keys(const std::vector<std::string>& keys) {
+    if (keys.empty()) return "-";
+    std::ostringstream out;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i != 0) out << ',';
+        out << keys[i];
+    }
+    return out.str();
+}
+
 struct VisualWireTraceAccumulator {
     LocalPoseMatrixScope scope = LocalPoseMatrixScope::None;
     uint64_t samples = 0;
     uint64_t normalizedWireBytes = 0;
     uint64_t peakNormalizedWireBytes = 0;
+    uint64_t fullMsgpackBytes = 0;
+    uint64_t preparedMsgpackBytes = 0;
+    uint64_t deltaSamples = 0;
+    uint64_t fullSamples = 0;
+    uint64_t legacyWireBytes = 0;
+    int preparedSizeBand = -1;
 };
 
 VisualWireTraceAccumulator sVisualWireTrace;
@@ -1770,6 +1786,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
     sActiveAdapter = this;
     transport_.set_matrix_codec(&expand_remote_matrix_delta,
                                 &prepare_remote_matrix_delta);
+    transport_.set_visual_wire_diagnostics(visual_wire_trace_enabled());
     if (install_remote_actor_profile(error) != MOD_OK ||
         install_audio_hooks(error) != MOD_OK ||
         install_bomb_hooks(transport_, error) != MOD_OK ||
@@ -2643,8 +2660,27 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                         sVisualWireTrace.normalizedWireBytes += normalizedBytes;
                         sVisualWireTrace.peakNormalizedWireBytes = std::max(
                             sVisualWireTrace.peakNormalizedWireBytes, normalizedBytes);
+                        sVisualWireTrace.fullMsgpackBytes +=
+                            wireStats.fullMsgpackBytes / wireStats.recipients;
+                        sVisualWireTrace.preparedMsgpackBytes +=
+                            wireStats.preparedMsgpackBytes / wireStats.recipients;
+                        sVisualWireTrace.deltaSamples +=
+                            wireStats.snapshotDeltas > 0 ? 1 : 0;
+                        sVisualWireTrace.fullSamples +=
+                            wireStats.snapshotFulls > 0 ? 1 : 0;
+                        const uint64_t normalizedLegacyWireBytes =
+                            wireStats.legacyWireBytes / wireStats.recipients;
+                        sVisualWireTrace.legacyWireBytes += normalizedLegacyWireBytes;
+                        const uint64_t normalizedPreparedBytes =
+                            wireStats.preparedMsgpackBytes / wireStats.recipients;
+                        const int preparedSizeBand = normalizedPreparedBytes <= 128 ? 0 :
+                            (normalizedPreparedBytes >= 500 ? 2 : 1);
+                        const bool preparedBandChanged =
+                            preparedSizeBand != sVisualWireTrace.preparedSizeBand;
+                        sVisualWireTrace.preparedSizeBand = preparedSizeBand;
                         if (sVisualWireTrace.samples <= 5 ||
-                            (sVisualWireTrace.samples % 300) == 0) {
+                            (sVisualWireTrace.samples % 300) == 0 ||
+                            preparedBandChanged || wireStats.snapshotFulls > 0) {
                             std::ostringstream line;
                             line << "VISUAL_WIRE_TX seq=" << nextSequence
                                  << " udp_type=" << static_cast<int>(activePoseType)
@@ -2663,6 +2699,47 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                      sVisualWireTrace.samples)
                                  << " peak_wire_per_recipient="
                                  << sVisualWireTrace.peakNormalizedWireBytes
+                                 << " snapshot_delta="
+                                 << (wireStats.snapshotDeltas > 0 ? 1 : 0)
+                                 << " snapshot_base=" << wireStats.snapshotBaseline
+                                 << " snapshot_base_age="
+                                 << (wireStats.snapshotBaseline != 0 &&
+                                             nextSequence > wireStats.snapshotBaseline ?
+                                         nextSequence - wireStats.snapshotBaseline : 0)
+                                 << " snapshot_decision=" << wireStats.snapshotDecision
+                                 << " full_msgpack=" << wireStats.fullMsgpackBytes
+                                 << " prepared_msgpack=" << wireStats.preparedMsgpackBytes
+                                 << " legacy_prepared_msgpack="
+                                 << wireStats.legacyPreparedMsgpackBytes
+                                 << " legacy_wire_bytes=" << wireStats.legacyWireBytes
+                                 << " legacy_wire_per_recipient="
+                                 << normalizedLegacyWireBytes
+                                 << " exact_wire_saved="
+                                 << (normalizedLegacyWireBytes > normalizedBytes ?
+                                         normalizedLegacyWireBytes - normalizedBytes : 0)
+                                 << " changed_count="
+                                 << wireStats.snapshotChangedKeys.size()
+                                 << " changed_keys="
+                                 << visual_wire_trace_keys(wireStats.snapshotChangedKeys)
+                                 << " baseline_equal_count="
+                                 << wireStats.snapshotUnchangedKeys.size()
+                                 << " baseline_equal_keys="
+                                 << visual_wire_trace_keys(wireStats.snapshotUnchangedKeys)
+                                 << " removed_count="
+                                 << wireStats.snapshotRemovedKeys.size()
+                                 << " removed_keys="
+                                 << visual_wire_trace_keys(wireStats.snapshotRemovedKeys)
+                                 << " avg_full_msgpack="
+                                 << (sVisualWireTrace.fullMsgpackBytes /
+                                     sVisualWireTrace.samples)
+                                 << " avg_prepared_msgpack="
+                                 << (sVisualWireTrace.preparedMsgpackBytes /
+                                     sVisualWireTrace.samples)
+                                 << " avg_legacy_wire_per_recipient="
+                                 << (sVisualWireTrace.legacyWireBytes /
+                                     sVisualWireTrace.samples)
+                                 << " delta_samples=" << sVisualWireTrace.deltaSamples
+                                 << " full_samples=" << sVisualWireTrace.fullSamples
                                  << " samples=" << sVisualWireTrace.samples
                                  << " send_interval=" << visualPoseSendInterval_;
                             dusklight_online::log_info(line.str());
