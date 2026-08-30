@@ -1059,7 +1059,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                        &OnlineApp::dummy_model_set, &OnlineApp::room_setting_locked, &app);
     add_session_toggle(right, "Sync flags", &OnlineApp::sync_flags_get,
                        &OnlineApp::sync_flags_set, &OnlineApp::room_setting_locked, &app);
-    add_session_toggle(right, "Performance Mode", &OnlineApp::performance_mode_get,
+    add_session_toggle(right, "Performance Mode (Recommended)", &OnlineApp::performance_mode_get,
                        &OnlineApp::performance_mode_set,
                        &OnlineApp::room_setting_locked, &app);
     add_session_toggle(right, "Remote collision", &OnlineApp::remote_collision_get,

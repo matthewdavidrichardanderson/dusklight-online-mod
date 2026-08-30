@@ -1,5 +1,7 @@
 /build*/
 /cmake-build-*/
+/.vs/
+/out/
 /dusklight/
 .idea/
 .DS_Store
