@@ -521,8 +521,9 @@ void OnlineApp::update() {
     if (game_ != nullptr) {
         const bool remoteModelEnabled = currentStatus.enabled ? currentStatus.settings.dummyModel :
             bool_value(config_.dummyModel, true);
-        const bool syncWorldEnabled = currentStatus.enabled ? currentStatus.settings.syncWorld :
-            bool_value(config_.syncWorld, false);
+        // World synchronization remains protocol-compatible but is intentionally
+        // dormant until it is complete enough to expose as a supported feature.
+        constexpr bool syncWorldEnabled = false;
         const bool remoteCollisionEnabled = currentStatus.enabled ?
             net::effective_remote_collision(currentStatus.settings) :
             bool_value(config_.dummyModel, true) &&
@@ -594,7 +595,6 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"remote-model", true, &config_.dummyModel},
         BoolVar{"name-labels", true, &config_.nameLabels},
         BoolVar{"sync-flags", true, &config_.syncFlags},
-        BoolVar{"sync-world", false, &config_.syncWorld},
         BoolVar{"display-midna", false, &config_.displayMidna},
         BoolVar{"semantic-rendering-experiment", true,
                 &config_.semanticRenderingExperiment},
@@ -657,7 +657,7 @@ net::RoomSettings OnlineApp::configured_settings() const {
     net::RoomSettings settings;
     settings.dummyModel = bool_value(config_.dummyModel, true);
     settings.syncFlags = bool_value(config_.syncFlags, true);
-    settings.syncWorld = bool_value(config_.syncWorld, false);
+    settings.syncWorld = false;
     settings.performanceMode = bool_value(config_.semanticRenderingExperiment, true);
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
     settings.pvp = bool_value(config_.pvp, false) && settings.remoteCollision;
@@ -1059,8 +1059,6 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                        &OnlineApp::dummy_model_set, &OnlineApp::room_setting_locked, &app);
     add_session_toggle(right, "Sync flags", &OnlineApp::sync_flags_get,
                        &OnlineApp::sync_flags_set, &OnlineApp::room_setting_locked, &app);
-    add_session_toggle(right, "Sync world", &OnlineApp::sync_world_get,
-                       &OnlineApp::sync_world_set, &OnlineApp::room_setting_locked, &app);
     add_session_toggle(right, "Performance Mode", &OnlineApp::performance_mode_get,
                        &OnlineApp::performance_mode_set,
                        &OnlineApp::room_setting_locked, &app);
@@ -1379,6 +1377,7 @@ void OnlineApp::dummy_model_set(ModContext*, void* data, const UiControlValue* v
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.dummyModel = value->bool_value;
+        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1397,24 +1396,7 @@ void OnlineApp::sync_flags_set(ModContext*, void* data, const UiControlValue* va
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.syncFlags = value->bool_value;
-        app.transport_.publish_room_settings(settings);
-    }
-}
-
-void OnlineApp::sync_world_get(ModContext*, void* data, UiControlValue* value) {
-    value->bool_value = static_cast<OnlineApp*>(data)->displayed_settings().syncWorld;
-}
-
-void OnlineApp::sync_world_set(ModContext*, void* data, const UiControlValue* value) {
-    auto& app = *static_cast<OnlineApp*>(data);
-    const net::Status status = app.transport_.status();
-    if (room_settings_locked(status, app.relayHostIntent_)) return;
-    svc_config->set_bool(mod_ctx, app.config_.syncWorld, value->bool_value);
-    if (status.enabled &&
-        (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner))) {
-        net::RoomSettings settings = status.settings;
-        settings.syncWorld = value->bool_value;
+        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1436,6 +1418,7 @@ void OnlineApp::performance_mode_set(ModContext*, void* data,
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.performanceMode = value->bool_value;
+        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1456,6 +1439,7 @@ void OnlineApp::remote_collision_set(ModContext*, void* data, const UiControlVal
         net::RoomSettings settings = status.settings;
         settings.remoteCollision = value->bool_value;
         if (!settings.remoteCollision) settings.pvp = false;
+        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1475,6 +1459,7 @@ void OnlineApp::pvp_set(ModContext*, void* data, const UiControlValue* value) {
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.pvp = value->bool_value && settings.remoteCollision;
+        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
