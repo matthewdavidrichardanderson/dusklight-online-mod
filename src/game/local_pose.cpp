@@ -685,6 +685,11 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
             link->mIronBallBgChkPos.abs2(link->field_0x3810) < 1.0f;
         state["hookshot_visual"] = {
             {"left", link->field_0x3020 == 0},
+            // setArmMatrix applies these world-axis rotations to every joint
+            // in the active clawshot arm while Link aims from a wall/ceiling.
+            {"arm_aim_x", int(link->mProcVar3.field_0x300e)},
+            {"arm_aim_y", int(static_cast<s16>(
+                link->mProcVar4.field_0x3010 - link->shape_angle.y))},
             {"top_link_anchored", hookshotTopLinkAnchored},
             {"sub_top_link_anchored", hookshotSubTopLinkAnchored},
             {"top", {link->mHookshotTopPos.x, link->mHookshotTopPos.y,

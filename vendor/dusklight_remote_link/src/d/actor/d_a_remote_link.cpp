@@ -881,6 +881,8 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteIronBallHandRoot(cXyz::Zero),
       mRemoteHookshotVisualValid(false),
       mRemoteHookshotLeft(true),
+      mRemoteHookshotArmAimX(0),
+      mRemoteHookshotArmAimY(0),
       mRemoteHookshotTopLinkAnchored(false),
       mRemoteHookshotSubTopLinkAnchored(false),
       mRemoteHookshotTop(cXyz::Zero),
@@ -894,7 +896,9 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteHookshotPreviousValid(false),
       mRemoteHookshotStopTime(0),
       mRemoteHookshotItemFrame(0.0f),
+      mRemoteHookshotPreviousTipFrame(0.0f),
       mRemoteHookshotTipFrame(0.0f),
+      mRemoteHookshotPreviousSubTipFrame(0.0f),
       mRemoteHookshotSubTipFrame(0.0f),
       mRemoteHookshotRenderedTop(cXyz::Zero),
       mRemoteHookshotRenderedSubTop(cXyz::Zero),
@@ -2678,20 +2682,43 @@ void daRemoteLink_c::applyRemoteArmMatrix() {
     for (int i = 0; i < 2; ++i) {
         u16 joint = joints[i];
         const size_t base = static_cast<size_t>(i) * 3;
+        const bool hookshotAimArm =
+            mRemoteHookshotVisualValid &&
+            (mRemoteProcId == daAlink_c::PROC_HOOKSHOT_ROOF_SHOOT ||
+             mRemoteProcId == daAlink_c::PROC_HOOKSHOT_WALL_SHOOT) &&
+            (mRemoteHookshotLeft ? i == 0 : i == 1);
+        const s16 aimX = hookshotAimArm ? mRemoteHookshotArmAimX : 0;
+        const s16 aimY = hookshotAimArm &&
+                                 mRemoteProcId == daAlink_c::PROC_HOOKSHOT_WALL_SHOOT ?
+                             mRemoteHookshotArmAimY : 0;
+
+        // Preserve the animated hand's local offset before rebuilding the
+        // shoulder/elbow/wrist chain. Vanilla setArmMatrix obtains this from
+        // its old-frame transform; deriving it from the already sampled BCK
+        // is equivalent for the remote model.
+        cXyz oldHandOrigin;
+        cXyz handLocalOffset;
+        Mtx inverseWrist;
+        mDoMtx_multVecZero(mpBodyModel->getAnmMtx(joint + 3), &oldHandOrigin);
+        mDoMtx_inverse(mpBodyModel->getAnmMtx(joint + 2), inverseWrist);
+        mDoMtx_multVec(inverseWrist, &oldHandOrigin, &handLocalOffset);
         cXyz chainPos;
-        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(joint), 0, 0,
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(joint), aimX, aimY,
                                     mRemoteArmIkAngles[base + 2]);
         mDoMtx_stack_c::ZXYrotM(csXyz(mRemoteArmRotA[base], mRemoteArmRotA[base + 1],
                                       mRemoteArmRotA[base + 2]));
         mDoMtx_copy(mDoMtx_stack_c::get(), mpBodyModel->getAnmMtx(joint));
         mDoMtx_stack_c::multVec(&arm1, &chainPos);
-        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), 0, 0,
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), aimX, aimY,
                                     mRemoteArmIkAngles[base + 1], &chainPos);
         mDoMtx_stack_c::ZXYrotM(csXyz(mRemoteArmRotB[base], mRemoteArmRotB[base + 1],
                                       mRemoteArmRotB[base + 2]));
         mDoMtx_copy(mDoMtx_stack_c::get(), mpBodyModel->getAnmMtx(joint));
         mDoMtx_stack_c::multVec(&arm2, &chainPos);
-        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), 0, 0,
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), aimX, aimY,
+                                    mRemoteArmIkAngles[base], &chainPos);
+        mDoMtx_stack_c::multVec(&handLocalOffset, &chainPos);
+        setRemoteMatrixWorldAxisRot(this, mpBodyModel->getAnmMtx(++joint), aimX, aimY,
                                     mRemoteArmIkAngles[base], &chainPos);
     }
 }
@@ -4996,6 +5023,8 @@ void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
     cXyz renderedSubTop = mRemoteHookshotSubTop;
     csXyz renderedTopAngle = mRemoteHookshotTopAngle;
     csXyz renderedSubTopAngle = mRemoteHookshotSubTopAngle;
+    f32 renderedTipFrame = mRemoteHookshotTipFrame;
+    f32 renderedSubTipFrame = mRemoteHookshotSubTipFrame;
     if (i_presentation && mRemoteHookshotPreviousValid &&
         dusk::frame_interp::is_enabled()) {
         const f32 alpha = dusk::frame_interp::get_interpolation_step();
@@ -5024,6 +5053,10 @@ void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
                              mRemoteHookshotSubTopAngle.y),
             interpolateAngle(mRemoteHookshotPreviousSubTopAngle.z,
                              mRemoteHookshotSubTopAngle.z));
+        renderedTipFrame = mRemoteHookshotPreviousTipFrame +
+            (mRemoteHookshotTipFrame - mRemoteHookshotPreviousTipFrame) * alpha;
+        renderedSubTipFrame = mRemoteHookshotPreviousSubTipFrame +
+            (mRemoteHookshotSubTipFrame - mRemoteHookshotPreviousSubTipFrame) * alpha;
     }
     if (mRemoteHookshotTopLinkAnchored) renderedTop = mRemoteHookshotRoot;
     if (mRemoteHookshotSubTopLinkAnchored) renderedSubTop = mRemoteHookshotSubRoot;
@@ -5034,7 +5067,7 @@ void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
     mpHookTipModel->setBaseTRMtx(mDoMtx_stack_c::get());
     if (mHookshotTipBckInitialized) {
         mpHookshotTipBck->entry(mpHookTipModel->getModelData(),
-                                mRemoteHookshotTipFrame);
+                                renderedTipFrame);
     }
     mpHookTipModel->calc();
     if (i_presentation) overrideRemoteModelMatrices(mpHookTipModel);
@@ -5046,7 +5079,7 @@ void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
         mpHookSubTipModel->setBaseTRMtx(mDoMtx_stack_c::get());
         if (mHookshotTipBckInitialized) {
             mpHookshotTipBck->entry(mpHookSubTipModel->getModelData(),
-                                    mRemoteHookshotSubTipFrame);
+                                    renderedSubTipFrame);
         }
         mpHookSubTipModel->calc();
         if (i_presentation) overrideRemoteModelMatrices(mpHookSubTipModel);
@@ -5573,7 +5606,8 @@ void daRemoteLink_c::setRemoteIronBallVisualState(
 }
 
 void daRemoteLink_c::setRemoteHookshotVisualState(
-    bool i_valid, bool i_left, bool i_topLinkAnchored,
+    bool i_valid, bool i_left, s16 i_armAimX, s16 i_armAimY,
+    bool i_topLinkAnchored,
     bool i_subTopLinkAnchored, const cXyz& i_top, const csXyz& i_topAngle,
     const cXyz& i_subTop, const csXyz& i_subTopAngle, s16 i_stopTime,
     f32 i_itemFrame, f32 i_tipFrame, f32 i_subTipFrame) {
@@ -5599,15 +5633,21 @@ void daRemoteLink_c::setRemoteHookshotVisualState(
                 mRemoteHookshotRenderedSubTop : mRemoteHookshotSubTop;
         mRemoteHookshotPreviousTopAngle = mRemoteHookshotTopAngle;
         mRemoteHookshotPreviousSubTopAngle = mRemoteHookshotSubTopAngle;
+        mRemoteHookshotPreviousTipFrame = mRemoteHookshotTipFrame;
+        mRemoteHookshotPreviousSubTipFrame = mRemoteHookshotSubTipFrame;
         mRemoteHookshotPreviousValid = true;
     } else {
         mRemoteHookshotPreviousTop = i_top;
         mRemoteHookshotPreviousSubTop = i_subTop;
         mRemoteHookshotPreviousTopAngle = i_topAngle;
         mRemoteHookshotPreviousSubTopAngle = i_subTopAngle;
+        mRemoteHookshotPreviousTipFrame = i_tipFrame;
+        mRemoteHookshotPreviousSubTipFrame = i_subTipFrame;
         mRemoteHookshotPreviousValid = false;
     }
     mRemoteHookshotLeft = i_left;
+    mRemoteHookshotArmAimX = i_armAimX;
+    mRemoteHookshotArmAimY = i_armAimY;
     mRemoteHookshotTopLinkAnchored = i_topLinkAnchored;
     mRemoteHookshotSubTopLinkAnchored = i_subTopLinkAnchored;
     mRemoteHookshotTop = i_top;

@@ -159,7 +159,8 @@ int main() {
     json hookshot = pose_message(6, "semantic_gameplay");
     hookshot["state"].update({
         {"hookshot_visual", {
-            {"left", false}, {"top_link_anchored", true},
+            {"left", false}, {"arm_aim_x", 1234}, {"arm_aim_y", -2345},
+            {"top_link_anchored", true},
             {"sub_top_link_anchored", true}, {"top", {11.0f, 22.0f, 33.0f}},
             {"top_angle", {123, -456, 789}}, {"sub_top", {44.0f, 55.0f, 66.0f}},
             {"sub_top_angle", {-321, 654, -987}}, {"stop_time", 7},
@@ -173,6 +174,8 @@ int main() {
     PeerPoseSnapshot hookshotPose;
     if (!decode_and_enforce(hookshot, &ironBallPose, hookshotPose, error) ||
         !hookshotPose.hookshotVisualValid || hookshotPose.hookshotLeft ||
+        hookshotPose.hookshotArmAimX != 1234 ||
+        hookshotPose.hookshotArmAimY != -2345 ||
         !hookshotPose.hookshotTopLinkAnchored ||
         !hookshotPose.hookshotSubTopLinkAnchored ||
         hookshotPose.hookshotTopX != 11.0f || hookshotPose.hookshotTopY != 22.0f ||

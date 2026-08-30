@@ -267,6 +267,8 @@ struct PeerPoseSnapshot {
     float ironBallChainEndOffsetZ = 0.0f;
     bool hookshotVisualValid = false;
     bool hookshotLeft = true;
+    int hookshotArmAimX = 0;
+    int hookshotArmAimY = 0;
     bool hookshotTopLinkAnchored = false;
     bool hookshotSubTopLinkAnchored = false;
     float hookshotTopX = 0.0f;

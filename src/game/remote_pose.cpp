@@ -943,6 +943,8 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
             pose.hookshotSubTopAngleY = subTopAngle.at(1).get<int>();
             pose.hookshotSubTopAngleZ = subTopAngle.at(2).get<int>();
             pose.hookshotLeft = hookshot.value("left", true);
+            pose.hookshotArmAimX = hookshot.value("arm_aim_x", 0);
+            pose.hookshotArmAimY = hookshot.value("arm_aim_y", 0);
             pose.hookshotTopLinkAnchored =
                 hookshot.value("top_link_anchored", false);
             pose.hookshotSubTopLinkAnchored =
@@ -960,6 +962,10 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
                 !std::isfinite(pose.hookshotItemFrame) ||
                 !std::isfinite(pose.hookshotTipFrame) ||
                 !std::isfinite(pose.hookshotSubTipFrame) ||
+                pose.hookshotArmAimX < -0x8000 ||
+                pose.hookshotArmAimX > 0x7FFF ||
+                pose.hookshotArmAimY < -0x8000 ||
+                pose.hookshotArmAimY > 0x7FFF ||
                 pose.hookshotStopTime < 0 || pose.hookshotStopTime > 0x7FFF) {
                 error = "pose contains invalid hookshot visual values";
                 return false;

@@ -74,6 +74,7 @@ public:
                                       bool i_chainEndOffsetValid,
                                       const cXyz& i_chainEndOffset);
     void setRemoteHookshotVisualState(bool i_valid, bool i_left,
+                                      s16 i_armAimX, s16 i_armAimY,
                                       bool i_topLinkAnchored,
                                       bool i_subTopLinkAnchored,
                                       const cXyz& i_top, const csXyz& i_topAngle,
@@ -552,6 +553,8 @@ private:
     cXyz mRemoteIronBallHandRoot;
     bool mRemoteHookshotVisualValid;
     bool mRemoteHookshotLeft;
+    s16 mRemoteHookshotArmAimX;
+    s16 mRemoteHookshotArmAimY;
     bool mRemoteHookshotTopLinkAnchored;
     bool mRemoteHookshotSubTopLinkAnchored;
     cXyz mRemoteHookshotTop;
@@ -565,7 +568,9 @@ private:
     bool mRemoteHookshotPreviousValid;
     s16 mRemoteHookshotStopTime;
     f32 mRemoteHookshotItemFrame;
+    f32 mRemoteHookshotPreviousTipFrame;
     f32 mRemoteHookshotTipFrame;
+    f32 mRemoteHookshotPreviousSubTipFrame;
     f32 mRemoteHookshotSubTipFrame;
     cXyz mRemoteHookshotRenderedTop;
     cXyz mRemoteHookshotRenderedSubTop;

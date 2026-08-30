@@ -1297,7 +1297,10 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
             dummy.hookshotPresentationValid) {
             actor->setRemoteHookshotVisualState(
-                true, dummy.hookshotLeft, dummy.hookshotTopLinkAnchored,
+                true, dummy.hookshotLeft,
+                static_cast<s16>(pose.hookshotArmAimX),
+                static_cast<s16>(pose.hookshotArmAimY),
+                dummy.hookshotTopLinkAnchored,
                 dummy.hookshotSubTopLinkAnchored, dummy.hookshotPresentedTop,
                 dummy.hookshotPresentedTopAngle,
                 dummy.hookshotPresentedSubTop,
@@ -1307,7 +1310,7 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                 pose.hookshotSubTipFrame);
         } else {
             actor->setRemoteHookshotVisualState(
-                false, true, false, false, cXyz::Zero, csXyz::Zero, cXyz::Zero,
+                false, true, 0, 0, false, false, cXyz::Zero, csXyz::Zero, cXyz::Zero,
                 csXyz::Zero, 0, 0.0f, 0.0f, 0.0f);
         }
         if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
