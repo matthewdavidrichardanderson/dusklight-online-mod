@@ -2577,65 +2577,15 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         const net::udp::PacketType activePoseType = semanticRenderingExperimentEnabled ?
             net::udp::PacketType::SemanticPoseMsgpack :
             net::udp::PacketType::PoseMsgpack;
-        if (semanticRenderingExperimentEnabled) {
-            // Semantic animation/body state is sampled rather than fully matrix-driven.
-            // Dropping it to every other simulation tick makes root motion remain smooth
-            // while animation, IK and body corrections visibly step at 15 Hz. Performance
-            // Mode's smaller type-7 packets must therefore remain at the full tick rate,
-            // even when a distant relay produces high ACK lag.
-            visualPoseSendInterval_ = 1;
-            visualPosePressureTicks_ = 0;
-            visualPoseHealthyTicks_ = 0;
-        } else {
-            bool hasPoseAck = false;
-            uint32_t maxPoseAckLag = 0;
-            bool lossStressed = false;
-            for (const auto& [key, sequence] : latestAckSequence_) {
-                if (!key.ends_with(":" +
-                        std::to_string(static_cast<int>(activePoseType)))) continue;
-                hasPoseAck = true;
-                maxPoseAckLag = std::max(maxPoseAckLag,
-                    localPoseSequence_ > sequence ? localPoseSequence_ - sequence : 0);
-                const auto stress = ackStressUntilSequence_.find(key);
-                lossStressed = lossStressed ||
-                    (stress != ackStressUntilSequence_.end() &&
-                     localPoseSequence_ <= stress->second);
-            }
-            if ((hasPoseAck && maxPoseAckLag >= 12) || lossStressed) {
-                ++visualPosePressureTicks_;
-                visualPoseHealthyTicks_ = 0;
-            } else if (hasPoseAck && maxPoseAckLag <= 10) {
-                ++visualPoseHealthyTicks_;
-                visualPosePressureTicks_ = 0;
-            } else {
-                visualPosePressureTicks_ = 0;
-                visualPoseHealthyTicks_ = 0;
-            }
-            if (visualPoseSendInterval_ == 1 && visualPosePressureTicks_ >= 45) {
-                visualPoseSendInterval_ = 2;
-                visualPosePressureTicks_ = 0;
-            } else if (visualPoseSendInterval_ == 2 && visualPoseHealthyTicks_ >= 360) {
-                visualPoseSendInterval_ = 1;
-                visualPoseHealthyTicks_ = 0;
-            }
-        }
-        fopAc_ac_c* player = dComIfGp_getPlayer(0);
-        const auto* link = player != nullptr && fopAcM_GetName(player) == fpcNm_ALINK_e ?
-                               static_cast<daAlink_c*>(player) : nullptr;
-        const bool transforming = link != nullptr &&
-            (link->mProcID == daAlink_c::PROC_METAMORPHOSE ||
-             link->mProcID == daAlink_c::PROC_METAMORPHOSE_ONLY);
-        const bool sendVisualThisTick = transforming || visualPoseSendInterval_ <= 1 ||
-            (++visualPoseSendTick_ % visualPoseSendInterval_) == 0;
-        if (!sendVisualThisTick) {
-            (void)drain_local_active_audio_events();
-        } else {
-            nlohmann::json poseMessage;
-            LocalPoseDiagnostics poseDiagnostics;
-            const uint32_t nextSequence = localPoseSequence_ + 1;
-            if (build_local_pose(nextSequence, stage_ready() && !manualTransitionActive_,
-                                 semanticRenderingExperimentEnabled, poseMessage,
-                                 &poseDiagnostics)) {
+        // Both visual representations are deliberately sampled every game tick.
+        // Performance Mode is the bandwidth-efficient default; matrix mode is the
+        // high-bandwidth accuracy/reference mode and must not silently degrade to 15 Hz.
+        nlohmann::json poseMessage;
+        LocalPoseDiagnostics poseDiagnostics;
+        const uint32_t nextSequence = localPoseSequence_ + 1;
+        if (build_local_pose(nextSequence, stage_ready() && !manualTransitionActive_,
+                             semanticRenderingExperimentEnabled, poseMessage,
+                             &poseDiagnostics)) {
                 if (transport_.send_visual(poseMessage, activePoseType)) {
                     localPoseSequence_ = nextSequence;
                     const net::VisualSendStats wireStats =
@@ -2741,18 +2691,14 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                  << " delta_samples=" << sVisualWireTrace.deltaSamples
                                  << " full_samples=" << sVisualWireTrace.fullSamples
                                  << " samples=" << sVisualWireTrace.samples
-                                 << " send_interval=" << visualPoseSendInterval_;
+                                 << " send_interval=1";
                             dusklight_online::log_info(line.str());
                         }
-                    }
                 }
             }
         }
     } else {
         dusk::multiplayer::destroy_all_remote_link_dummies();
-        visualPoseSendInterval_ = 1;
-        visualPosePressureTicks_ = 0;
-        visualPoseHealthyTicks_ = 0;
     }
     if (!status.welcomed) {
         progressionTicks_ = 0;
@@ -3113,19 +3059,12 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
     if (event.kind != net::EventKind::UdpAck || event.detail != localSender) {
         return ApplyResult::IgnoredByPolicy;
     }
-    // Preserve local-sender ACK sequence/stress state for pacing and deltas.
+    // Preserve local-sender ACK sequence state for acknowledged snapshot deltas.
     std::ostringstream key;
     key << event.peerId << ':' << static_cast<int>(event.udpType);
     uint32_t& last = latestAckSequence_[key.str()];
     if (event.udpSequence <= last) return ApplyResult::IgnoredByPolicy;
     last = event.udpSequence;
-    constexpr uint8_t kRateStress = net::udp::AckSequenceGap |
-                                    net::udp::AckReassemblyEvicted;
-    if ((event.udpType == net::udp::PacketType::PoseMsgpack ||
-         event.udpType == net::udp::PacketType::SemanticPoseMsgpack) &&
-        (event.udpStressFlags & kRateStress) != 0) {
-        ackStressUntilSequence_[key.str()] = event.udpSequence + 90;
-    }
     return ApplyResult::Applied;
 }
 
@@ -3215,7 +3154,6 @@ void GameAdapter::peer_left(std::string_view peerId) {
         }
     };
     erasePrefixedMap(latestAckSequence_);
-    erasePrefixedMap(ackStressUntilSequence_);
     erasePrefixedMap(permanentPickupSequence_);
     erasePrefixedMap(appliedTearEvents_);
     pendingSyncReplies_.erase(
@@ -3246,14 +3184,9 @@ void GameAdapter::reset_session() {
     peerPoses_.clear();
     clear_remote_matrix_history();
     latestAckSequence_.clear();
-    ackStressUntilSequence_.clear();
     pvpRemoteHitLastSequence_.clear();
     pvpLocalHitContactsThisUpdate_.clear();
     localPvpHitSequence_ = 0;
-    visualPoseSendTick_ = 0;
-    visualPoseSendInterval_ = 1;
-    visualPosePressureTicks_ = 0;
-    visualPoseHealthyTicks_ = 0;
     reset_visual_overlays();
     clear_replaced_save_progression_state();
     deferredSwitches_.clear();

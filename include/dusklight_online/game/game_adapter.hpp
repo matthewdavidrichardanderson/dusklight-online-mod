@@ -82,7 +82,6 @@ private:
     std::deque<RoutedMessage> deferredFaronInbound_;
     std::map<std::string, dusk::multiplayer::PeerPoseSnapshot> peerPoses_;
     std::map<std::string, uint32_t> latestAckSequence_;
-    std::map<std::string, uint32_t> ackStressUntilSequence_;
     std::map<std::string, uint32_t> pvpRemoteHitLastSequence_;
     // Link exposes several sword attack objects during one swing. Remember
     // contacts already reported during this game update so those colliders
@@ -103,10 +102,6 @@ private:
     uint32_t collectibleRepairTicks_ = 0;
     uint32_t localPoseSequence_ = 0;
     uint32_t localPvpHitSequence_ = 0;
-    uint32_t visualPoseSendTick_ = 0;
-    uint32_t visualPoseSendInterval_ = 1;
-    uint32_t visualPosePressureTicks_ = 0;
-    uint32_t visualPoseHealthyTicks_ = 0;
     bool applyingRemote_ = false;
     bool syncFlagsEnabled_ = true;
     bool syncWorldEnabled_ = false;
