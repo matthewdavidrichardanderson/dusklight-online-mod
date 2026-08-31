@@ -791,6 +791,11 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
                          boomerangMatrix[2][3]}},
                 {"angle", {int(boomerangAngle.x), int(boomerangAngle.y),
                            int(boomerangAngle.z)}},
+                // ef_shippu follows the actor's flight-facing transform. The
+                // rendered boomerang matrix also contains its rapid mesh spin.
+                {"wind_angle", {int(itemActor->shape_angle.x),
+                                int(itemActor->shape_angle.y),
+                                int(itemActor->shape_angle.z)}},
             });
         }
         state["boomerang_visual"] = std::move(boomerang);

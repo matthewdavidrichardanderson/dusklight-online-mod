@@ -249,6 +249,9 @@ struct PeerPoseSnapshot {
     int boomerangAngleX = 0;
     int boomerangAngleY = 0;
     int boomerangAngleZ = 0;
+    int boomerangWindAngleX = 0;
+    int boomerangWindAngleY = 0;
+    int boomerangWindAngleZ = 0;
     int itemActorBombExTime = -1;
     int itemActorBombFlash = -1;
     bool ironBallVisualValid = false;

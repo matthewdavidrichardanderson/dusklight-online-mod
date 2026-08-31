@@ -139,6 +139,7 @@ struct RemoteLinkActorDummy {
     bool boomerangLinkAnchored = false;
     cXyz boomerangPresentedPos = cXyz::Zero;
     csXyz boomerangPresentedAngle = csXyz::Zero;
+    csXyz boomerangPresentedWindAngle = csXyz::Zero;
     bool copyRodPresentationValid = false;
     bool copyRodTopUse = false;
     bool bowPresentationValid = false;
@@ -595,6 +596,10 @@ void update_boomerang_presentation(RemoteLinkActorDummy& dummy,
         static_cast<s16>(pose.boomerangAngleX),
         static_cast<s16>(pose.boomerangAngleY + yawDelta),
         static_cast<s16>(pose.boomerangAngleZ));
+    dummy.boomerangPresentedWindAngle.set(
+        static_cast<s16>(pose.boomerangWindAngleX),
+        static_cast<s16>(pose.boomerangWindAngleY + yawDelta),
+        static_cast<s16>(pose.boomerangWindAngleZ));
 }
 
 void update_lantern_presentation(RemoteLinkActorDummy& dummy,
@@ -1548,10 +1553,10 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             dummy.boomerangPresentationValid) {
             actor->setRemoteBoomerangVisualState(
                 true, dummy.boomerangLinkAnchored, dummy.boomerangPresentedPos,
-                dummy.boomerangPresentedAngle);
+                dummy.boomerangPresentedAngle, dummy.boomerangPresentedWindAngle);
         } else {
             actor->setRemoteBoomerangVisualState(false, false, cXyz::Zero,
-                                                  csXyz::Zero);
+                                                  csXyz::Zero, csXyz::Zero);
         }
         actor->setRemoteCopyRodVisualState(
             presentationMode == ReceiverPresentationMode::SemanticGameplay &&
