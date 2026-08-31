@@ -278,6 +278,8 @@ private:
     void updateRemoteCopyRodVisual(bool i_presentation);
     void updateRemoteBowVisual(bool i_presentation);
     void updateRemoteLanternVisual(bool i_presentation);
+    void updateRemoteLanternFlame(bool i_presentation, const cXyz& i_flamePos);
+    void stopRemoteLanternFlame(bool i_release);
     void updateRemoteBottleVisual(bool i_presentation);
     void captureRemoteModelMatrixSnapshot(
         J3DModel* i_model, const dusk::multiplayer::RemoteModelMatrixSnapshot& i_source,
@@ -629,6 +631,8 @@ private:
     bool mRemoteLanternPreviousValid;
     cXyz mRemoteLanternRenderedPos;
     csXyz mRemoteLanternRenderedBaseAngle;
+    u32 mRemoteLanternFlameEmitterId;
+    cXyz mRemoteLanternFlamePos;
     bool mRemoteBottleVisualValid;
     bool mRemoteBottleOilRightAttached;
     bool mRemoteBottleJointRightAttached;

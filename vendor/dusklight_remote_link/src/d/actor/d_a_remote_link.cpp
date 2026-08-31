@@ -252,16 +252,16 @@ static void initRemoteLinkTevCustomColor(dKy_tevstr_c* i_tevStr) {
     i_tevStr->TevKColor.b = 0;
 }
 
-class RemoteTransformDepthParticleCallback : public JPAParticleCallBack {
+class RemoteDepthParticleCallback : public JPAParticleCallBack {
 public:
-    ~RemoteTransformDepthParticleCallback() override {}
+    ~RemoteDepthParticleCallback() override {}
 
     void draw(JPABaseEmitter*, JPABaseParticle*) override {
         GXSetZMode(GX_ENABLE, GX_LEQUAL, GX_DISABLE);
     }
 };
 
-static RemoteTransformDepthParticleCallback l_remoteTransformDepthParticleCallback;
+static RemoteDepthParticleCallback l_remoteDepthParticleCallback;
 
 static void enableRemoteTransformModelDepthTest(J3DModel* i_model) {
     if (i_model == NULL || i_model->getModelData() == NULL) {
@@ -983,6 +983,8 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteLanternPreviousValid(false),
       mRemoteLanternRenderedPos(cXyz::Zero),
       mRemoteLanternRenderedBaseAngle(0, 0, 0),
+      mRemoteLanternFlameEmitterId(0),
+      mRemoteLanternFlamePos(cXyz::Zero),
       mRemoteBottleVisualValid(false),
       mRemoteBottleOilRightAttached(false),
       mRemoteBottleJointRightAttached(false),
@@ -3803,6 +3805,7 @@ void daRemoteLink_c::calcModels() {
 
 int daRemoteLink_c::Execute() {
     if (isRemoteLinkSceneUnsafe()) {
+        stopRemoteLanternFlame(false);
         updatePvpAttentionTarget();
         mPvpMidnaBindActive = false;
         stopRemoteActiveSounds();
@@ -3810,6 +3813,7 @@ int daRemoteLink_c::Execute() {
     }
 
     if (!mRemotePresentationVisible) {
+        stopRemoteLanternFlame(false);
         if (mRemoteTransformBridgeVisible) {
             updateRemoteTransformParticles();
         }
@@ -5482,6 +5486,7 @@ void daRemoteLink_c::updateRemoteLanternVisual(bool i_presentation) {
         static const cXyz flameOffset(0.0f, -17.0f, 0.0f);
         cXyz flamePos;
         mDoMtx_stack_c::multVec(&flameOffset, &flamePos);
+        updateRemoteLanternFlame(i_presentation, flamePos);
         mDoMtx_stack_c::transS(flamePos);
         mpKanteraGlowModel->setBaseTRMtx(mDoMtx_stack_c::get());
         mpKanteraGlowModel->calc();
@@ -5492,7 +5497,66 @@ void daRemoteLink_c::updateRemoteLanternVisual(bool i_presentation) {
     }
     mKanteraMatrixValid = mRemoteKanteraDraw;
     mKanteraGlowMatrixValid = mRemoteKanteraDraw && mRemoteLanternLit;
-    if (!mKanteraGlowMatrixValid) resetKanteraGlowOcclusion();
+    if (!mKanteraGlowMatrixValid) {
+        resetKanteraGlowOcclusion();
+        stopRemoteLanternFlame(false);
+    }
+}
+
+void daRemoteLink_c::updateRemoteLanternFlame(bool i_presentation,
+                                              const cXyz& i_flamePos) {
+    mRemoteLanternFlamePos = i_flamePos;
+    if (!mRemoteLanternVisualValid || !mRemoteKanteraDraw || !mRemoteLanternLit) {
+        stopRemoteLanternFlame(false);
+        return;
+    }
+
+    JPABaseEmitter* emitter =
+        dComIfGp_particle_getEmitter(mRemoteLanternFlameEmitterId);
+    if (i_presentation) {
+        if (emitter != NULL) {
+            emitter->setGlobalTranslation(i_flamePos.x, i_flamePos.y, i_flamePos.z);
+            emitter->playDrawParticle();
+        }
+        return;
+    }
+
+    g_env_light.settingTevStruct(10, &mRemoteLanternFlamePos, &tevStr);
+    initRemoteLinkTevCustomColor(&tevStr);
+    mRemoteLanternFlameEmitterId = dComIfGp_particle_set(
+        mRemoteLanternFlameEmitterId, ID_ZI_J_KANTERA_FIRE,
+        &mRemoteLanternFlamePos,
+        &tevStr, &shape_angle, NULL, 0xFF, NULL, static_cast<s8>(-1),
+        NULL, NULL, NULL);
+    dComIfGp_particle_levelEmitterOnEventMove(mRemoteLanternFlameEmitterId);
+
+    emitter = dComIfGp_particle_getEmitter(mRemoteLanternFlameEmitterId);
+    if (emitter == NULL) {
+        return;
+    }
+    if (emitter->pRes != NULL && emitter->pRes->getBsp() != NULL &&
+        !emitter->pRes->getBsp()->getZEnable() &&
+        emitter->getParticleCallBackPtr() == NULL)
+    {
+        emitter->setParticleCallBackPtr(&l_remoteDepthParticleCallback);
+    }
+    emitter->playDrawParticle();
+}
+
+void daRemoteLink_c::stopRemoteLanternFlame(bool i_release) {
+    JPABaseEmitter* emitter =
+        dComIfGp_particle_getEmitter(mRemoteLanternFlameEmitterId);
+    if (emitter != NULL) {
+        emitter->stopDrawParticle();
+        if (i_release) {
+            emitter->stopCreateParticle();
+            emitter->becomeInvalidEmitter();
+            emitter->quitImmortalEmitter();
+        }
+    }
+    if (i_release) {
+        mRemoteLanternFlameEmitterId = 0;
+    }
 }
 
 void daRemoteLink_c::updateRemoteBottleVisual(bool i_presentation) {
@@ -5840,6 +5904,7 @@ void daRemoteLink_c::setRemoteLanternVisualState(
         i_valid && mVisualState.form != FORM_WOLF && mRemoteKanteraDraw;
     if (!mRemoteLanternVisualValid) {
         mRemoteLanternPreviousValid = false;
+        stopRemoteLanternFlame(false);
         if (!mHasRemoteMatrices) {
             mKanteraMatrixValid = false;
             mKanteraGlowMatrixValid = false;
@@ -6054,7 +6119,7 @@ u32 daRemoteLink_c::setRemoteTransformEmitter(int i_slot, u16 i_effectId,
         !emitter->pRes->getBsp()->getZEnable() &&
         emitter->getParticleCallBackPtr() == NULL)
     {
-        emitter->setParticleCallBackPtr(&l_remoteTransformDepthParticleCallback);
+        emitter->setParticleCallBackPtr(&l_remoteDepthParticleCallback);
     }
     return emitterId;
 }
@@ -7159,6 +7224,7 @@ int daRemoteLink_c::Delete() {
         mpHeldItemModel != NULL ? (void*)mpHeldItemModel->getModelData() : NULL,
         mpItemActorModel != NULL ? (void*)mpItemActorModel->getModelData() : NULL,
         (void*)mpArcHeap);
+    stopRemoteLanternFlame(true);
     stopRemoteBombActor(false);
     stopRemoteActiveSounds();
     for (u32 i = 0; i < ARRAY_SIZE(mBlendBckCache); ++i) {
