@@ -850,9 +850,7 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
             if (!pose.boomerangLinkAnchored) {
                 const json pos = boomerang.value("pos", json::array());
                 const json angle = boomerang.value("angle", json::array());
-                const json windAngle = boomerang.value("wind_angle", angle);
-                if (pos.size() != 3 || angle.size() != 3 ||
-                    windAngle.size() != 3) {
+                if (pos.size() != 3 || angle.size() != 3) {
                     error = "pose contains invalid boomerang visual state";
                     return false;
                 }
@@ -862,9 +860,6 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
                 pose.boomerangAngleX = angle.at(0).get<int>();
                 pose.boomerangAngleY = angle.at(1).get<int>();
                 pose.boomerangAngleZ = angle.at(2).get<int>();
-                pose.boomerangWindAngleX = windAngle.at(0).get<int>();
-                pose.boomerangWindAngleY = windAngle.at(1).get<int>();
-                pose.boomerangWindAngleZ = windAngle.at(2).get<int>();
                 if (!std::isfinite(pose.boomerangX) ||
                     !std::isfinite(pose.boomerangY) ||
                     !std::isfinite(pose.boomerangZ)) {

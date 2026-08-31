@@ -201,7 +201,6 @@ int main() {
         {"boomerang_visual", {
             {"link_anchored", false}, {"pos", {7.0f, 8.0f, 9.0f}},
             {"angle", {111, -222, 333}},
-            {"wind_angle", {-444, 555, -666}},
         }},
         {"link_matrices", {{"item_actor", identity_model()}}},
     });
@@ -211,9 +210,6 @@ int main() {
         boomerangPose.boomerangX != 7.0f || boomerangPose.boomerangY != 8.0f ||
         boomerangPose.boomerangZ != 9.0f || boomerangPose.boomerangAngleX != 111 ||
         boomerangPose.boomerangAngleY != -222 || boomerangPose.boomerangAngleZ != 333 ||
-        boomerangPose.boomerangWindAngleX != -444 ||
-        boomerangPose.boomerangWindAngleY != 555 ||
-        boomerangPose.boomerangWindAngleZ != -666 ||
         boomerangPose.linkMatrices.itemActor.valid) {
         std::cerr << "boomerang semantic visual state was not enforced: " << error << '\n';
         return 1;

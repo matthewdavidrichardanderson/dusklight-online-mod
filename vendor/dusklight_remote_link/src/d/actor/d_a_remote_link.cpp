@@ -329,15 +329,6 @@ static int daRemoteLink_bodyModelCallBack(J3DJoint* i_joint, int i_after) {
     return 1;
 }
 
-static int daRemoteLink_boomerangWindModelCallBack(J3DJoint* i_joint,
-                                                    int i_after) {
-    if (i_after != 0 || i_joint == NULL) return 1;
-    daRemoteLink_c* link =
-        reinterpret_cast<daRemoteLink_c*>(j3dSys.getModel()->getUserArea());
-    if (link != NULL) link->boomerangWindModelCallBack();
-    return 1;
-}
-
 static bool isRemoteLinkMotionAudio(const dusk::multiplayer::RemoteAudioEvent& i_event) {
     switch (i_event.sourceKind) {
     case dusk::multiplayer::REMOTE_AUDIO_SOURCE_LINK_SOUND:
@@ -715,12 +706,10 @@ daRemoteLink_c::daRemoteLink_c()
       mpKanteraModel(NULL),
       mpKanteraGlowModel(NULL),
       mpItemActorModel(NULL),
-      mpBoomerangWindModel(NULL),
       mpRideActorModel(NULL),
       mpTransformBridgeModel(NULL),
       mpTransformEffectModel(NULL),
       mpSpinnerBck(NULL),
-      mpBoomerangWindBck(NULL),
       mpHookshotItemBck(NULL),
       mpHookshotTipBck(NULL),
       mpBowBck(NULL),
@@ -741,7 +730,6 @@ daRemoteLink_c::daRemoteLink_c()
       mpBottleBtkSwing(NULL),
       mpBottleBtkAction(NULL),
       mpBottleBtkFinish(NULL),
-      mpBoomerangWindBtk(NULL),
       mAramResourceCache(),
       mpMagicArmorBodyBrk(NULL),
       mpMagicArmorHeadBrk(NULL),
@@ -972,13 +960,6 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteBoomerangPreviousVisualValid(false),
       mRemoteBoomerangRenderedPos(cXyz::Zero),
       mRemoteBoomerangRenderedAngle(0, 0, 0),
-      mRemoteBoomerangWindAngle(0, 0, 0),
-      mRemoteBoomerangPreviousWindAngle(0, 0, 0),
-      mRemoteBoomerangRenderedWindAngle(0, 0, 0),
-      mBoomerangWindBckInitialized(false),
-      mRemoteBoomerangWindFrame(0.0f),
-      mRemoteBoomerangTrailEmitterIds{0, 0},
-      mRemoteBoomerangLeafEmitterId(0),
       mRemoteCopyRodVisualValid(false),
       mRemoteCopyRodTopUse(false),
       mRemoteBowVisualValid(false),
@@ -2231,10 +2212,6 @@ void daRemoteLink_c::setupLinkedItemModels() {
         }
     }
 
-    if (mRemoteItemActorKind == 1) {
-        setupRemoteBoomerangWindModel();
-    }
-
     if (mLoadedRideActorKind != mRemoteRideActorKind) {
         mpRideActorModel = NULL;
         mLoadedRideActorKind = -1;
@@ -2272,46 +2249,6 @@ void daRemoteLink_c::setupLinkedItemModels() {
                      mRemoteEquipItem, mLoadedItemActorKind, mLoadedRideActorKind,
                      (void*)mpItemActorModel, (void*)mpRideActorModel);
     }
-}
-
-void daRemoteLink_c::setupRemoteBoomerangWindModel() {
-    if (mpBoomerangWindModel != NULL) return;
-
-    OwnedArchiveSlot& alinkArc = mEquipmentArchives[l_eqArcAlink];
-    J3DModelData* modelData = static_cast<J3DModelData*>(
-        getArchiveObjectRes(alinkArc, dRes_ID_ALINK_BMD_EF_SHIPPU_e));
-    mpBoomerangWindModel = initModel(modelData, 0, 0x200);
-    if (mpBoomerangWindModel == NULL || modelData == NULL) {
-        DuskLog.warn("RemoteLink: boomerang wind model load failed");
-        return;
-    }
-
-    J3DAnmTransform* bck = static_cast<J3DAnmTransform*>(
-        getArchiveObjectRes(alinkArc, dRes_ID_ALINK_BCK_EF_SHIPPU_e));
-    if (mpBoomerangWindBck == NULL) {
-        mpBoomerangWindBck = JKR_NEW mDoExt_bckAnm();
-    }
-    mBoomerangWindBckInitialized =
-        mpBoomerangWindBck != NULL && bck != NULL &&
-        mpBoomerangWindBck->init(bck, FALSE, J3DFrameCtrl::EMode_LOOP,
-                                 1.0f, 0, -1, false);
-
-    mpBoomerangWindBtk = static_cast<J3DAnmTextureSRTKey*>(
-        getArchiveObjectRes(alinkArc, dRes_ID_ALINK_BTK_EF_SHIPPU_e));
-    if (mpBoomerangWindBtk != NULL) {
-        mpBoomerangWindBtk->setFrame(0.0f);
-        mpBoomerangWindBtk->searchUpdateMaterialID(modelData);
-        modelData->entryTexMtxAnimator(mpBoomerangWindBtk);
-    }
-
-    if (modelData->getJointNum() > 4) {
-        modelData->getJointNodePointer(4)->setCallBack(
-            daRemoteLink_boomerangWindModelCallBack);
-    }
-    mpBoomerangWindModel->setUserArea(reinterpret_cast<uintptr_t>(this));
-    DuskLog.info("RemoteLink: boomerang wind loaded model={} bck={} btk={}",
-                 (void*)mpBoomerangWindModel, mBoomerangWindBckInitialized,
-                 (void*)mpBoomerangWindBtk);
 }
 
 J3DAnmTransform* daRemoteLink_c::loadMotionBck(u16 i_resId, u8** o_buffer) {
@@ -3869,7 +3806,6 @@ void daRemoteLink_c::calcModels() {
 int daRemoteLink_c::Execute() {
     if (isRemoteLinkSceneUnsafe()) {
         stopRemoteLanternFlame(false);
-        stopRemoteBoomerangWindParticles(false);
         updatePvpAttentionTarget();
         mPvpMidnaBindActive = false;
         stopRemoteActiveSounds();
@@ -3878,7 +3814,6 @@ int daRemoteLink_c::Execute() {
 
     if (!mRemotePresentationVisible) {
         stopRemoteLanternFlame(false);
-        stopRemoteBoomerangWindParticles(false);
         if (mRemoteTransformBridgeVisible) {
             updateRemoteTransformParticles();
         }
@@ -5371,21 +5306,6 @@ void daRemoteLink_c::updateRemoteBoomerangVisual(bool i_presentation) {
         }
         mRemoteBoomerangRenderedPos = renderedPos;
         mRemoteBoomerangRenderedAngle = renderedAngle;
-        mRemoteBoomerangRenderedWindAngle = mRemoteBoomerangWindAngle;
-        if (i_presentation && mRemoteBoomerangPreviousVisualValid &&
-            dusk::frame_interp::is_enabled()) {
-            const f32 alpha = dusk::frame_interp::get_interpolation_step();
-            const auto interpolateAngle = [alpha](s16 from, s16 to) {
-                return static_cast<s16>(from + static_cast<s16>(to - from) * alpha);
-            };
-            mRemoteBoomerangRenderedWindAngle.set(
-                interpolateAngle(mRemoteBoomerangPreviousWindAngle.x,
-                                 mRemoteBoomerangWindAngle.x),
-                interpolateAngle(mRemoteBoomerangPreviousWindAngle.y,
-                                 mRemoteBoomerangWindAngle.y),
-                interpolateAngle(mRemoteBoomerangPreviousWindAngle.z,
-                                 mRemoteBoomerangWindAngle.z));
-        }
         mDoMtx_stack_c::transS(renderedPos);
         mDoMtx_stack_c::ZXYrotM(renderedAngle);
         mpItemActorModel->setBaseTRMtx(mDoMtx_stack_c::get());
@@ -5393,122 +5313,6 @@ void daRemoteLink_c::updateRemoteBoomerangVisual(bool i_presentation) {
     mpItemActorModel->calc();
     if (i_presentation) overrideRemoteModelMatrices(mpItemActorModel);
     mItemActorMatrixValid = true;
-    updateRemoteBoomerangWindEffect(i_presentation);
-}
-
-void daRemoteLink_c::boomerangWindModelCallBack() {
-    if (mpBoomerangWindModel == NULL) return;
-
-    mDoMtx_stack_c::YrotS(mRemoteBoomerangRenderedWindAngle.y);
-    mDoMtx_stack_c::ZrotM(-mRemoteBoomerangRenderedWindAngle.z);
-    mDoMtx_stack_c::XrotM(-mRemoteBoomerangRenderedWindAngle.x);
-    mDoMtx_stack_c::YrotM(-mRemoteBoomerangRenderedWindAngle.y);
-    mDoMtx_stack_c::concat(J3DSys::mCurrentMtx);
-    mDoMtx_stack_c::get()[0][3] = J3DSys::mCurrentMtx[0][3];
-    mDoMtx_stack_c::get()[1][3] = J3DSys::mCurrentMtx[1][3];
-    mDoMtx_stack_c::get()[2][3] = J3DSys::mCurrentMtx[2][3];
-    cMtx_copy(mDoMtx_stack_c::get(), J3DSys::mCurrentMtx);
-    mpBoomerangWindModel->setAnmMtx(4, mDoMtx_stack_c::get());
-}
-
-void daRemoteLink_c::updateRemoteBoomerangWindEffect(bool i_presentation) {
-    if (!mRemoteBoomerangVisualValid || mRemoteBoomerangLinkAnchored ||
-        mpBoomerangWindModel == NULL) {
-        if (!i_presentation) stopRemoteBoomerangWindParticles(false);
-        return;
-    }
-
-    mDoMtx_stack_c::transS(mRemoteBoomerangRenderedPos);
-    mDoMtx_stack_c::ZXYrotM(mRemoteBoomerangRenderedWindAngle);
-    mpBoomerangWindModel->setBaseTRMtx(mDoMtx_stack_c::get());
-
-    J3DModelData* modelData = mpBoomerangWindModel->getModelData();
-    if (!i_presentation) {
-        if (mpBoomerangWindBtk != NULL) {
-            f32 frame = mpBoomerangWindBtk->getFrame() + 1.0f;
-            if (frame >= mpBoomerangWindBtk->getFrameMax()) {
-                frame -= mpBoomerangWindBtk->getFrameMax();
-            }
-            mpBoomerangWindBtk->setFrame(frame);
-        }
-        if (mBoomerangWindBckInitialized && mpBoomerangWindBck != NULL &&
-            mpBoomerangWindBck->getBckAnm() != NULL) {
-            mRemoteBoomerangWindFrame += 1.0f;
-            const f32 maxFrame = mpBoomerangWindBck->getBckAnm()->getFrameMax();
-            if (mRemoteBoomerangWindFrame >= maxFrame) {
-                mRemoteBoomerangWindFrame -= maxFrame;
-            }
-            mpBoomerangWindBck->entry(modelData, mRemoteBoomerangWindFrame);
-        }
-    } else if (mBoomerangWindBckInitialized && mpBoomerangWindBck != NULL) {
-        mpBoomerangWindBck->entry(modelData, mRemoteBoomerangWindFrame);
-    }
-    mpBoomerangWindModel->calc();
-    if (i_presentation) overrideRemoteModelMatrices(mpBoomerangWindModel);
-
-    if (!i_presentation) {
-        g_env_light.settingTevStruct(10, &mRemoteBoomerangRenderedPos, &tevStr);
-        initRemoteLinkTevCustomColor(&tevStr);
-        static const u16 trailIds[2] = {
-            ID_ZI_J_BOOM_KISEKI_A, ID_ZI_J_BOOM_KISEKI_B,
-        };
-        for (int i = 0; i < 2; ++i) {
-            mRemoteBoomerangTrailEmitterIds[i] = dComIfGp_particle_set(
-                mRemoteBoomerangTrailEmitterIds[i], trailIds[i],
-                &mRemoteBoomerangRenderedPos, &tevStr);
-        }
-        mRemoteBoomerangLeafEmitterId = dComIfGp_particle_set(
-            mRemoteBoomerangLeafEmitterId, ID_ZI_J_SPBOOM_LEAF_A,
-            &mRemoteBoomerangRenderedPos, &tevStr);
-    }
-
-    MtxP boomerangMtx = mpItemActorModel != NULL ?
-                            mpItemActorModel->getBaseTRMtx() : NULL;
-    for (int i = 0; i < 2; ++i) {
-        JPABaseEmitter* emitter =
-            dComIfGp_particle_getEmitter(mRemoteBoomerangTrailEmitterIds[i]);
-        if (emitter != NULL) {
-            if (boomerangMtx != NULL) emitter->setGlobalRTMatrix(boomerangMtx);
-            emitter->playDrawParticle();
-        }
-    }
-    JPABaseEmitter* leafEmitter =
-        dComIfGp_particle_getEmitter(mRemoteBoomerangLeafEmitterId);
-    if (leafEmitter != NULL) {
-        leafEmitter->setGlobalTranslation(mRemoteBoomerangRenderedPos.x,
-                                          mRemoteBoomerangRenderedPos.y,
-                                          mRemoteBoomerangRenderedPos.z);
-        leafEmitter->playDrawParticle();
-    }
-}
-
-void daRemoteLink_c::stopRemoteBoomerangWindParticles(bool i_release) {
-    u32* emitterIds[3] = {
-        &mRemoteBoomerangTrailEmitterIds[0],
-        &mRemoteBoomerangTrailEmitterIds[1],
-        &mRemoteBoomerangLeafEmitterId,
-    };
-    for (int i = 0; i < 3; ++i) {
-        JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(*emitterIds[i]);
-        if (emitter != NULL) {
-            emitter->stopDrawParticle();
-            if (i_release) {
-                emitter->stopCreateParticle();
-                emitter->becomeInvalidEmitter();
-                emitter->quitImmortalEmitter();
-            }
-        }
-        if (i_release) *emitterIds[i] = 0;
-    }
-}
-
-void daRemoteLink_c::drawRemoteBoomerangWindModel() {
-    if (!mRemoteBoomerangVisualValid || mRemoteBoomerangLinkAnchored ||
-        mpBoomerangWindModel == NULL) {
-        return;
-    }
-    g_env_light.setLightTevColorType_MAJI(mpBoomerangWindModel, &tevStr);
-    mDoExt_modelEntryDL(mpBoomerangWindModel);
 }
 
 void daRemoteLink_c::updateRemoteCopyRodVisual(bool i_presentation) {
@@ -6011,7 +5815,7 @@ void daRemoteLink_c::setRemoteHookshotVisualState(
 
 void daRemoteLink_c::setRemoteBoomerangVisualState(
     bool i_valid, bool i_linkAnchored, const cXyz& i_pos,
-    const csXyz& i_angle, const csXyz& i_windAngle) {
+    const csXyz& i_angle) {
     const bool wasValid = mRemoteBoomerangVisualValid;
     const bool wasLinkAnchored = mRemoteBoomerangLinkAnchored;
     mRemoteBoomerangVisualValid =
@@ -6020,36 +5824,27 @@ void daRemoteLink_c::setRemoteBoomerangVisualState(
     if (!mRemoteBoomerangVisualValid) {
         mRemoteBoomerangLinkAnchored = false;
         mRemoteBoomerangPreviousVisualValid = false;
-        stopRemoteBoomerangWindParticles(false);
         if (mRemoteItemActorKind == 1) mItemActorMatrixValid = false;
         return;
     }
     if (wasValid && !wasLinkAnchored && !i_linkAnchored) {
         mRemoteBoomerangPreviousVisualPos = mRemoteBoomerangVisualPos;
         mRemoteBoomerangPreviousVisualAngle = mRemoteBoomerangVisualAngle;
-        mRemoteBoomerangPreviousWindAngle = mRemoteBoomerangWindAngle;
         mRemoteBoomerangPreviousVisualValid = true;
     } else if (wasValid && wasLinkAnchored && !i_linkAnchored) {
         // The first detached sample starts at the final hand-attached
         // presentation transform, exactly as the local actor does.
         mRemoteBoomerangPreviousVisualPos = mRemoteBoomerangRenderedPos;
         mRemoteBoomerangPreviousVisualAngle = mRemoteBoomerangRenderedAngle;
-        mRemoteBoomerangPreviousWindAngle = i_windAngle;
         mRemoteBoomerangPreviousVisualValid = true;
     } else {
         mRemoteBoomerangPreviousVisualPos = i_pos;
         mRemoteBoomerangPreviousVisualAngle = i_angle;
-        mRemoteBoomerangPreviousWindAngle = i_windAngle;
         mRemoteBoomerangPreviousVisualValid = false;
-    }
-    if ((!wasValid || wasLinkAnchored) && !i_linkAnchored) {
-        mRemoteBoomerangWindFrame = 0.0f;
     }
     mRemoteBoomerangLinkAnchored = i_linkAnchored;
     mRemoteBoomerangVisualPos = i_pos;
     mRemoteBoomerangVisualAngle = i_angle;
-    mRemoteBoomerangWindAngle = i_windAngle;
-    if (i_linkAnchored) stopRemoteBoomerangWindParticles(false);
     mItemActorMatrixValid = mpItemActorModel != NULL;
     clearRemoteModelMatrixInterpolation(mItemActorMatrixInterp);
 }
@@ -7370,7 +7165,6 @@ int daRemoteLink_c::Draw() {
     }
     if (mItemActorMatrixValid) {
         drawLinkedItemActorModel();
-        drawRemoteBoomerangWindModel();
     }
     if (mRideActorMatrixValid) {
         drawModel(mpRideActorModel);
@@ -7431,7 +7225,6 @@ int daRemoteLink_c::Delete() {
         mpItemActorModel != NULL ? (void*)mpItemActorModel->getModelData() : NULL,
         (void*)mpArcHeap);
     stopRemoteLanternFlame(true);
-    stopRemoteBoomerangWindParticles(true);
     stopRemoteBombActor(false);
     stopRemoteActiveSounds();
     for (u32 i = 0; i < ARRAY_SIZE(mBlendBckCache); ++i) {

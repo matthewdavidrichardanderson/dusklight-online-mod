@@ -82,8 +82,7 @@ public:
                                       s16 i_stopTime, f32 i_itemFrame,
                                       f32 i_tipFrame, f32 i_subTipFrame);
     void setRemoteBoomerangVisualState(bool i_valid, bool i_linkAnchored,
-                                       const cXyz& i_pos, const csXyz& i_angle,
-                                       const csXyz& i_windAngle);
+                                       const cXyz& i_pos, const csXyz& i_angle);
     void setRemoteCopyRodVisualState(bool i_valid, bool i_topUse);
     void setRemoteBowVisualState(bool i_valid, bool i_grabLeft, u16 i_bck,
                                  f32 i_frame, bool i_arrowVisible,
@@ -128,7 +127,6 @@ public:
                             const std::array<int16_t, 3>& i_fishingArm1Angle,
                             const std::array<int16_t, 3>& i_fishingArm2Angle);
     void applyRemoteBodyMatrixInterpolationForPresentation();
-    void boomerangWindModelCallBack();
     bool getNameLabelPosition(cXyz* o_pos) const;
     void playRemoteSound(const dusk::multiplayer::RemoteAudioEvent& i_event);
     void syncRemoteActiveSounds(const std::vector<dusk::multiplayer::RemoteAudioEvent>& i_events);
@@ -277,10 +275,6 @@ private:
     void updateRemoteIronBallVisual(bool i_presentation);
     void updateRemoteHookshotVisual(bool i_presentation);
     void updateRemoteBoomerangVisual(bool i_presentation);
-    void setupRemoteBoomerangWindModel();
-    void updateRemoteBoomerangWindEffect(bool i_presentation);
-    void stopRemoteBoomerangWindParticles(bool i_release);
-    void drawRemoteBoomerangWindModel();
     void updateRemoteCopyRodVisual(bool i_presentation);
     void updateRemoteBowVisual(bool i_presentation);
     void updateRemoteLanternVisual(bool i_presentation);
@@ -355,12 +349,10 @@ private:
     /* 0x958 */ J3DModel* mpKanteraModel;
     /* 0x95C */ J3DModel* mpKanteraGlowModel;
     /* 0x960 */ J3DModel* mpItemActorModel;
-    J3DModel* mpBoomerangWindModel;
     /* 0x964 */ J3DModel* mpRideActorModel;
     J3DModel* mpTransformBridgeModel;
     J3DModel* mpTransformEffectModel;
     mDoExt_bckAnm* mpSpinnerBck;
-    mDoExt_bckAnm* mpBoomerangWindBck;
     mDoExt_bckAnm* mpHookshotItemBck;
     mDoExt_bckAnm* mpHookshotTipBck;
     mDoExt_bckAnm* mpBowBck;
@@ -386,7 +378,6 @@ private:
     J3DAnmTextureSRTKey* mpBottleBtkSwing;
     J3DAnmTextureSRTKey* mpBottleBtkAction;
     J3DAnmTextureSRTKey* mpBottleBtkFinish;
-    J3DAnmTextureSRTKey* mpBoomerangWindBtk;
     /* 0x98C */ AramResourceCacheEntry mAramResourceCache[16];
     /* 0xA0C */ J3DAnmTevRegKey* mpMagicArmorBodyBrk;
     /* 0xA10 */ J3DAnmTevRegKey* mpMagicArmorHeadBrk;
@@ -617,13 +608,6 @@ private:
     bool mRemoteBoomerangPreviousVisualValid;
     cXyz mRemoteBoomerangRenderedPos;
     csXyz mRemoteBoomerangRenderedAngle;
-    csXyz mRemoteBoomerangWindAngle;
-    csXyz mRemoteBoomerangPreviousWindAngle;
-    csXyz mRemoteBoomerangRenderedWindAngle;
-    bool mBoomerangWindBckInitialized;
-    f32 mRemoteBoomerangWindFrame;
-    u32 mRemoteBoomerangTrailEmitterIds[2];
-    u32 mRemoteBoomerangLeafEmitterId;
     bool mRemoteCopyRodVisualValid;
     bool mRemoteCopyRodTopUse;
     bool mRemoteBowVisualValid;
