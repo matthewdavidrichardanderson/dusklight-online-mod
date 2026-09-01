@@ -124,6 +124,7 @@ constexpr uint32_t kProgressionStateReadyMaxAgeTicks = 90;
 constexpr uint32_t kPendingSyncReplyTimeoutTicks = 1800;
 constexpr uint32_t kOrdonReloadWarningTicks = 180;
 constexpr std::string_view kOoccooSaveBlob = "ooccoo-note-v1";
+constexpr std::string_view kBottleSourcesSaveBlob = "bottle-sources-v1";
 constexpr uint16_t kTitleSyntheticEponaRescuedEventBit = 0x0601;
 constexpr std::string_view kTitleDemoStage = "F_SP102";
 
@@ -261,8 +262,12 @@ std::vector<PendingMeterScalarMutation> sPendingMeterLifeMutations;
 std::vector<PendingMeterScalarMutation> sPendingMeterRupeeMutations;
 uint32_t sStageBossEnemyDepth = 0;
 std::vector<int> sLightDropPreviousCounts;
-std::vector<int> sEmptyBottlePreviousCounts;
-std::vector<int> sEmptyBottleItemPreviousCounts;
+struct PendingBottleMutation {
+    int previous = -1;
+    uint8_t sourceItem = dItemNo_NONE_e;
+};
+std::vector<PendingBottleMutation> sEmptyBottleMutations;
+std::vector<PendingBottleMutation> sEmptyBottleItemMutations;
 std::vector<int> sVisitedRoomPendingRegions;
 daAlink_c* sSyntheticDamagePlayer = nullptr;
 dCcD_GObjInf* sSyntheticDamageObject = nullptr;
@@ -739,6 +744,31 @@ int bottle_slot_count() {
     return count;
 }
 
+bool is_vanilla_bottle_source(int item) {
+    switch (item) {
+    case dItemNo_EMPTY_BOTTLE_e:
+    case dItemNo_HALF_MILK_BOTTLE_e:
+    case dItemNo_OIL_BOTTLE_e:
+    case dItemNo_FAIRY_DROP_e:
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::set<uint8_t> parse_bottle_sources(const nlohmann::json& value) {
+    std::set<uint8_t> sources;
+    if (!value.is_array()) return sources;
+    for (const auto& raw : value) {
+        if (!raw.is_number_integer()) continue;
+        const int source = raw.get<int>();
+        if (is_vanilla_bottle_source(source)) {
+            sources.insert(static_cast<uint8_t>(source));
+        }
+    }
+    return sources;
+}
+
 bool opening_or_title_active() {
     // The opening scene initializes temporary save data for the title-screen
     // Link before the opening process itself becomes searchable. Those
@@ -1054,37 +1084,55 @@ void light_drop_flag_on_post(ModContext*, void* args, void*, void*) {
 
 HookAction empty_bottle_set_pre(ModContext*, void* args, void*, void*) {
     const auto* items = mods::arg<dSv_player_item_c*>(args, 0);
-    sEmptyBottlePreviousCounts.push_back(
-        items == &g_dComIfG_gameInfo.info.getPlayer().getItem() ? bottle_slot_count() : -1);
+    const bool localItems = items == &g_dComIfG_gameInfo.info.getPlayer().getItem();
+    const uint8_t source = dItemNo_EMPTY_BOTTLE_e;
+    const int previous = localItems ? bottle_slot_count() : -1;
+    sEmptyBottleMutations.push_back({previous, source});
+    if (previous >= 0 && sActiveAdapter != nullptr &&
+        sActiveAdapter->should_suppress_local_bottle_source(source)) {
+        sEmptyBottleMutations.back().previous = -1;
+        return HOOK_SKIP_ORIGINAL;
+    }
     return HOOK_CONTINUE;
 }
 
 void empty_bottle_set_post(ModContext*, void*, void*, void*) {
-    int previous = -1;
-    if (!sEmptyBottlePreviousCounts.empty()) {
-        previous = sEmptyBottlePreviousCounts.back();
-        sEmptyBottlePreviousCounts.pop_back();
+    PendingBottleMutation mutation;
+    if (!sEmptyBottleMutations.empty()) {
+        mutation = sEmptyBottleMutations.back();
+        sEmptyBottleMutations.pop_back();
     }
-    if (previous >= 0 && sActiveAdapter != nullptr && !sActiveAdapter->applying_remote()) {
-        sActiveAdapter->notify_local_bottle_slots(previous, bottle_slot_count());
+    if (mutation.previous >= 0 && sActiveAdapter != nullptr &&
+        !sActiveAdapter->applying_remote()) {
+        sActiveAdapter->notify_local_bottle_slots(
+            mutation.previous, bottle_slot_count(), mutation.sourceItem);
     }
 }
 
 HookAction empty_bottle_item_set_pre(ModContext*, void* args, void*, void*) {
     const auto* items = mods::arg<dSv_player_item_c*>(args, 0);
-    sEmptyBottleItemPreviousCounts.push_back(
-        items == &g_dComIfG_gameInfo.info.getPlayer().getItem() ? bottle_slot_count() : -1);
+    const bool localItems = items == &g_dComIfG_gameInfo.info.getPlayer().getItem();
+    const uint8_t source = mods::arg<u8>(args, 1);
+    const int previous = localItems ? bottle_slot_count() : -1;
+    sEmptyBottleItemMutations.push_back({previous, source});
+    if (previous >= 0 && sActiveAdapter != nullptr &&
+        sActiveAdapter->should_suppress_local_bottle_source(source)) {
+        sEmptyBottleItemMutations.back().previous = -1;
+        return HOOK_SKIP_ORIGINAL;
+    }
     return HOOK_CONTINUE;
 }
 
 void empty_bottle_item_set_post(ModContext*, void*, void*, void*) {
-    int previous = -1;
-    if (!sEmptyBottleItemPreviousCounts.empty()) {
-        previous = sEmptyBottleItemPreviousCounts.back();
-        sEmptyBottleItemPreviousCounts.pop_back();
+    PendingBottleMutation mutation;
+    if (!sEmptyBottleItemMutations.empty()) {
+        mutation = sEmptyBottleItemMutations.back();
+        sEmptyBottleItemMutations.pop_back();
     }
-    if (previous >= 0 && sActiveAdapter != nullptr && !sActiveAdapter->applying_remote()) {
-        sActiveAdapter->notify_local_bottle_slots(previous, bottle_slot_count());
+    if (mutation.previous >= 0 && sActiveAdapter != nullptr &&
+        !sActiveAdapter->applying_remote()) {
+        sActiveAdapter->notify_local_bottle_slots(
+            mutation.previous, bottle_slot_count(), mutation.sourceItem);
     }
 }
 
@@ -1757,15 +1805,32 @@ void GameAdapter::notify_local_max_life(int previous, int value) {
     });
 }
 
-void GameAdapter::notify_local_bottle_slots(int previous, int value) {
-    if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed ||
-        randomizer_active() ||
-        value <= previous) return;
+bool GameAdapter::should_suppress_local_bottle_source(uint8_t sourceItem) const {
+    return !applyingRemote_ && !randomizer_active() && is_vanilla_bottle_source(sourceItem) &&
+           completedBottleSources_.find(sourceItem) != completedBottleSources_.end();
+}
+
+void GameAdapter::notify_local_bottle_slots(int previous, int value, uint8_t sourceItem) {
+    if (applyingRemote_ || randomizer_active() || value <= previous) return;
+    const bool knownSource = is_vanilla_bottle_source(sourceItem);
+    if (knownSource) {
+        completedBottleSources_.insert(sourceItem);
+        if (bottleSourcesComplete_ &&
+            static_cast<int>(completedBottleSources_.size()) != value) {
+            bottleSourcesComplete_ = false;
+        }
+    }
+    if (!syncFlagsEnabled_ || !transport_.status().welcomed) return;
     if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
-    publish_local({
+    nlohmann::json packet = {
         {"type", "bottle_slots"}, {"previous_count", previous}, {"count", value},
         {"event_sequence", localPermanentSequence_},
-    });
+    };
+    if (knownSource) {
+        packet["source_item"] = sourceItem;
+        packet["sources_complete"] = bottleSourcesComplete_;
+    }
+    publish_local(std::move(packet));
 }
 
 void GameAdapter::notify_local_rupees(int previous, int value) {
@@ -1960,8 +2025,8 @@ void GameAdapter::shutdown_hooks() {
     sPendingMeterRupeeMutations.clear();
     sStageBossEnemyDepth = 0;
     sLightDropPreviousCounts.clear();
-    sEmptyBottlePreviousCounts.clear();
-    sEmptyBottleItemPreviousCounts.clear();
+    sEmptyBottleMutations.clear();
+    sEmptyBottleItemMutations.clear();
     sVisitedRoomPendingRegions.clear();
     hooksInstalled_ = false;
     sWorldSyncEnabled = false;
@@ -2154,6 +2219,8 @@ void GameAdapter::notify_local_save_reset() {
     // that Note; never broadcast the temporary empty save as a network clear.
     sharedOoccooBoundToSave_ = false;
     sharedOoccooAuthoritative_ = false;
+    completedBottleSources_.clear();
+    bottleSourcesComplete_ = true;
     clear_replaced_save_progression_state();
 
     // A save observer callback can arrive while a manual sync or prompt from
@@ -2180,6 +2247,8 @@ void GameAdapter::notify_local_save_reset() {
 
 void GameAdapter::notify_local_save_loaded() {
     notify_local_save_reset();
+    load_bottle_source_state();
+
     size_t size = 0;
     if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), nullptr, &size) != MOD_OK ||
         size == 0 || size > 4096) return;
@@ -2203,6 +2272,55 @@ void GameAdapter::notify_local_save_loaded() {
     }
 }
 
+void GameAdapter::load_bottle_source_state() {
+    const int bottles = bottle_slot_count();
+    bottleSourcesComplete_ = bottles == 0;
+
+    size_t size = 0;
+    if (svc_save->get_blob(mod_ctx, kBottleSourcesSaveBlob.data(), nullptr, &size) != MOD_OK ||
+        size == 0 || size > 1024) {
+        return;
+    }
+    std::string encoded(size, '\0');
+    if (svc_save->get_blob(mod_ctx, kBottleSourcesSaveBlob.data(), encoded.data(), &size) != MOD_OK) {
+        return;
+    }
+    try {
+        const nlohmann::json state = nlohmann::json::parse(encoded.begin(), encoded.begin() + size);
+        if (!state.is_object() || state.value("version", 0) != 1) return;
+        std::set<uint8_t> sources = parse_bottle_sources(
+            state.value("sources", nlohmann::json::array()));
+        if (static_cast<int>(sources.size()) > bottles) return;
+        completedBottleSources_ = std::move(sources);
+        bottleSourcesComplete_ = state.value("complete", false) &&
+            static_cast<int>(completedBottleSources_.size()) == bottles;
+    } catch (const nlohmann::json::exception&) {
+        completedBottleSources_.clear();
+        bottleSourcesComplete_ = bottles == 0;
+    }
+}
+
+void GameAdapter::persist_bottle_source_state() const {
+    const nlohmann::json state = {
+        {"version", 1},
+        {"complete", bottleSourcesComplete_},
+        {"sources", completedBottleSources_},
+    };
+    const std::string encoded = state.dump();
+    (void)svc_save->set_blob(mod_ctx, kBottleSourcesSaveBlob.data(),
+                             encoded.data(), encoded.size());
+}
+
+void GameAdapter::replace_bottle_source_state(const nlohmann::json& message) {
+    const int bottles = std::clamp(message.value("bottle_slots", bottle_slot_count()), 0, 4);
+    std::set<uint8_t> sources = parse_bottle_sources(
+        message.value("bottle_sources", nlohmann::json::array()));
+    if (static_cast<int>(sources.size()) > bottles) sources.clear();
+    completedBottleSources_ = std::move(sources);
+    bottleSourcesComplete_ = message.value("bottle_sources_complete", false) &&
+        static_cast<int>(completedBottleSources_.size()) == bottles;
+}
+
 void GameAdapter::notify_local_save_written() {
     if (sharedOoccooState_.is_object() && sharedOoccooState_.value("exists", false) &&
         !sharedOoccooState_.value("has_return_mark", false)) {
@@ -2211,6 +2329,7 @@ void GameAdapter::notify_local_save_written() {
     } else {
         (void)svc_save->delete_blob(mod_ctx, kOoccooSaveBlob.data());
     }
+    persist_bottle_source_state();
 }
 
 void GameAdapter::notify_room_scene_initialized(int room) {
@@ -3984,14 +4103,42 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         if (sequence != 0 && !newPickup) {
             return ApplyResult::IgnoredByPolicy;
         }
+
         const int local = bottle_slot_count();
         int merged = std::max(local, count);
-        if (newPickup && local > previous) {
-            merged = std::min(local + (count - previous), 4);
+        const bool hasSource = message.contains("source_item") &&
+            message["source_item"].is_number_integer();
+        const int source = hasSource ? message["source_item"].get<int>() : -1;
+        if (hasSource && !is_vanilla_bottle_source(source)) {
+            return reject("invalid bottle_slots source");
+        }
+
+        bool distinctSource = false;
+        if (newPickup && hasSource) {
+            distinctSource = completedBottleSources_.insert(
+                static_cast<uint8_t>(source)).second;
+            if (distinctSource) {
+                merged = std::min(local + (count - previous), 4);
+            }
+        } else if (newPickup && !hasSource) {
+            // Older peers cannot identify which fixed vanilla reward produced
+            // the slot. Absolute max is safe; additive merging is not.
+            merged = std::max(local, count);
         }
         for (int slot = local; slot < merged; ++slot) {
             dComIfGs_setEmptyBottle();
         }
+        if (hasSource && bottleSourcesComplete_) {
+            bottleSourcesComplete_ = static_cast<int>(completedBottleSources_.size()) == merged;
+        }
+
+        std::ostringstream log;
+        log << "Bottle source merge peer=" << routed.peerId
+            << " source=" << source << " local=" << local
+            << " remote=" << count << " merged=" << merged
+            << " distinct=" << (distinctSource ? "yes" : "no")
+            << " exact=" << (bottleSourcesComplete_ ? "yes" : "no");
+        svc_log->info(mod_ctx, log.str().c_str());
         return ApplyResult::Applied;
     }
     if (type == "rupee_count") {
@@ -4411,6 +4558,8 @@ nlohmann::json GameAdapter::make_save_snapshot() {
         {"collect_clothing", clothing}, {"collect_sword", swords},
         {"collect_shield", shields}, {"letter_get_flags", letters},
         {"max_life", dComIfGs_getMaxLife()}, {"bottle_slots", bottle_slot_count()},
+        {"bottle_sources", completedBottleSources_},
+        {"bottle_sources_complete", bottleSourcesComplete_},
         {"rupees", dComIfGs_getRupee()}, {"poe_count", dComIfGs_getPohSpiritNum()},
         {"malo_fundraising", {{"phase", malo_fundraising_phase()},
                                {"value", dMsgObject_getFundRaising()}}},
@@ -4635,6 +4784,7 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
         const bool applied = apply_manual_full_state(
             message.value("full_state", std::string()), flagsOnly, routed.peerId);
+        if (applied) replace_bottle_source_state(message);
         if (manualSyncState_ == ManualSyncState::Waiting &&
             manualSyncPeerId_ == routed.peerId) {
             manualSyncState_ = applied ? ManualSyncState::Succeeded : ManualSyncState::Failed;
@@ -4777,8 +4927,41 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
     }
     const int maxLife = message.value("max_life", 0);
     if (maxLife > dComIfGs_getMaxLife() && maxLife <= 100) dComIfGs_setMaxLife(static_cast<u8>(maxLife));
-    const int bottles = message.value("bottle_slots", 0);
-    for (int local = bottle_slot_count(); local < bottles && local < 4; ++local) dComIfGs_setEmptyBottle();
+    if (!randomizer_active()) {
+        const int bottles = message.value("bottle_slots", 0);
+        const int localBottles = bottle_slot_count();
+        int mergedBottles = std::max(localBottles, std::clamp(bottles, 0, 4));
+        const bool hasBottleSourceState = message.contains("bottle_sources") &&
+            message["bottle_sources"].is_array();
+        const std::set<uint8_t> remoteBottleSources = hasBottleSourceState
+            ? parse_bottle_sources(message["bottle_sources"])
+            : std::set<uint8_t>{};
+        const bool validRemoteSourceState = hasBottleSourceState &&
+            static_cast<int>(remoteBottleSources.size()) <= bottles;
+        if (validRemoteSourceState &&
+            static_cast<int>(completedBottleSources_.size()) <= localBottles) {
+            // Saves created before source tracking retain an anonymous bottle
+            // baseline. Merge that baseline by max and post-update fixed
+            // sources by set union, so equal sources dedupe and distinct ones add.
+            const int localUnknown = localBottles -
+                static_cast<int>(completedBottleSources_.size());
+            const int remoteUnknown = bottles - static_cast<int>(remoteBottleSources.size());
+            completedBottleSources_.insert(remoteBottleSources.begin(), remoteBottleSources.end());
+            mergedBottles = std::min<int>(
+                std::max(localUnknown, remoteUnknown) + completedBottleSources_.size(), 4);
+            const bool remoteComplete = message.value("bottle_sources_complete", false) &&
+                remoteUnknown == 0;
+            bottleSourcesComplete_ = bottleSourcesComplete_ && remoteComplete &&
+                static_cast<int>(completedBottleSources_.size()) == mergedBottles;
+        } else if (mergedBottles > localBottles) {
+            // A legacy or incomplete snapshot can safely repair the absolute
+            // count, but it cannot identify which source owns the new slot.
+            bottleSourcesComplete_ = false;
+        }
+        for (int local = localBottles; local < mergedBottles; ++local) {
+            dComIfGs_setEmptyBottle();
+        }
+    }
     const int rupees = message.value("rupees", -1);
     if (rupees >= 0 && rupees <= dComIfGs_getRupeeMax()) dComIfGs_setRupee(static_cast<u16>(rupees));
     const int poes = message.value("poe_count", -1);

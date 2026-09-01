@@ -65,7 +65,8 @@ public:
     void notify_local_light_drop_num(int area, int previous, int value);
     void notify_local_dark_clear(int level);
     void notify_local_max_life(int previous, int value);
-    void notify_local_bottle_slots(int previous, int value);
+    [[nodiscard]] bool should_suppress_local_bottle_source(uint8_t sourceItem) const;
+    void notify_local_bottle_slots(int previous, int value, uint8_t sourceItem);
     void notify_local_rupees(int previous, int value);
     void notify_local_item_grant(const ItemGiveInfo& info);
 
@@ -96,6 +97,11 @@ private:
     // other locations. Deduplicate by ItemService check identity, never by the
     // resolved item byte.
     std::set<std::string> completedRandomizerChecks_;
+    // Vanilla has four fixed bottle rewards. Remember their identities so the
+    // same world reward observed by two peers is applied once, while distinct
+    // rewards acquired concurrently still add separate slots.
+    std::set<uint8_t> completedBottleSources_;
+    bool bottleSourcesComplete_ = false;
     std::map<std::string, bool> appliedTearEvents_;
     std::string lastError_;
     uint32_t progressionTicks_ = 0;
@@ -216,6 +222,9 @@ private:
     void poll_local_state(bool publish);
     void clear_disabled_sync_flags_state();
     void clear_replaced_save_progression_state();
+    void load_bottle_source_state();
+    void persist_bottle_source_state() const;
+    void replace_bottle_source_state(const nlohmann::json& message);
     void remember_memory_item(int stage, int flag);
     void reapply_observed_memory_items_for_current_stage();
     ApplyResult reject(std::string reason);
