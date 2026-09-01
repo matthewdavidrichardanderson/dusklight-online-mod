@@ -1826,11 +1826,13 @@ void daRemoteLink_c::destroyEquipmentModels() {
 }
 
 void daRemoteLink_c::setupEquipmentModels() {
-    applySheathStrapVisibility(mpBodyModel, mClothesVariant, mRemoteSwordDraw,
-                               mRemoteSwordVariant);
-    if (mClothesVariant == 2) {
-        applyZoraArmorShapeVisibility(mpBodyModel, mRemoteZoraMaskDraw,
-                                      mRemoteHeavyBoots);
+    if (mVisualState.form != FORM_WOLF) {
+        applySheathStrapVisibility(mpBodyModel, mClothesVariant, mRemoteSwordDraw,
+                                   mRemoteSwordVariant);
+        if (mClothesVariant == 2) {
+            applyZoraArmorShapeVisibility(mpBodyModel, mRemoteZoraMaskDraw,
+                                          mRemoteHeavyBoots);
+        }
     }
 
     if (!mRemoteSwordDraw && mLoadedSwordVariant != -1) {
