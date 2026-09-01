@@ -430,6 +430,58 @@ static void hideMaterialShape(J3DModelData* i_modelData, u16 i_materialNo) {
     }
 }
 
+static void applySheathStrapVisibility(J3DModel* i_bodyModel, int i_clothesVariant,
+                                       bool i_swordDraw, int i_swordVariant) {
+    if (i_bodyModel == NULL) {
+        return;
+    }
+
+    u16 materialNo = 4;
+    switch (i_clothesVariant) {
+    case 1:
+        materialNo = 0;
+        break;
+    case 2:
+        materialNo = 2;
+        break;
+    case 3:
+        materialNo = 1;
+        break;
+    }
+
+    J3DShape* shape = getMaterialShape(i_bodyModel->getModelData(), materialNo);
+    if (shape == NULL) {
+        return;
+    }
+
+    if (i_swordDraw && i_swordVariant != 2) {
+        shape->show();
+    } else {
+        shape->hide();
+    }
+}
+
+static void applyZoraArmorShapeVisibility(J3DModel* i_bodyModel, bool i_maskDraw,
+                                          bool i_heavyBoots) {
+    if (i_bodyModel == NULL) {
+        return;
+    }
+
+    J3DModelData* modelData = i_bodyModel->getModelData();
+    J3DShape* normalBoots = getMaterialShape(modelData, 8);
+    J3DShape* shoulderFins = getMaterialShape(modelData, 9);
+    J3DShape* mask = getMaterialShape(modelData, 11);
+    if (normalBoots != NULL) {
+        i_heavyBoots ? normalBoots->hide() : normalBoots->show();
+    }
+    if (shoulderFins != NULL) {
+        i_maskDraw && !i_heavyBoots ? shoulderFins->show() : shoulderFins->hide();
+    }
+    if (mask != NULL) {
+        i_maskDraw ? mask->show() : mask->hide();
+    }
+}
+
 static void showOnlyMaterialShape(J3DModelData* i_modelData, u16 i_materialNo, u16 i_count) {
     if (i_modelData == NULL) {
         return;
@@ -856,6 +908,9 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteShieldHandAttached(false),
       mRemoteSwordOut(false),
       mRemoteHeavyBoots(false),
+      mRemoteZoraMaskDraw(false),
+      mRemoteMagicArmorPowered(true),
+      mAppliedMagicArmorPowered(-1),
       mRemoteMidnaDraw(false),
       mRemoteMidnaMaskDraw(false),
       mRemoteMidnaHandDraw(false),
@@ -1667,28 +1722,43 @@ void daRemoteLink_c::setupShadowMidnaModels() {
 }
 
 bool daRemoteLink_c::setupMagicArmorBrk() {
-    mpMagicArmorBodyBrk =
-        static_cast<J3DAnmTevRegKey*>(getOwnedObjectRes("ml_body_power_up_a.brk"));
-    mpMagicArmorHeadBrk =
-        static_cast<J3DAnmTevRegKey*>(getOwnedObjectRes("ml_head_power_up_a.brk"));
-    if (mpMagicArmorBodyBrk == NULL || mpMagicArmorHeadBrk == NULL ||
-        mpBodyModel == NULL || mpHeadModel == NULL)
-    {
+    if (mpBodyModel == NULL || mpHeadModel == NULL) {
         return false;
     }
 
     J3DModelData* bodyData = mpBodyModel->getModelData();
+    J3DModelData* headData = mpHeadModel->getModelData();
+    if (mpMagicArmorBodyBrk != NULL) {
+        bodyData->removeTevRegAnimator(mpMagicArmorBodyBrk);
+    }
+    if (mpMagicArmorHeadBrk != NULL) {
+        headData->removeTevRegAnimator(mpMagicArmorHeadBrk);
+    }
+
+    const char* bodyName = mRemoteMagicArmorPowered ?
+        "ml_body_power_up_a.brk" : "ml_body_power_down.brk";
+    const char* headName = mRemoteMagicArmorPowered ?
+        "ml_head_power_up_a.brk" : "ml_head_power_down.brk";
+    mpMagicArmorBodyBrk =
+        static_cast<J3DAnmTevRegKey*>(getOwnedObjectRes(bodyName));
+    mpMagicArmorHeadBrk =
+        static_cast<J3DAnmTevRegKey*>(getOwnedObjectRes(headName));
+    if (mpMagicArmorBodyBrk == NULL || mpMagicArmorHeadBrk == NULL) {
+        return false;
+    }
+
     mpMagicArmorBodyBrk->searchUpdateMaterialID(bodyData);
     bodyData->entryTevRegAnimator(mpMagicArmorBodyBrk);
     mpMagicArmorBodyBrk->setFrame(mpMagicArmorBodyBrk->getFrameMax());
 
-    J3DModelData* headData = mpHeadModel->getModelData();
     mpMagicArmorHeadBrk->searchUpdateMaterialID(headData);
     headData->entryTevRegAnimator(mpMagicArmorHeadBrk);
     mpMagicArmorHeadBrk->setFrame(mpMagicArmorHeadBrk->getFrameMax());
 
-    DuskLog.info("RemoteLink: Magic Armor BRK initialized body={} head={}",
-                 (void*)mpMagicArmorBodyBrk, (void*)mpMagicArmorHeadBrk);
+    mAppliedMagicArmorPowered = mRemoteMagicArmorPowered ? 1 : 0;
+    DuskLog.info("RemoteLink: Magic Armor BRK initialized powered={} body={} head={}",
+                 mRemoteMagicArmorPowered, (void*)mpMagicArmorBodyBrk,
+                 (void*)mpMagicArmorHeadBrk);
     return true;
 }
 
@@ -1756,6 +1826,13 @@ void daRemoteLink_c::destroyEquipmentModels() {
 }
 
 void daRemoteLink_c::setupEquipmentModels() {
+    applySheathStrapVisibility(mpBodyModel, mClothesVariant, mRemoteSwordDraw,
+                               mRemoteSwordVariant);
+    if (mClothesVariant == 2) {
+        applyZoraArmorShapeVisibility(mpBodyModel, mRemoteZoraMaskDraw,
+                                      mRemoteHeavyBoots);
+    }
+
     if (!mRemoteSwordDraw && mLoadedSwordVariant != -1) {
         mpSwordModel = NULL;
         mpSheathModel = NULL;
@@ -3923,7 +4000,9 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
                                           bool i_swordHandAttached,
                                           bool i_shieldHandAttached, int i_leftHandShape,
                                           int i_rightHandShape, bool i_swordOut,
-                                          bool i_heavyBoots, bool i_itemDraw, bool i_kanteraDraw,
+                                          bool i_heavyBoots, bool i_zoraMaskDraw,
+                                          bool i_magicArmorPowered,
+                                          bool i_itemDraw, bool i_kanteraDraw,
                                           bool i_midnaDraw, bool i_midnaMaskDraw,
                                           bool i_midnaHandDraw, bool i_midnaHairDraw,
                                           bool i_midnaShadowForm,
@@ -3973,6 +4052,15 @@ void daRemoteLink_c::setRemoteActionState(int i_procId, int i_procVar0, int i_pr
     mRemoteRightHandShape = i_rightHandShape;
     mRemoteSwordOut = i_swordOut;
     mRemoteHeavyBoots = i_heavyBoots;
+    mRemoteZoraMaskDraw = i_zoraMaskDraw;
+    mRemoteMagicArmorPowered = i_magicArmorPowered;
+    if (mClothesVariant == 3 &&
+        mAppliedMagicArmorPowered != (mRemoteMagicArmorPowered ? 1 : 0) &&
+        !setupMagicArmorBrk())
+    {
+        DuskLog.warn("RemoteLink: Magic Armor BRK state update failed powered={}",
+                     mRemoteMagicArmorPowered);
+    }
     mRemoteItemDraw = i_itemDraw;
     mRemoteKanteraDraw = i_kanteraDraw;
     // Remote Midna is intentionally excluded from every visual mode. Keep the

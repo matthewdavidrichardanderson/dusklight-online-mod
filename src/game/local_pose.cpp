@@ -490,6 +490,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         return heap.checkNoSetPriIdx() ? heap.getArcNo() : u16(0xFFFF);
     };
     J3DAnmTransform* faceBck = link->mFaceBck.getBckAnm();
+    const int clothesVariant = clothes_variant();
 
     const bool semanticGameplay = visualUnsupportedReasons == 0;
     json state = {
@@ -581,7 +582,9 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"transform_proc_v3", link->mProcVar3.field_0x300e},
         {"transform_shape_x", int(link->shape_angle.x)},
         {"equip_item", int(link->mEquipItem)}, {"sword_variant", sword_variant(link)},
-        {"shield_variant", shield_variant()}, {"clothes_variant", clothes_variant()},
+        {"shield_variant", shield_variant()}, {"clothes_variant", clothesVariant},
+        {"zora_mask_draw", clothesVariant == 2 && bool(link->checkZoraWearMaskDraw())},
+        {"magic_armor_powered", clothesVariant != 3 || !bool(link->checkMagicArmorHeavy())},
         {"sword_draw", bool(link->checkSwordDraw())},
         {"shield_draw", bool(link->checkShieldDraw())},
         {"shield_guard_active", !wolf && bool(link->checkShieldDraw()) &&

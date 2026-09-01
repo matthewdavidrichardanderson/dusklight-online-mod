@@ -51,7 +51,8 @@ public:
                               bool i_swordDraw, bool i_shieldDraw, bool i_shieldGuardActive,
                               bool i_swordHandAttached, bool i_shieldHandAttached,
                               int i_leftHandShape, int i_rightHandShape, bool i_swordOut,
-                              bool i_heavyBoots, bool i_itemDraw, bool i_kanteraDraw,
+                              bool i_heavyBoots, bool i_zoraMaskDraw,
+                              bool i_magicArmorPowered, bool i_itemDraw, bool i_kanteraDraw,
                               bool i_midnaDraw, bool i_midnaMaskDraw, bool i_midnaHandDraw,
                               bool i_midnaHairDraw, bool i_midnaShadowForm, int i_itemActorKind,
                               int i_itemActorBombExTime, int i_itemActorBombFlash, int i_rideActorKind);
@@ -504,6 +505,9 @@ private:
     bool mRemoteShieldHandAttached;
     /* 0xBF0 */ bool mRemoteSwordOut;
     /* 0xBF1 */ bool mRemoteHeavyBoots;
+    bool mRemoteZoraMaskDraw;
+    bool mRemoteMagicArmorPowered;
+    int mAppliedMagicArmorPowered;
     /* 0xBF2 */ bool mRemoteMidnaDraw;
     /* 0xBF3 */ bool mRemoteMidnaMaskDraw;
     /* 0xBF4 */ bool mRemoteMidnaHandDraw;

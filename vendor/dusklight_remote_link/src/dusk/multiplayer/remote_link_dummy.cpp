@@ -1444,7 +1444,8 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                                         pose.shieldDraw, pose.shieldGuardActive,
                                         pose.swordHandAttached, pose.shieldHandAttached,
                                         pose.leftHandShape, pose.rightHandShape, pose.swordOut,
-                                        pose.heavyBoots, pose.itemDraw, pose.kanteraDraw,
+                                        pose.heavyBoots, pose.zoraMaskDraw,
+                                        pose.magicArmorPowered, pose.itemDraw, pose.kanteraDraw,
                                         false, false, false, false, false, pose.itemActorKind,
                                         pose.itemActorBombExTime, pose.itemActorBombFlash,
                                         pose.rideActorKind);

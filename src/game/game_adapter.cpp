@@ -769,6 +769,42 @@ std::set<uint8_t> parse_bottle_sources(const nlohmann::json& value) {
     return sources;
 }
 
+std::set<uint8_t> bottle_sources_from_vanilla_save() {
+    std::set<uint8_t> sources;
+    if (dComIfGs_isItemFirstBit(dItemNo_EMPTY_BOTTLE_e)) {
+        sources.insert(dItemNo_EMPTY_BOTTLE_e);
+    }
+    if (dComIfGs_isItemFirstBit(dItemNo_HALF_MILK_BOTTLE_e)) {
+        sources.insert(dItemNo_HALF_MILK_BOTTLE_e);
+    }
+    // These two rewards create bottles containing oil/tears, but their
+    // permanent acquisition bits belong to the distinct bottle-grant items.
+    if (dComIfGs_isItemFirstBit(dItemNo_OIL_BOTTLE3_e)) {
+        sources.insert(dItemNo_OIL_BOTTLE_e);
+    }
+    if (dComIfGs_isItemFirstBit(dItemNo_DROP_BOTTLE_e)) {
+        sources.insert(dItemNo_FAIRY_DROP_e);
+    }
+    return sources;
+}
+
+void remember_vanilla_bottle_source(int source) {
+    switch (source) {
+    case dItemNo_EMPTY_BOTTLE_e:
+    case dItemNo_HALF_MILK_BOTTLE_e:
+        dComIfGs_onItemFirstBit(static_cast<uint8_t>(source));
+        break;
+    case dItemNo_OIL_BOTTLE_e:
+        dComIfGs_onItemFirstBit(dItemNo_OIL_BOTTLE3_e);
+        break;
+    case dItemNo_FAIRY_DROP_e:
+        dComIfGs_onItemFirstBit(dItemNo_DROP_BOTTLE_e);
+        break;
+    default:
+        break;
+    }
+}
+
 bool opening_or_title_active() {
     // The opening scene initializes temporary save data for the title-screen
     // Link before the opening process itself becomes searchable. Those
@@ -2274,7 +2310,11 @@ void GameAdapter::notify_local_save_loaded() {
 
 void GameAdapter::load_bottle_source_state() {
     const int bottles = bottle_slot_count();
-    bottleSourcesComplete_ = bottles == 0;
+    completedBottleSources_ = bottle_sources_from_vanilla_save();
+    if (static_cast<int>(completedBottleSources_.size()) > bottles) {
+        completedBottleSources_.clear();
+    }
+    bottleSourcesComplete_ = static_cast<int>(completedBottleSources_.size()) == bottles;
 
     size_t size = 0;
     if (svc_save->get_blob(mod_ctx, kBottleSourcesSaveBlob.data(), nullptr, &size) != MOD_OK ||
@@ -2290,13 +2330,18 @@ void GameAdapter::load_bottle_source_state() {
         if (!state.is_object() || state.value("version", 0) != 1) return;
         std::set<uint8_t> sources = parse_bottle_sources(
             state.value("sources", nlohmann::json::array()));
+        sources.insert(completedBottleSources_.begin(), completedBottleSources_.end());
         if (static_cast<int>(sources.size()) > bottles) return;
         completedBottleSources_ = std::move(sources);
-        bottleSourcesComplete_ = state.value("complete", false) &&
+        bottleSourcesComplete_ =
             static_cast<int>(completedBottleSources_.size()) == bottles;
     } catch (const nlohmann::json::exception&) {
-        completedBottleSources_.clear();
-        bottleSourcesComplete_ = bottles == 0;
+        completedBottleSources_ = bottle_sources_from_vanilla_save();
+        if (static_cast<int>(completedBottleSources_.size()) > bottles) {
+            completedBottleSources_.clear();
+        }
+        bottleSourcesComplete_ =
+            static_cast<int>(completedBottleSources_.size()) == bottles;
     }
 }
 
@@ -4113,13 +4158,15 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return reject("invalid bottle_slots source");
         }
 
+        const bool exactBeforeMerge = bottleSourcesComplete_;
         bool distinctSource = false;
         if (newPickup && hasSource) {
             distinctSource = completedBottleSources_.insert(
                 static_cast<uint8_t>(source)).second;
-            if (distinctSource) {
+            if (distinctSource && exactBeforeMerge) {
                 merged = std::min(local + (count - previous), 4);
             }
+            remember_vanilla_bottle_source(source);
         } else if (newPickup && !hasSource) {
             // Older peers cannot identify which fixed vanilla reward produced
             // the slot. Absolute max is safe; additive merging is not.
@@ -4128,8 +4175,10 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         for (int slot = local; slot < merged; ++slot) {
             dComIfGs_setEmptyBottle();
         }
-        if (hasSource && bottleSourcesComplete_) {
+        if (hasSource && exactBeforeMerge) {
             bottleSourcesComplete_ = static_cast<int>(completedBottleSources_.size()) == merged;
+        } else if (hasSource) {
+            bottleSourcesComplete_ = false;
         }
 
         std::ostringstream log;
@@ -4137,6 +4186,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             << " source=" << source << " local=" << local
             << " remote=" << count << " merged=" << merged
             << " distinct=" << (distinctSource ? "yes" : "no")
+            << " additive=" << (distinctSource && exactBeforeMerge ? "yes" : "no")
             << " exact=" << (bottleSourcesComplete_ ? "yes" : "no");
         svc_log->info(mod_ctx, log.str().c_str());
         return ApplyResult::Applied;
@@ -4940,18 +4990,22 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
             static_cast<int>(remoteBottleSources.size()) <= bottles;
         if (validRemoteSourceState &&
             static_cast<int>(completedBottleSources_.size()) <= localBottles) {
-            // Saves created before source tracking retain an anonymous bottle
-            // baseline. Merge that baseline by max and post-update fixed
-            // sources by set union, so equal sources dedupe and distinct ones add.
-            const int localUnknown = localBottles -
-                static_cast<int>(completedBottleSources_.size());
-            const int remoteUnknown = bottles - static_cast<int>(remoteBottleSources.size());
-            completedBottleSources_.insert(remoteBottleSources.begin(), remoteBottleSources.end());
-            mergedBottles = std::min<int>(
-                std::max(localUnknown, remoteUnknown) + completedBottleSources_.size(), 4);
             const bool remoteComplete = message.value("bottle_sources_complete", false) &&
-                remoteUnknown == 0;
-            bottleSourcesComplete_ = bottleSourcesComplete_ && remoteComplete &&
+                static_cast<int>(remoteBottleSources.size()) == bottles;
+            const bool bothComplete = bottleSourcesComplete_ && remoteComplete;
+            completedBottleSources_.insert(remoteBottleSources.begin(), remoteBottleSources.end());
+            for (uint8_t source : remoteBottleSources) {
+                remember_vanilla_bottle_source(source);
+            }
+            if (bothComplete) {
+                mergedBottles = std::min<int>(completedBottleSources_.size(), 4);
+            } else {
+                // An anonymous baseline can overlap any named source. Its union
+                // is unknowable, so never add it to the named-source count.
+                mergedBottles = std::min<int>(
+                    std::max<int>(mergedBottles, completedBottleSources_.size()), 4);
+            }
+            bottleSourcesComplete_ = bothComplete &&
                 static_cast<int>(completedBottleSources_.size()) == mergedBottles;
         } else if (mergedBottles > localBottles) {
             // A legacy or incomplete snapshot can safely repair the absolute

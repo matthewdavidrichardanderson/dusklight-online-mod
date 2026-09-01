@@ -238,6 +238,8 @@ struct PeerPoseSnapshot {
     bool midnaHairDraw = false;
     bool midnaShadowForm = false;
     bool heavyBoots = false;
+    bool zoraMaskDraw = false;
+    bool magicArmorPowered = true;
     bool itemDraw = false;
     bool kanteraDraw = false;
     int itemActorKind = 0;

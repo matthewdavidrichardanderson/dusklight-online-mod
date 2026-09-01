@@ -836,6 +836,8 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.midnaHairDraw = false;
         pose.midnaShadowForm = false;
         pose.heavyBoots = state.value("heavy_boots", false);
+        pose.zoraMaskDraw = state.value("zora_mask_draw", pose.clothesVariant == 2);
+        pose.magicArmorPowered = state.value("magic_armor_powered", true);
         pose.itemDraw = state.value("item_draw", false);
         pose.kanteraDraw = state.value("kantera_draw", false);
         pose.itemActorKind = state.value("item_actor_kind", 0);

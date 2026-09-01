@@ -95,6 +95,18 @@ int main() {
         return 1;
     }
 
+    json outfit = pose_message(4, "semantic_gameplay");
+    outfit["state"].update({
+        {"clothes_variant", 2}, {"zora_mask_draw", false},
+        {"magic_armor_powered", false},
+    });
+    PeerPoseSnapshot outfitPose;
+    if (!decode_and_enforce(outfit, &facialPose, outfitPose, error) ||
+        outfitPose.zoraMaskDraw || outfitPose.magicArmorPowered) {
+        std::cerr << "outfit visual state was not decoded: " << error << '\n';
+        return 1;
+    }
+
     // Performance Mode carries only the small inputs to Spinner's visual
     // matrix calculation. The monotonically increasing jump epoch makes the
     // one-shot extension animation recoverable after a dropped edge packet.
