@@ -7185,7 +7185,9 @@ int daRemoteLink_c::Draw() {
         drawModel(mpRideActorModel);
     }
     drawModel(mpSwordModel);
-    drawModel(mpSheathModel);
+    if (mVisualState.form == FORM_WOLF || mRemoteSwordVariant != 2) {
+        drawModel(mpSheathModel);
+    }
     drawModel(mpShieldModel);
 
     if (drawHumanShadowMidna) {
