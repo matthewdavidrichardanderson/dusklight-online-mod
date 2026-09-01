@@ -968,6 +968,7 @@ void event_bit_on_post(ModContext*, void* args, void*, void*) {
     if (sActiveAdapter == nullptr || sActiveAdapter->applying_remote()) return;
     if (mods::arg<dSv_event_c*>(args, 0) != &g_dComIfG_gameInfo.info.getEvent()) return;
     const uint16_t flag = mods::arg<uint16_t>(args, 1);
+    sActiveAdapter->notify_local_event_bit(flag);
     if (!is_unsynced_event_bit(flag)) {
         nlohmann::json message = {{"type", "event_bit"}, {"flag", flag}, {"set", true}};
         const char* stage = dComIfGp_getStartStageName();
@@ -1615,6 +1616,20 @@ bool GameAdapter::randomizer_active() const {
     // randomizer packet semantics.
     const char* saveFileName = current_save_file_name_compat();
     return saveFileName != nullptr && std::string_view(saveFileName) == "randomizer";
+}
+
+void GameAdapter::notify_local_event_bit(uint16_t flag) {
+    if (!is_ordon_day_boundary_event_bit(flag) || pendingOrdonEventBits_.erase(flag) == 0) {
+        return;
+    }
+    if (!pendingOrdonEventBits_.empty()) return;
+
+    ordonReloadSafeTicks_ = 0;
+    ordonReloadWaitTicks_ = 0;
+    ordonReloadTransitionActive_ = false;
+    ordonReloadSawStageLoad_ = false;
+    svc_log->info(mod_ctx,
+        "Cancelled redundant Ordon reload after local progression reached the queued state");
 }
 
 void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {

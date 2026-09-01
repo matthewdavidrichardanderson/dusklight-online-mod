@@ -59,6 +59,7 @@ public:
     void notify_local_save_loaded();
     void notify_local_save_written();
     void notify_room_scene_initialized(int room);
+    void notify_local_event_bit(uint16_t flag);
     void observe_local_memory_item(int stage, int flag);
     void notify_local_fish_caught(int fishIndex);
     void notify_local_light_drop_num(int area, int previous, int value);
