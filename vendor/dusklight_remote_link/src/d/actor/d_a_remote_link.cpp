@@ -1506,9 +1506,24 @@ void daRemoteLink_c::setupHumanKokiriModel() {
     }
 
     J3DModelData* bodyData = mpBodyModel->getModelData();
-    hideMaterialShape(bodyData, 16);
-    mpLeftBodyHandShape = getMaterialShape(bodyData, 11);
-    mpRightBodyHandShape = getMaterialShape(bodyData, 12);
+    u16 leftBodyHandMaterial = 11;
+    u16 rightBodyHandMaterial = 12;
+    switch (mClothesVariant) {
+    case 1:
+        leftBodyHandMaterial = 3;
+        rightBodyHandMaterial = 4;
+        break;
+    case 2:
+    case 3:
+        leftBodyHandMaterial = 4;
+        rightBodyHandMaterial = 5;
+        break;
+    default:
+        hideMaterialShape(bodyData, 16);
+        break;
+    }
+    mpLeftBodyHandShape = getMaterialShape(bodyData, leftBodyHandMaterial);
+    mpRightBodyHandShape = getMaterialShape(bodyData, rightBodyHandMaterial);
     hideAllHandShapes();
 
     mpBodyModel->setUserArea((uintptr_t)this);

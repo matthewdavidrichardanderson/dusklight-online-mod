@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
+#include "JSystem/J3DGraphAnimator/J3DMtxBuffer.h"
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_spinner.h"
@@ -82,6 +83,21 @@ void append_matrix(std::vector<uint8_t>& out, CMtxP matrix) {
     for (int row = 0; row < 3; ++row) append_value(out, matrix[row][3]);
 }
 
+bool model_matrices_ready(J3DModel* model) {
+    if (model == nullptr || model->getModelData() == nullptr ||
+        model->getMtxBuffer() == nullptr) {
+        return false;
+    }
+
+    J3DModelData* modelData = model->getModelData();
+    J3DMtxBuffer* matrixBuffer = model->getMtxBuffer();
+    if (modelData->getJointNum() > 0 && matrixBuffer->mpAnmMtx == nullptr) return false;
+    if (modelData->getWEvlpMtxNum() > 0 && matrixBuffer->mpWeightEvlpMtx == nullptr) {
+        return false;
+    }
+    return true;
+}
+
 uint64_t hash_weights(J3DModel* model, uint16_t weights) {
     uint64_t hash = hash_bytes(kFnvOffset, &weights, sizeof(weights));
     for (uint16_t i = 0; i < weights; ++i) {
@@ -98,7 +114,7 @@ uint64_t hash_weights(J3DModel* model, uint16_t weights) {
 }
 
 void append_model(std::vector<uint8_t>& out, J3DModel* model, size_t slotIndex) {
-    if (model == nullptr || model->getModelData() == nullptr) {
+    if (!model_matrices_ready(model)) {
         const uint8_t absent = 0;
         append_value(out, absent);
         return;
@@ -145,7 +161,7 @@ json pack_matrices(std::initializer_list<MatrixSlot> slots,
     size_t slotIndex = 0;
     uint8_t presentSlots = 0;
     for (const MatrixSlot& slot : slots) {
-        if (slot.model != nullptr) ++presentSlots;
+        if (model_matrices_ready(slot.model)) ++presentSlots;
         append_model(packed, slot.model, slotIndex++);
     }
     if (diagnostics != nullptr) {
@@ -340,7 +356,10 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
             return false;
     }
     const bool humanCore = !wolf;
-    const bool humanParts = humanCore && !transforming;
+    const bool modelRecreationReady = link->mClothesChangeWaitTimer == 0;
+    const bool bodyMatricesReady = model_matrices_ready(link->mpLinkModel);
+    const bool humanParts = humanCore && !transforming && modelRecreationReady &&
+                            bodyMatricesReady;
     fopAc_ac_c* itemActor = humanParts ? link->mItemAcKeep.getActor() : nullptr;
     fopAc_ac_c* thrownBoomerang =
         humanParts ? link->getThrowBoomerangAcKeep()->getActor() : nullptr;
@@ -461,7 +480,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         }
         return -1;
     };
-    const bool bodyRootValid = link->mpLinkModel->getModelData() != nullptr &&
+    const bool bodyRootValid = bodyMatricesReady &&
                                link->mpLinkModel->getModelData()->getJointNum() > 0;
     MtxP bodyRoot = bodyRootValid ? link->mpLinkModel->getAnmMtx(0) : nullptr;
     const auto activeFaceResource = [](const daPy_anmHeap_c& heap) {
