@@ -948,21 +948,6 @@ bool is_synced_item_first_bit(int itemId) {
            (itemId >= dItemNo_M_BEETLE_e && itemId <= dItemNo_F_MAYFLY_e);
 }
 
-std::vector<u8> capture_current_synced_key_items() {
-    std::vector<u8> items;
-    for (int item = 0; item < 256; ++item) {
-        if (is_synced_key_item(item) && dComIfGs_isItemFirstBit(static_cast<u8>(item)))
-            items.push_back(static_cast<u8>(item));
-    }
-    return items;
-}
-
-void restore_captured_synced_key_items(const std::vector<u8>& items) {
-    for (const u8 item : items) {
-        if (!dComIfGs_isItemFirstBit(item)) execItemGet(item, 0, nullptr);
-    }
-}
-
 void repair_lantern_item_state() {
     if (!dComIfGs_isItemFirstBit(dItemNo_KANTERA_e)) return;
     if (dComIfGs_getItem(SLOT_1, true) != dItemNo_KANTERA_e)
@@ -4763,6 +4748,9 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     // Manual full/flags sync replaces save data without invoking the save
     // observer. Clear observations and deferred work from the previous state
     // before installing the peer state, or periodic repair can undo the sync.
+    // Do not merge the receiver's current items back in: an explicit manual
+    // sync is an exact inventory/equipment replacement, matching the original
+    // AIO behavior in both flags-only and sync-and-warp modes.
     clear_replaced_save_progression_state();
     if (flagsOnly) {
         dSv_player_c& localPlayer = g_dComIfG_gameInfo.info.getPlayer();
@@ -4775,10 +4763,8 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
         syncedSave.getPlayer().getPlayerFieldLastStayInfo() = localLastStay;
         syncedSave.getPlayer().getConfig() = localConfig;
         ToggleAutoSaveHook::trampoline(false);
-        const std::vector<u8> localKeyItems = capture_current_synced_key_items();
         g_dComIfG_gameInfo.info.setSavedata(syncedSave);
         g_dComIfG_gameInfo.info.setMemory(syncedSave.getSave(currentStage));
-        restore_captured_synced_key_items(localKeyItems);
         repair_lantern_item_state();
         pendingManualFlagsSave_.resize(sizeof(dSv_save_c));
         std::memcpy(pendingManualFlagsSave_.data(),
@@ -4788,11 +4774,9 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     }
 
     ToggleAutoSaveHook::trampoline(false);
-    const std::vector<u8> localKeyItems = capture_current_synced_key_items();
     const u8 vibration = dComIfGs_getOptVibration();
     g_dComIfG_gameInfo.info = peerInfo;
     g_dComIfG_gameInfo.info.getPlayer().getConfig().setVibration(vibration);
-    restore_captured_synced_key_items(localKeyItems);
     repair_lantern_item_state();
     pendingManualInfo_.resize(sizeof(dSv_info_c));
     std::memcpy(pendingManualInfo_.data(), &g_dComIfG_gameInfo.info, sizeof(dSv_info_c));
@@ -4811,28 +4795,24 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
 void GameAdapter::update_pending_sync_replies() {
     if (pendingSyncReplies_.empty()) return;
     const bool baseSafe = stage_ready() && !opening_or_title_active();
+    // Match the AIO behavior: the requester's five-second timeout is UI
+    // feedback, not permission to discard the request on the replying peer.
+    // Cutscenes and scene loads can easily outlast that window, so retain the
+    // request without aging it until taking a complete save snapshot is safe.
+    if (!baseSafe) return;
     for (auto it = pendingSyncReplies_.begin(); it != pendingSyncReplies_.end();) {
         if (it->waitTicks < std::numeric_limits<uint32_t>::max()) ++it->waitTicks;
-        const bool manualRequest = it->cueKey.empty();
-        const uint32_t timeoutTicks = manualRequest ? kManualSyncRequestTimeoutTicks :
-                                                      kPendingSyncReplyTimeoutTicks;
-        const bool timedOut = it->waitTicks >= timeoutTicks;
-        if (manualRequest && timedOut) {
-            std::ostringstream line;
-            line << "Online queued sync request expired peer=" << it->peerId
-                 << " mode=" << (it->flagsOnly ? "flags" : "warp");
-            dusklight_online::log_info(line.str());
-            it = pendingSyncReplies_.erase(it);
-            continue;
-        }
-        if (!baseSafe) {
-            ++it;
-            continue;
-        }
+        const bool timedOut = it->waitTicks >= kPendingSyncReplyTimeoutTicks;
         const bool ready = local_state_ready_for_cue(it->cueKey);
         if (!ready && !timedOut) {
             ++it;
             continue;
+        }
+        if (!ready) {
+            std::ostringstream warning;
+            warning << "Online queued sync request timed out waiting for cue="
+                    << it->cueKey << "; replying with the current safe state";
+            dusklight_online::log_info(warning.str());
         }
         if (!it->cueKey.empty()) {
             handledProgressionCues_.insert(it->peerId + ':' + it->cueKey);
