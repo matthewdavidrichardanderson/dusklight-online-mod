@@ -3548,7 +3548,7 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
         }
     }
     dComIfGs_onStageSwitch(stage, flag);
-    repair_remote_sewers_breakable_box(stage, flag);
+    repair_remote_switch_actors(stage, flag);
     return ApplyResult::Applied;
 }
 
@@ -3586,7 +3586,7 @@ ApplyResult GameAdapter::apply_snapshot_switch_bit(int stage, int flag) {
         }
     }
     dComIfGs_onStageSwitch(stage, flag);
-    repair_remote_sewers_breakable_box(stage, flag);
+    repair_remote_switch_actors(stage, flag);
     return ApplyResult::Applied;
 }
 
@@ -3608,7 +3608,7 @@ void GameAdapter::flush_deferred_switches() {
         }
         if (it->value("set", true)) {
             dComIfGs_onStageSwitch(stage, flag);
-            repair_remote_sewers_breakable_box(stage, flag);
+            repair_remote_switch_actors(stage, flag);
         } else {
             dComIfGs_offStageSwitch(stage, flag);
         }
