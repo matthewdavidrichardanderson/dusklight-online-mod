@@ -3006,6 +3006,11 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                 if (syncFlagsEnabled_ && !enabled) clear_disabled_sync_flags_state();
                 if (!syncFlagsEnabled_ && enabled) localObservedState_ = nlohmann::json();
                 syncFlagsEnabled_ = enabled;
+            } else if (type == "owner_changed" &&
+                       message.ingress.mode == net::Mode::Relay) {
+                apply_owner_color(
+                    message.payload.value("owner_client_id", std::string()),
+                    message.ingress.clientId);
             }
             return ApplyResult::Applied;
         case MessageDomain::Presence:
@@ -3271,6 +3276,44 @@ void GameAdapter::assign_peer_color(std::string_view peerId) {
         }
     }
     peerColorSlots_[id] = 7;
+}
+
+void GameAdapter::apply_owner_color(std::string_view ownerPeerId,
+                                    std::string_view localPeerId) {
+    if (ownerPeerId.empty() || localPeerId.empty()) return;
+
+    const bool localIsOwner = ownerPeerId == localPeerId;
+    uint8_t previousOwnerSlot = localColorSlot_;
+    std::map<std::string, uint8_t>::iterator owner = peerColorSlots_.end();
+    if (!localIsOwner) {
+        assign_peer_color(ownerPeerId);
+        owner = peerColorSlots_.find(std::string(ownerPeerId));
+        if (owner == peerColorSlots_.end()) return;
+        previousOwnerSlot = owner->second;
+    }
+    if (previousOwnerSlot == 0) return;
+
+    // White (slot 0) identifies the current host. Swap its previous holder
+    // into the promoted player's old slot so every connected player keeps a
+    // unique colour, including when the former host later rejoins.
+    if (localColorSlot_ == 0) {
+        localColorSlot_ = previousOwnerSlot;
+    } else {
+        const auto previousWhite = std::find_if(
+            peerColorSlots_.begin(), peerColorSlots_.end(),
+            [&](const auto& entry) {
+                return entry.second == 0 && (localIsOwner || entry.first != owner->first);
+            });
+        if (previousWhite != peerColorSlots_.end()) {
+            previousWhite->second = previousOwnerSlot;
+        }
+    }
+
+    if (localIsOwner) {
+        localColorSlot_ = 0;
+    } else {
+        owner->second = 0;
+    }
 }
 
 void GameAdapter::consume_welcome_membership(const nlohmann::json& message) {

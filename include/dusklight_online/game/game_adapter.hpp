@@ -233,6 +233,7 @@ private:
     void reapply_observed_memory_items_for_current_stage();
     ApplyResult reject(std::string reason);
     void assign_peer_color(std::string_view peerId);
+    void apply_owner_color(std::string_view ownerPeerId, std::string_view localPeerId);
     void consume_welcome_membership(const nlohmann::json& message);
     bool request_manual_sync_impl(std::string_view peerId, bool flagsOnly,
                                   std::string_view cueKey, std::string* error,
