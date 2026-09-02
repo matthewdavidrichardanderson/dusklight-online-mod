@@ -17,6 +17,7 @@
 #include "d/actor/d_a_obj_drop.h"
 #include "d/actor/d_a_obj_item.h"
 #include "d/actor/d_a_obj_life_container.h"
+#include "d/actor/d_a_obj_bbox.h"
 #include "d/actor/d_a_obj_smallkey.h"
 #include "d/actor/d_a_obj_sword.h"
 #include "d/d_com_inf_game.h"
@@ -64,6 +65,12 @@ void* judge_sword(void* actor, void* data) {
     if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_Obj_Sword_e) return nullptr;
     auto* sword = static_cast<daObjSword_c*>(actor);
     return sword->getItemBit() == *static_cast<int*>(data) ? actor : nullptr;
+}
+
+void* judge_sewers_breakable_box(void* actor, void* data) {
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_Obj_BBox_e) return nullptr;
+    auto* box = static_cast<daObjBBox_c*>(actor);
+    return box->getSwNo() == *static_cast<int*>(data) ? actor : nullptr;
 }
 
 void repair_tbox_visual(int flag) {
@@ -132,6 +139,26 @@ void repair_remote_memory_item_collectible(int stage, int flag) {
     }
 }
 
+bool repair_remote_sewers_breakable_box(int stage, int flag) {
+    constexpr int kFirstSewersBoxSwitch = 10;
+    if (stage != dStage_SaveTbl_PRISON || flag != kFirstSewersBoxSwitch ||
+        stage != current_stage_table()) {
+        return false;
+    }
+    auto* box = static_cast<daObjBBox_c*>(
+        fopAcIt_Judge(judge_sewers_breakable_box, &flag));
+    if (box == nullptr) return false;
+
+    static constexpr u16 particleIds[] = {0x83B0, 0x83B1, 0x83B2, 0x83B3, 0x83B4};
+    for (u16 particleId : particleIds) {
+        dComIfGp_particle_set(particleId, &box->current.pos, nullptr, &box->scale,
+                              0xff, nullptr, -1, nullptr, nullptr, nullptr);
+    }
+    fopAcM_seStart(box, Z2SE_OBJ_WOODBOX_BREAK, 0);
+    fopAcM_delete(box);
+    return true;
+}
+
 void repair_current_stage_collectibles() {
     const int stage = current_stage_table();
     if (stage < 0) return;
@@ -147,6 +174,11 @@ void repair_current_stage_collectibles() {
                 repair_sword_visual(globalBit);
             }
         }
+    }
+    constexpr int kFirstSewersBoxSwitch = 10;
+    if (stage == dStage_SaveTbl_PRISON &&
+        dComIfGs_isStageSwitch(stage, kFirstSewersBoxSwitch)) {
+        repair_remote_sewers_breakable_box(stage, kFirstSewersBoxSwitch);
     }
 }
 

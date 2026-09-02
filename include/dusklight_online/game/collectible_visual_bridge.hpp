@@ -6,6 +6,10 @@ namespace dusklight_online::game {
 void repair_remote_tbox_collectible(int stage, int flag, bool newlySet);
 void repair_remote_memory_item_collectible(int stage, int flag);
 
+// Remove the already-live first Sewers breakable box when its permanent
+// switch arrives from another player.
+bool repair_remote_sewers_breakable_box(int stage, int flag);
+
 // Actors can spawn after a snapshot or live bit is applied, so repeat the
 // repair while playing.
 void repair_current_stage_collectibles();
