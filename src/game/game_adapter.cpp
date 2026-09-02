@@ -1,5 +1,4 @@
 #include "dusklight_online/game/game_adapter.hpp"
-#include "dusklight_online/game/abi_compat.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -960,7 +959,7 @@ std::vector<u8> capture_current_synced_key_items() {
 
 void restore_captured_synced_key_items(const std::vector<u8>& items) {
     for (const u8 item : items) {
-        if (!dComIfGs_isItemFirstBit(item)) execute_item_get_compat(item);
+        if (!dComIfGs_isItemFirstBit(item)) execItemGet(item, 0, nullptr);
     }
 }
 
@@ -1699,7 +1698,7 @@ bool GameAdapter::randomizer_active() const {
     // the old all-in-one build, its private context is not linkable from this
     // standalone mod, so use the host-selected save namespace only to choose
     // randomizer packet semantics.
-    const char* saveFileName = current_save_file_name_compat();
+    const char* saveFileName = mDoMemCd_GetFileName();
     return saveFileName != nullptr && std::string_view(saveFileName) == "randomizer";
 }
 
@@ -3113,7 +3112,7 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
     // ItemService observers report the sender's already-resolved reward.
     // Apply that exact item, matching execResolvedItemGet in the combined
     // implementation; never resolve the remote check a second time.
-    if (itemToApply != dItemNo_NONE_e) execute_item_get_compat(itemToApply);
+    if (itemToApply != dItemNo_NONE_e) execItemGet(itemToApply, 0, nullptr);
 
     const std::string localPeerId = message.ingress.mode == net::Mode::DirectHost ?
                                         "direct" : message.ingress.clientId;
@@ -4011,7 +4010,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return reject("invalid or unsynchronized item_get item_id");
         }
         if (!dComIfGs_isItemFirstBit(static_cast<u8>(itemId))) {
-            execute_item_get_compat(static_cast<u8>(itemId));
+            execItemGet(static_cast<u8>(itemId), 0, nullptr);
         }
         if (itemId == dItemNo_KANTERA_e) repair_lantern_item_state();
         return ApplyResult::Applied;
@@ -5000,7 +4999,7 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         const int item = raw.get<int>();
         if (item >= 0 && item <= 0xFF && is_synced_key_item(item) &&
             !dComIfGs_isItemFirstBit(static_cast<u8>(item)))
-            execute_item_get_compat(static_cast<u8>(item));
+            execItemGet(static_cast<u8>(item), 0, nullptr);
     }
     repair_lantern_item_state();
     repair_current_stage_collectibles();

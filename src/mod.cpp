@@ -1,5 +1,4 @@
 #include "dusklight_online/online_app.hpp"
-#include "dusklight_online/game/abi_compat.hpp"
 #include "dusklight_online/logging.hpp"
 
 #include "f_ap/f_ap_game.h"
@@ -66,10 +65,6 @@ void log_info(std::string_view message) {
 extern "C" {
 
 MOD_EXPORT ModResult mod_initialize(ModError* error) {
-    if (!dusklight_online::game::required_game_abi_available()) {
-        return mods::set_error(error, MOD_UNAVAILABLE,
-                               "compatible actor and item APIs are unavailable");
-    }
     sApp = std::make_unique<dusklight_online::OnlineApp>();
     if (sApp->initialize(error) != MOD_OK) {
         sApp.reset();

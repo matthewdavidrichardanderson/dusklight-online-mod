@@ -11,7 +11,6 @@
 #include "Z2AudioLib/Z2SoundInfo.h"
 #include "Z2AudioLib/Z2SoundStarter.h"
 #include "f_op/f_op_actor_mng.h"
-#include "dusklight_online/game/abi_compat.hpp"
 
 namespace dusklight_online::game {
 
@@ -52,10 +51,4 @@ bool remote_audio_start_no_cull(Z2AudioMgr* audioMgr, JAISoundID soundId, u32 ma
 // condition bookkeeping remain unchanged.
 #define OSPanic(...) ((void)0)
 
-// The actor uses a private process ID. The bridge returns this mod-owned
-// profile only while resolving a recorded Remote Link creation.
-#define fopAcM_create(profile, actorParams, position, room, angle, scale, argument) \
-    ::dusklight_online::game::create_actor_compat(                               \
-        profile, actorParams, position, room, angle, scale, argument)
 #include "d_a_remote_link_impl.inc"
-#undef fopAcM_create

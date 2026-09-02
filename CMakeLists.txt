@@ -226,7 +226,6 @@ set(ONLINE_CORE_SOURCES
 )
 
 set(ONLINE_GAME_SOURCES
-    src/game/abi_compat.cpp
     src/game/audio_bridge.cpp
     src/game/bomb_bridge.cpp
     src/game/collectible_visual_bridge.cpp

@@ -2,7 +2,6 @@
 
 #include "d/dolzel.h"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
-#include "dusklight_online/game/abi_compat.hpp"
 #include "dusk/frame_interpolation.h"
 #include "dusk/logging.h"
 #include "f_pc/f_pc_base.h"
@@ -187,8 +186,8 @@ void remote_process_delete_post(ModContext*, void* args, void* retval, void*) {
 
 fpc_ProcID create_remote_actor_process(u32 actorParams, const cXyz* position, int room,
                                        const csXyz* angle, const cXyz* scale, s8 argument) {
-    const fpc_ProcID processId = create_actor_compat(
-        kRemoteLinkProfileId, actorParams, position, room, angle, scale, argument);
+    const fpc_ProcID processId = fopAcM_create(
+        kRemoteLinkProfileId, actorParams, position, room, angle, scale, argument, 0, 0xFF);
     if (processId != fpcM_ERROR_PROCESS_ID_e) {
         sPendingRemoteCreates.insert(processId);
         sRemoteProcessIds.insert(processId);
