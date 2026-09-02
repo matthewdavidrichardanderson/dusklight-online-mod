@@ -27,7 +27,7 @@ endif ()
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "008a18c1428c1827795867a6645898a035b64a7b")
+    set(DUSKLIGHT_VERSION "3ded32438846a1af122b9a8112c20a19618fc82c")
 endif ()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
