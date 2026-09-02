@@ -258,7 +258,7 @@ void push_clipboard_toast(const char* message, bool warning = false) {
 
 constexpr const char* kOnlineOverlayRcss = R"RCSS(
 toast[mod-id="io.github.mdra5000.dusklight_online"] {
-    top: 76dp;
+    top: 58dp;
     padding: 7dp 10dp;
     gap: 3dp;
     border-radius: 10dp;
