@@ -461,24 +461,38 @@ static void applySheathStrapVisibility(J3DModel* i_bodyModel, int i_clothesVaria
     }
 }
 
-static void applyZoraArmorShapeVisibility(J3DModel* i_bodyModel, bool i_maskDraw,
-                                          bool i_heavyBoots) {
+static void applyArmorShapeVisibility(J3DModel* i_bodyModel, int i_clothesVariant,
+                                      bool i_maskDraw, bool i_heavyBoots) {
     if (i_bodyModel == NULL) {
         return;
     }
 
     J3DModelData* modelData = i_bodyModel->getModelData();
-    J3DShape* normalBoots = getMaterialShape(modelData, 8);
-    J3DShape* shoulderFins = getMaterialShape(modelData, 9);
-    J3DShape* mask = getMaterialShape(modelData, 11);
+    J3DShape* normalBoots = NULL;
+    switch (i_clothesVariant) {
+    case 0:
+        normalBoots = getMaterialShape(modelData, 6);
+        break;
+    case 2:
+        normalBoots = getMaterialShape(modelData, 8);
+        break;
+    case 3:
+        normalBoots = getMaterialShape(modelData, 10);
+        break;
+    }
     if (normalBoots != NULL) {
         i_heavyBoots ? normalBoots->hide() : normalBoots->show();
     }
-    if (shoulderFins != NULL) {
-        i_maskDraw && !i_heavyBoots ? shoulderFins->show() : shoulderFins->hide();
-    }
-    if (mask != NULL) {
-        i_maskDraw ? mask->show() : mask->hide();
+
+    if (i_clothesVariant == 2) {
+        J3DShape* shoulderFins = getMaterialShape(modelData, 9);
+        J3DShape* mask = getMaterialShape(modelData, 11);
+        if (shoulderFins != NULL) {
+            i_maskDraw && !i_heavyBoots ? shoulderFins->show() : shoulderFins->hide();
+        }
+        if (mask != NULL) {
+            i_maskDraw ? mask->show() : mask->hide();
+        }
     }
 }
 
@@ -1829,10 +1843,8 @@ void daRemoteLink_c::setupEquipmentModels() {
     if (mVisualState.form != FORM_WOLF) {
         applySheathStrapVisibility(mpBodyModel, mClothesVariant, mRemoteSwordDraw,
                                    mRemoteSwordVariant);
-        if (mClothesVariant == 2) {
-            applyZoraArmorShapeVisibility(mpBodyModel, mRemoteZoraMaskDraw,
-                                          mRemoteHeavyBoots);
-        }
+        applyArmorShapeVisibility(mpBodyModel, mClothesVariant, mRemoteZoraMaskDraw,
+                                  mRemoteHeavyBoots);
     }
 
     if (!mRemoteSwordDraw && mLoadedSwordVariant != -1) {
