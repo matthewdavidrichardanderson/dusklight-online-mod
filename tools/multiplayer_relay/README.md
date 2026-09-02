@@ -52,7 +52,7 @@ Open Online -> Relay -> Host, then enter:
 
 Relay code: the code supplied by the relay operator
 Nickname: Player 1
-Lobby name: dev
+Lobby name: Lobby
 Password: at least 6 characters
 ```
 

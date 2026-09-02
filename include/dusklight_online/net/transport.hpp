@@ -47,7 +47,7 @@ struct RoomSettings {
 
 struct DirectHostConfig {
     std::string name = "Host";
-    std::string room = "dev";
+    std::string room = "Lobby";
     std::string bindHost = "0.0.0.0";
     std::string publicHost = "127.0.0.1";
     std::string sessionId;
@@ -62,7 +62,7 @@ struct DirectHostConfig {
 
 struct DirectJoinConfig {
     std::string name = "Joiner";
-    std::string room = "dev";
+    std::string room = "Lobby";
     std::string host = "127.0.0.1";
     std::string sessionId;
     std::string sessionKey;
@@ -76,7 +76,7 @@ struct DirectJoinConfig {
 
 struct RelayConfig {
     std::string name = "Player";
-    std::string room = "dev";
+    std::string room = "Lobby";
     std::string password;
     std::string host = "127.0.0.1";
     std::string sessionId;

@@ -175,6 +175,19 @@ int main(int argc, char** argv) {
     if (!wait_until(owner, joiner, [&] { return joiner.status().isOwner; })) {
         fail("relay ownership did not transfer after owner disconnect");
     }
+    bool sawOwnerChanged = false;
+    while (joiner.has_events()) {
+        const auto event = joiner.pop_event();
+        if (event.kind == dusklight_online::net::EventKind::Message &&
+            event.message.value("type", std::string()) == "owner_changed" &&
+            event.message.value("owner_client_id", std::string()) ==
+                joiner.status().clientId) {
+            sawOwnerChanged = true;
+        }
+    }
+    if (!sawOwnerChanged) {
+        fail("relay ownership transfer did not deliver owner_changed");
+    }
 
     joiner.disconnect();
     std::cout << "relay transport client test passed\n";

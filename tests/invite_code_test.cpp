@@ -35,7 +35,7 @@ int main() {
         .transport = "direct",
         .host = "127.0.0.1",
         .port = 34197,
-        .room = "dev",
+        .room = "Lobby",
         .sessionId = "session",
         .sessionKey = "key",
     });

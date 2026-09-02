@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <mods/api.h>
@@ -57,6 +58,8 @@ private:
     std::unique_ptr<game::GameAdapter> game_;
     std::unique_ptr<game::ProtocolRouter> router_;
     UiWindowHandle window_ = 0;
+    UiWindowHandle settingsWindow_ = 0;
+    UiWindowHandle syncWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
     UiElementHandle panelStatus_ = 0;
     UiElementHandle windowStatus_ = 0;
@@ -66,6 +69,7 @@ private:
     std::string directCodeDisplay_;
     std::string relayCodeDisplay_;
     bool reopenWindowPending_ = false;
+    bool reopenSyncWindowPending_ = false;
     bool sessionActionsVisible_ = false;
     std::string statusMessage_ = "Not connected";
     std::string requestedDisconnectStatus_;
@@ -74,6 +78,15 @@ private:
     bool relayHostIntent_ = false;
     bool lastWantPuppet_ = true;
     bool lastWantMidna_ = false;
+    bool manualSyncWasWaiting_ = false;
+    uint32_t manualSyncCooldownTicks_ = 0;
+    UiElementHandle manualSyncFlagsButton_ = 0;
+    UiElementHandle manualSyncWarpButton_ = 0;
+    bool relayOwnerStateKnown_ = false;
+    bool wasRelayOwner_ = false;
+    std::string pendingLobbyFailurePrefix_;
+    bool pendingLobbyFailureNotified_ = false;
+    std::string connectedLobbyName_;
     std::vector<std::string> manualPeerIds_;
     std::vector<std::string> manualPeerLabels_;
     std::vector<UiElementHandle> manualPeerButtonElements_;
@@ -94,6 +107,8 @@ private:
     std::string status_text() const;
     std::string dashboard_rml() const;
     void open_window();
+    void open_settings_window();
+    void open_sync_window();
     void host_direct();
     void join_direct();
     void host_relay();
@@ -102,6 +117,9 @@ private:
     void publish_live_options();
     void refresh_manual_peer_choices();
     void request_manual_sync(bool flagsOnly);
+    void set_manual_sync_pending_visual(bool pending);
+    void begin_lobby_attempt(std::string failurePrefix);
+    void notify_lobby_attempt_failure(std::string_view detail);
 
 public:
     // C service callbacks must be addressable by the descriptor-building
@@ -110,13 +128,21 @@ public:
     static ModResult update_panel(ModContext*, void*, ModError*);
     static ModResult build_session_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                        UiElementHandle, void*, ModError*);
+    static ModResult build_settings_tab(ModContext*, UiWindowHandle, UiElementHandle,
+                                        UiElementHandle, void*, ModError*);
+    static ModResult build_sync_tab(ModContext*, UiWindowHandle, UiElementHandle,
+                                    UiElementHandle, void*, ModError*);
     static ModResult build_direct_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                       UiElementHandle, void*, ModError*);
     static ModResult build_relay_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                      UiElementHandle, void*, ModError*);
     static ModResult update_window(ModContext*, void*, ModError*);
     static void window_closed(ModContext*, UiWindowHandle, void*);
+    static void settings_window_closed(ModContext*, UiWindowHandle, void*);
+    static void sync_window_closed(ModContext*, UiWindowHandle, void*);
     static void open_pressed(ModContext*, void*);
+    static void settings_pressed(ModContext*, void*);
+    static void sync_menu_pressed(ModContext*, void*);
     static void menu_selected(ModContext*, void*);
     static void disconnect_pressed(ModContext*, void*);
     static void stop_hosting_pressed(ModContext*, void*);
@@ -137,7 +163,9 @@ public:
     static void manual_sync_warp_pressed(ModContext*, void*);
     static void manual_sync_flags_pressed(ModContext*, void*);
     static void refresh_peers_pressed(ModContext*, void*);
+    static void refresh_sync_peers_pressed(ModContext*, void*);
     static bool manual_sync_unavailable(ModContext*, void*);
+    static bool sync_menu_unavailable(ModContext*, void*);
     static bool session_active(ModContext*, void*);
     static bool host_inactive(ModContext*, void*);
     static bool joiner_inactive(ModContext*, void*);

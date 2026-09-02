@@ -32,6 +32,7 @@
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/resource.h"
+#include "mods/svc/ui.h"
 
 #include <imgui.h>
 
@@ -45,6 +46,21 @@ DEFINE_HOOK_SYMBOL("?GetCurrentContext@ImGui@@YAPEAUImGuiContext@@XZ",
                    ImGuiContext*(), HostImGuiGetCurrentContextSymbol);
 
 namespace {
+
+std::string escape_toast_rml(std::string_view text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (const char character : text) {
+        switch (character) {
+        case '&': escaped += "&amp;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        case '"': escaped += "&quot;"; break;
+        default: escaped += character; break;
+        }
+    }
+    return escaped;
+}
 
 using dusk::multiplayer::PeerPoseSnapshot;
 
@@ -758,10 +774,15 @@ void update_visual_overlays(
     sProgressionPrompt = progressionPrompt;
 }
 
-void push_online_notification(std::string text, float durationSeconds) {
+void push_online_notification(std::string text, float durationSeconds, bool warning) {
     if (text.empty()) return;
-    sNotifications.push_back({{}, std::move(text), {}, 0.0f, durationSeconds});
-    if (sNotifications.size() > 5) sNotifications.erase(sNotifications.begin());
+    const std::string body = escape_toast_rml(text);
+    UiToastDesc toast = UI_TOAST_DESC_INIT;
+    toast.type = warning ? "warning" : nullptr;
+    toast.body_rml = body.c_str();
+    toast.duration_ms = static_cast<uint32_t>(
+        std::clamp(durationSeconds * 1000.0f, 1.0f, 3600000.0f));
+    svc_ui->push_toast(mod_ctx, &toast);
 }
 
 void push_online_player_notification(std::string playerName, std::string text,

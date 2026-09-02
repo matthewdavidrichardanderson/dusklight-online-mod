@@ -122,6 +122,7 @@ constexpr uint32_t kProgressionPromptDurationTicks = 8 * 30;
 constexpr uint32_t kProgressionPromptHoldTicks = 30;
 constexpr uint32_t kProgressionStateReadyMaxAgeTicks = 90;
 constexpr uint32_t kPendingSyncReplyTimeoutTicks = 1800;
+constexpr uint32_t kManualSyncRequestTimeoutTicks = 5 * 30;
 constexpr uint32_t kOrdonReloadWarningTicks = 180;
 constexpr std::string_view kOoccooSaveBlob = "ooccoo-note-v1";
 constexpr std::string_view kBottleSourcesSaveBlob = "bottle-sources-v1";
@@ -2279,6 +2280,7 @@ void GameAdapter::notify_local_save_reset() {
     manualSyncFlagsOnly_ = false;
     manualSyncPeerId_.clear();
     manualSyncWaitTicks_ = 0;
+    manualSyncTimedOut_ = false;
 }
 
 void GameAdapter::notify_local_save_loaded() {
@@ -2428,6 +2430,7 @@ bool GameAdapter::request_manual_sync_impl(std::string_view peerId, bool flagsOn
         manualSyncFlagsOnly_ = flagsOnly;
         manualSyncPeerId_ = target;
         manualSyncWaitTicks_ = 0;
+        manualSyncTimedOut_ = false;
     }
     return true;
 }
@@ -2645,6 +2648,7 @@ void GameAdapter::clear_disabled_sync_flags_state() {
     manualSyncFlagsOnly_ = false;
     manualSyncPeerId_.clear();
     manualSyncWaitTicks_ = 0;
+    manualSyncTimedOut_ = false;
     peerProgressionStates_.clear();
     peerProgressionAges_.clear();
     deferredFaronInbound_.clear();
@@ -2676,8 +2680,9 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     } else {
         if (!syncFlagsWereEnabled) localObservedState_ = nlohmann::json();
         if (manualSyncState_ == ManualSyncState::Waiting &&
-            ++manualSyncWaitTicks_ >= 180) {
+            ++manualSyncWaitTicks_ >= kManualSyncRequestTimeoutTicks) {
             manualSyncState_ = ManualSyncState::Failed;
+            manualSyncTimedOut_ = true;
         }
         tick_manual_transition();
         update_pending_sync_replies();
@@ -2738,7 +2743,6 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     const bool visualReceiveActive = status.welcomed && remoteModelEnabled;
     if (!visualReceiveActive) {
         peerPoses_.clear();
-        clear_remote_matrix_history();
     }
     if (visualReceiveActive && remoteGameplayReady) {
         if (randomizerActive) {
@@ -3310,13 +3314,14 @@ void GameAdapter::peer_joined(std::string_view peerId, std::string_view name) {
     peerNames_[std::string(peerId)] = std::string(name);
     assign_peer_color(peerId);
     push_online_notification((name.empty() ? std::string(peerId) : std::string(name)) +
-                             " joined");
+                             " joined the lobby.");
 }
 
 void GameAdapter::peer_left(std::string_view peerId) {
     const std::string key(peerId);
     const auto nameIt = peerNames_.find(key);
-    push_online_notification((nameIt != peerNames_.end() ? nameIt->second : key) + " left");
+    push_online_notification((nameIt != peerNames_.end() ? nameIt->second : key) +
+                             " left the lobby.");
     peerNames_.erase(key);
     peerColorSlots_.erase(key);
     peerPresence_.erase(key);
@@ -3443,6 +3448,7 @@ void GameAdapter::reset_session() {
     manualSyncFlagsOnly_ = false;
     manualSyncPeerId_.clear();
     manualSyncWaitTicks_ = 0;
+    manualSyncTimedOut_ = false;
 }
 
 const std::string& GameAdapter::last_error() const {
@@ -3461,6 +3467,18 @@ std::string GameAdapter::manual_sync_status_text() const {
     default:
         return {};
     }
+}
+
+bool GameAdapter::manual_sync_waiting() const {
+    return manualSyncState_ == ManualSyncState::Waiting;
+}
+
+bool GameAdapter::manual_sync_failed() const {
+    return manualSyncState_ == ManualSyncState::Failed;
+}
+
+bool GameAdapter::manual_sync_timed_out() const {
+    return manualSyncState_ == ManualSyncState::Failed && manualSyncTimedOut_;
 }
 
 ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
@@ -3889,17 +3907,14 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return apply_save_snapshot(routed);
     }
     if (type == "sync_request") {
-        // Do not replay a request which arrived during an unsafe
-        // stage/event/title window. Only a safely accepted request may outlive
-        // this call in the typed pending-reply queue below.
-        if (dComIfGp_getStageStagInfo() == nullptr || dComIfGp_event_runCheck() ||
-            opening_or_title_active() || routed.peerId.empty()) {
+        if (routed.peerId.empty()) {
             return ApplyResult::IgnoredByPolicy;
         }
         const std::string cueKey = message.value("cue_key", std::string());
-        if (!cueKey.empty()) handledProgressionCues_.insert(routed.peerId + ':' + cueKey);
-        if (!local_state_ready_for_cue(cueKey)) {
-            const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
+        const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
+        const bool safeNow = stage_ready() && !opening_or_title_active() &&
+                             local_state_ready_for_cue(cueKey);
+        if (!safeNow) {
             const auto duplicate = std::find_if(
                 pendingSyncReplies_.begin(), pendingSyncReplies_.end(),
                 [&](const PendingSyncReply& reply) {
@@ -3908,11 +3923,16 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
                 });
             if (duplicate == pendingSyncReplies_.end()) {
                 pendingSyncReplies_.push_back({routed.peerId, cueKey, flagsOnly, 0});
+                std::ostringstream line;
+                line << "Online sync request queued peer=" << routed.peerId
+                     << " mode=" << (flagsOnly ? "flags" : "warp")
+                     << " cue=" << (cueKey.empty() ? "manual" : cueKey);
+                dusklight_online::log_info(line.str());
             }
             return ApplyResult::Retained;
         }
-        send_snapshot_to(routed.peerId, true,
-                         message.value("manual_sync_mode", "warp") == "flags");
+        if (!cueKey.empty()) handledProgressionCues_.insert(routed.peerId + ':' + cueKey);
+        send_snapshot_to(routed.peerId, true, flagsOnly);
         return ApplyResult::Applied;
     }
     if (type == "dark_clear_lv") return apply_dark_clear(message.value("no", -1));
@@ -4787,14 +4807,27 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
 }
 
 void GameAdapter::update_pending_sync_replies() {
-    if (pendingSyncReplies_.empty() || dComIfGp_getStageStagInfo() == nullptr ||
-        dComIfGp_event_runCheck()) {
-        return;
-    }
+    if (pendingSyncReplies_.empty()) return;
+    const bool baseSafe = stage_ready() && !opening_or_title_active();
     for (auto it = pendingSyncReplies_.begin(); it != pendingSyncReplies_.end();) {
         if (it->waitTicks < std::numeric_limits<uint32_t>::max()) ++it->waitTicks;
+        const bool manualRequest = it->cueKey.empty();
+        const uint32_t timeoutTicks = manualRequest ? kManualSyncRequestTimeoutTicks :
+                                                      kPendingSyncReplyTimeoutTicks;
+        const bool timedOut = it->waitTicks >= timeoutTicks;
+        if (manualRequest && timedOut) {
+            std::ostringstream line;
+            line << "Online queued sync request expired peer=" << it->peerId
+                 << " mode=" << (it->flagsOnly ? "flags" : "warp");
+            dusklight_online::log_info(line.str());
+            it = pendingSyncReplies_.erase(it);
+            continue;
+        }
+        if (!baseSafe) {
+            ++it;
+            continue;
+        }
         const bool ready = local_state_ready_for_cue(it->cueKey);
-        const bool timedOut = it->waitTicks >= kPendingSyncReplyTimeoutTicks;
         if (!ready && !timedOut) {
             ++it;
             continue;
@@ -4802,6 +4835,12 @@ void GameAdapter::update_pending_sync_replies() {
         if (!it->cueKey.empty()) {
             handledProgressionCues_.insert(it->peerId + ':' + it->cueKey);
         }
+        std::ostringstream line;
+        line << "Online replying to queued sync request peer=" << it->peerId
+             << " mode=" << (it->flagsOnly ? "flags" : "warp")
+             << " wait_ticks=" << it->waitTicks
+             << " cue=" << (it->cueKey.empty() ? "manual" : it->cueKey);
+        dusklight_online::log_info(line.str());
         send_snapshot_to(it->peerId, true, it->flagsOnly);
         it = pendingSyncReplies_.erase(it);
     }

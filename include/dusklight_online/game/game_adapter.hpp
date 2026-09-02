@@ -73,6 +73,9 @@ public:
     void reset_session();
     [[nodiscard]] const std::string& last_error() const;
     [[nodiscard]] std::string manual_sync_status_text() const;
+    [[nodiscard]] bool manual_sync_waiting() const;
+    [[nodiscard]] bool manual_sync_failed() const;
+    [[nodiscard]] bool manual_sync_timed_out() const;
 
 private:
     net::Transport& transport_;
@@ -189,6 +192,7 @@ private:
     bool manualSyncFlagsOnly_ = false;
     std::string manualSyncPeerId_;
     uint32_t manualSyncWaitTicks_ = 0;
+    bool manualSyncTimedOut_ = false;
 
     ApplyResult consume_progression(const RoutedMessage& message);
     ApplyResult consume_randomizer(const RoutedMessage& message);

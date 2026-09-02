@@ -1679,7 +1679,7 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
     impl_->status.enabled = true;
     impl_->status.mode = Mode::DirectHost;
     impl_->status.name = config.name.empty() ? "Host" : config.name;
-    impl_->status.room = config.room.empty() ? "dev" : config.room;
+    impl_->status.room = config.room.empty() ? "Lobby" : config.room;
     impl_->status.bindHost = config.bindHost;
     impl_->status.publicHost = config.publicHost;
     impl_->status.port = config.port;
@@ -1716,7 +1716,7 @@ bool Transport::start_direct_join(const DirectJoinConfig& config, std::string* e
     impl_->status.enabled = true;
     impl_->status.mode = Mode::DirectJoin;
     impl_->status.name = config.name.empty() ? "Joiner" : config.name;
-    impl_->status.room = config.room.empty() ? "dev" : config.room;
+    impl_->status.room = config.room.empty() ? "Lobby" : config.room;
     impl_->status.host = config.host;
     impl_->status.port = config.port;
     impl_->status.settings = config.settings;

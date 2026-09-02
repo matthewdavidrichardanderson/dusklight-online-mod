@@ -31,7 +31,8 @@ void update_visual_overlays(
     const std::map<std::string, std::string>& names,
     const std::map<std::string, uint8_t>& colorSlots,
     const ProgressionPromptView& progressionPrompt);
-void push_online_notification(std::string text, float durationSeconds = 5.0f);
+void push_online_notification(std::string text, float durationSeconds = 5.0f,
+                              bool warning = false);
 void push_online_player_notification(std::string playerName, std::string text,
                                      uint8_t colorSlot, float durationSeconds = 5.0f);
 void reset_visual_overlays();
