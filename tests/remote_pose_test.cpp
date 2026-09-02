@@ -80,6 +80,67 @@ int main() {
         return 1;
     }
 
+    std::vector<uint8_t> rodSegments(90, 0);
+    const auto writeI16 = [&rodSegments](size_t offset, int16_t value) {
+        const uint16_t bits = static_cast<uint16_t>(value);
+        rodSegments[offset] = static_cast<uint8_t>(bits & 0xFF);
+        rodSegments[offset + 1] = static_cast<uint8_t>(bits >> 8);
+    };
+    writeI16(0, 320);
+    writeI16(2, -160);
+    writeI16(4, 64);
+    std::vector<uint8_t> rodLine(
+        (dusk::multiplayer::kFishingRodLineSampleCount - 1) * 6, 0);
+    const auto writeLineI16 = [&rodLine](size_t offset, int16_t value) {
+        const uint16_t bits = static_cast<uint16_t>(value);
+        rodLine[offset] = static_cast<uint8_t>(bits & 0xFF);
+        rodLine[offset + 1] = static_cast<uint8_t>(bits >> 8);
+    };
+    writeLineI16(0, 40);
+    writeLineI16(2, -20);
+    writeLineI16(4, 8);
+    std::vector<uint8_t> rodEnd(25, 0);
+    rodEnd[0] = 1;
+    rodEnd[1] = 1;
+    rodEnd[2] = 2;
+    const auto writeEndI16 = [&rodEnd](size_t offset, int16_t value) {
+        const uint16_t bits = static_cast<uint16_t>(value);
+        rodEnd[offset] = static_cast<uint8_t>(bits & 0xFF);
+        rodEnd[offset + 1] = static_cast<uint8_t>(bits >> 8);
+    };
+    writeEndI16(3, -123);
+    writeEndI16(5, 40);
+    writeEndI16(11, 321);
+    writeEndI16(23, 77);
+    json fishingRod = pose_message(1, "semantic_gameplay");
+    fishingRod["state"]["equip_item"] = 0x4A;
+    fishingRod["state"]["fishing_rod_visual"] = {
+        {"segments", json::binary(rodSegments)},
+        {"line", json::binary(rodLine)},
+        {"end", json::binary(rodEnd)},
+    };
+    PeerPoseSnapshot fishingRodPose;
+    if (!decode_and_enforce(fishingRod, nullptr, fishingRodPose, error) ||
+        !fishingRodPose.fishingRodVisualValid ||
+        !fishingRodPose.fishingRodLineValid ||
+        !fishingRodPose.fishingRodEndValid ||
+        fishingRodPose.fishingRodSegmentDeltas[0] != 10.0f ||
+        fishingRodPose.fishingRodSegmentDeltas[1] != -5.0f ||
+        fishingRodPose.fishingRodSegmentDeltas[2] != 2.0f ||
+        fishingRodPose.fishingRodLineOffsets[3] != 10.0f ||
+        fishingRodPose.fishingRodLineOffsets[4] != -5.0f ||
+        fishingRodPose.fishingRodLineOffsets[5] != 2.0f ||
+        fishingRodPose.fishingRodAction != 1 ||
+        fishingRodPose.fishingRodHookKind != 1 ||
+        fishingRodPose.fishingRodBaitKind != 2 ||
+        fishingRodPose.fishingRodEndRoll != -123 ||
+        fishingRodPose.fishingRodBobberOffset[0] != 10.0f ||
+        fishingRodPose.fishingRodBobberAngles[0] != 321 ||
+        fishingRodPose.fishingRodCounter != 77) {
+        std::cerr << "fishing rod visual state was not decoded: " << error << '\n';
+        return 1;
+    }
+
     json facial = pose_message(3, "semantic_gameplay");
     facial["state"].update({
         {"face_bck", 101}, {"face_bck_arc", 0xFFFF}, {"face_bck_frame", 4.5f},

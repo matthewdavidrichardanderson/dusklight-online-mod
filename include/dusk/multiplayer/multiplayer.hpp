@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@ namespace dusk::multiplayer {
 
 // Remote Midna streaming is disabled because its matrix stream is not sent.
 inline constexpr bool kRemoteMidnaStreamingEnabled = false;
+inline constexpr size_t kFishingRodLineSampleCount = 21;
 
 struct RemoteModelMatrixSnapshot {
     bool valid = false;
@@ -291,6 +293,18 @@ struct PeerPoseSnapshot {
     float hookshotSubTipFrame = 0.0f;
     bool copyRodVisualValid = false;
     bool copyRodTopUse = false;
+    bool fishingRodVisualValid = false;
+    bool fishingRodLineValid = false;
+    std::array<float, 45> fishingRodSegmentDeltas{};
+    std::array<float, kFishingRodLineSampleCount * 3> fishingRodLineOffsets{};
+    bool fishingRodEndValid = false;
+    uint8_t fishingRodAction = 0;
+    uint8_t fishingRodHookKind = 0;
+    uint8_t fishingRodBaitKind = 0;
+    int fishingRodEndRoll = 0;
+    std::array<float, 3> fishingRodBobberOffset{};
+    std::array<int16_t, 6> fishingRodBobberAngles{};
+    int fishingRodCounter = 0;
     bool bowVisualValid = false;
     bool bowGrabLeft = false;
     int bowBck = 0;

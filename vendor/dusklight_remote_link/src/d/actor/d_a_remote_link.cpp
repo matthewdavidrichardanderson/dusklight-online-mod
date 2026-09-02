@@ -765,6 +765,10 @@ daRemoteLink_c::daRemoteLink_c()
       mpSheathModel(NULL),
       mpShieldModel(NULL),
       mpHeldItemModel(NULL),
+      mpFishingRodModels(),
+      mpFishingRodFloatModels(),
+      mpFishingRodHookModels(),
+      mpFishingRodBaitModels(),
       mpHookTipModel(NULL),
       mpHookSubItemModel(NULL),
       mpHookSubTipModel(NULL),
@@ -1031,6 +1035,26 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteBoomerangRenderedAngle(0, 0, 0),
       mRemoteCopyRodVisualValid(false),
       mRemoteCopyRodTopUse(false),
+      mRemoteFishingRodVisualValid(false),
+      mRemoteFishingRodLineValid(false),
+      mRemoteFishingRodEndValid(false),
+      mRemoteFishingRodPreviousValid(false),
+      mRemoteFishingRodSegmentDeltas(),
+      mRemoteFishingRodPreviousSegmentDeltas(),
+      mRemoteFishingRodLineOffsets(),
+      mRemoteFishingRodPreviousLineOffsets(),
+      mRemoteFishingRodLine(),
+      mRemoteFishingRodLineInitialized(false),
+      mRemoteFishingRodAction(0),
+      mRemoteFishingRodHookKind(0),
+      mRemoteFishingRodBaitKind(0),
+      mRemoteFishingRodEndRoll(0),
+      mRemoteFishingRodPreviousEndRoll(0),
+      mRemoteFishingRodBobberOffset(cXyz::Zero),
+      mRemoteFishingRodPreviousBobberOffset(cXyz::Zero),
+      mRemoteFishingRodBobberAngles(),
+      mRemoteFishingRodPreviousBobberAngles(),
+      mRemoteFishingRodCounter(0),
       mRemoteBowVisualValid(false),
       mRemoteBowGrabLeft(false),
       mRemoteBowBck(0),
@@ -2263,6 +2287,76 @@ void daRemoteLink_c::setupHeldItemModel() {
                  (void*)mpHookSubTipModel, (void*)mpArrowModel);
 }
 
+void daRemoteLink_c::setupFishingRodModels() {
+    if (!mRemoteFishingRodVisualValid || mVisualState.form == FORM_WOLF) {
+        return;
+    }
+    bool complete = true;
+    for (J3DModel* model : mpFishingRodModels) {
+        if (model == NULL) {
+            complete = false;
+            break;
+        }
+    }
+    for (J3DModel* model : mpFishingRodFloatModels) {
+        if (model == NULL) complete = false;
+    }
+    for (J3DModel* model : mpFishingRodHookModels) {
+        if (model == NULL) complete = false;
+    }
+    for (J3DModel* model : mpFishingRodBaitModels) {
+        if (model == NULL) complete = false;
+    }
+    if (complete) return;
+
+    for (J3DModel*& model : mpFishingRodModels) model = NULL;
+    for (J3DModel*& model : mpFishingRodFloatModels) model = NULL;
+    for (J3DModel*& model : mpFishingRodHookModels) model = NULL;
+    for (J3DModel*& model : mpFishingRodBaitModels) model = NULL;
+    for (int i = 0; i < 15; ++i) {
+        int resource = 40;
+        if (i > 0) {
+            resource = (i == 3 || i == 6 || i == 9 || i >= 12) ? 42 : 41;
+        }
+        mpFishingRodModels[i] = initModel(
+            static_cast<J3DModelData*>(getArchiveObjectRes(
+                mEquipmentArchives[l_eqArcAlink], resource)),
+            J3DMdlFlag_DifferedDLBuffer, 0);
+        if (mpFishingRodModels[i] == NULL) {
+            DuskLog.warn("RemoteLink: fishing rod segment model load failed segment={} resource={}",
+                         i, resource);
+            for (J3DModel*& model : mpFishingRodModels) model = NULL;
+            mRemoteFishingRodVisualValid = false;
+            return;
+        }
+    }
+    static const int floatResources[2] = {45, 46};
+    static const int hookResources[2] = {44, 43};
+    static const int baitResources[2] = {36, 48};
+    for (int i = 0; i < 2; ++i) {
+        mpFishingRodFloatModels[i] = initModel(
+            static_cast<J3DModelData*>(getArchiveObjectRes(
+                mEquipmentArchives[l_eqArcAlink], floatResources[i])),
+            J3DMdlFlag_DifferedDLBuffer, 0);
+        mpFishingRodHookModels[i] = initModel(
+            static_cast<J3DModelData*>(getArchiveObjectRes(
+                mEquipmentArchives[l_eqArcAlink], hookResources[i])),
+            J3DMdlFlag_DifferedDLBuffer, 0);
+        mpFishingRodBaitModels[i] = initModel(
+            static_cast<J3DModelData*>(getArchiveObjectRes(
+                mEquipmentArchives[l_eqArcAlink], baitResources[i])),
+            J3DMdlFlag_DifferedDLBuffer, 0);
+        if (mpFishingRodFloatModels[i] == NULL ||
+            mpFishingRodHookModels[i] == NULL ||
+            mpFishingRodBaitModels[i] == NULL) {
+            DuskLog.warn("RemoteLink: fishing rod end model load failed slot={}", i);
+            mRemoteFishingRodVisualValid = false;
+            return;
+        }
+    }
+    DuskLog.info("RemoteLink: semantic fishing rod loaded (shaft, line, float, hook, bait; no actor)");
+}
+
 void daRemoteLink_c::setupLinkedItemModels() {
     if (mVisualState.form == FORM_WOLF) {
         mpKanteraModel = NULL;
@@ -3311,6 +3405,18 @@ int daRemoteLink_c::CreateHeap() {
         return FALSE;
     }
 
+    mRemoteFishingRodLineInitialized = mRemoteFishingRodLine.init(
+        1, dusk::multiplayer::kFishingRodLineSampleCount, 1);
+    if (!mRemoteFishingRodLineInitialized) {
+        DuskLog.warn("RemoteLink: failed to initialize fishing rod line renderer");
+    } else {
+        f32* widths = mRemoteFishingRodLine.getSize(0);
+        for (size_t i = 0; i < dusk::multiplayer::kFishingRodLineSampleCount;
+             ++i) {
+            widths[i] = 0.1f;
+        }
+    }
+
     return TRUE;
 }
 
@@ -3844,6 +3950,7 @@ void daRemoteLink_c::calcModels() {
         else if (mRemoteBottleVisualValid) updateRemoteBottleVisual(false);
         else mpHeldItemModel->calc();
     }
+    if (mRemoteFishingRodVisualValid) updateRemoteFishingRodVisual(false);
     if (mpHookTipModel != NULL && !mRemoteHookshotVisualValid &&
         !mRemoteBottleVisualValid) {
         mpHookTipModel->calc();
@@ -4637,6 +4744,12 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
     } else {
         applyInterpolatedRemoteModelMatrices(mpHeldItemModel, mHeldItemMatrixInterp,
                                              "held_item");
+    }
+    if (mRemoteFishingRodVisualValid) {
+        // The shaft is a separate fifteen-model visual, but its root is still
+        // hand-attached. Rebuild it after body interpolation just like the
+        // clawshot and bow so it cannot trail the visible hand above 30 FPS.
+        updateRemoteFishingRodVisual(true);
     }
     if (!mRemoteHookshotVisualValid && !mRemoteBottleVisualValid) {
         applyInterpolatedRemoteModelMatrices(mpHookTipModel, mHookTipMatrixInterp, "hook_tip");
@@ -5455,6 +5568,191 @@ void daRemoteLink_c::updateRemoteCopyRodVisual(bool i_presentation) {
     mHeldItemMatrixValid = mRemoteItemDraw;
 }
 
+void daRemoteLink_c::updateRemoteFishingRodVisual(bool i_presentation) {
+    if (!mRemoteFishingRodVisualValid || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 15) {
+        return;
+    }
+    for (J3DModel* model : mpFishingRodModels) {
+        if (model == NULL) return;
+    }
+
+    Mtx rightJoint;
+    MtxP source = mpBodyModel->getAnmMtx(15);
+    if (!i_presentation ||
+        !dusk::frame_interp::lookup_replacement(source, rightJoint)) {
+        MTXCopy(source, rightJoint);
+    }
+
+    // Native MG_ROD_KIND_UKI hand attachment from rod_control(). The first
+    // point follows Remote Link's final hand pose; only the bend deltas come
+    // from the sender's passive visual simulation.
+    mDoMtx_stack_c::copy(rightJoint);
+    mDoMtx_stack_c::YrotM(-17000);
+    mDoMtx_stack_c::XrotM(static_cast<s16>(0xA134));
+    mDoMtx_stack_c::transM(0.0f, -1.0f, -10.0f);
+    cXyz position;
+    mDoMtx_stack_c::multVecZero(&position);
+
+    const f32 alpha = i_presentation && mRemoteFishingRodPreviousValid &&
+                              dusk::frame_interp::is_enabled() ?
+                          dusk::frame_interp::get_interpolation_step() : 1.0f;
+    static const u8 rodWidth[15] = {
+        15, 15, 15, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 2,
+    };
+    for (int i = 0; i < 15; ++i) {
+        cXyz delta = mRemoteFishingRodSegmentDeltas[i];
+        if (alpha < 1.0f) {
+            delta = mRemoteFishingRodPreviousSegmentDeltas[i] +
+                    (delta - mRemoteFishingRodPreviousSegmentDeltas[i]) * alpha;
+        }
+        const f32 length = delta.abs();
+        if (length < 0.001f) continue;
+
+        mDoMtx_stack_c::transS(position);
+        mDoMtx_stack_c::YrotM(cM_atan2s(delta.x, delta.z));
+        mDoMtx_stack_c::XrotM(-cM_atan2s(
+            delta.y, JMAFastSqrt((delta.x * delta.x) + (delta.z * delta.z))));
+        const f32 widthScale = rodWidth[i] * 0.05166f;
+        mDoMtx_stack_c::scaleM(widthScale, widthScale, 0.073f * length);
+        if (i == 0) {
+            mDoMtx_stack_c::scaleM(1.0f, 1.0f, 0.5f);
+            mDoMtx_stack_c::transM(0.0f, 0.0f, -5.5f);
+        }
+        mpFishingRodModels[i]->setBaseTRMtx(mDoMtx_stack_c::get());
+        mpFishingRodModels[i]->calc();
+        if (i_presentation) overrideRemoteModelMatrices(mpFishingRodModels[i]);
+        position += delta;
+    }
+    if (mRemoteFishingRodLineInitialized) {
+        cXyz* linePoints = mRemoteFishingRodLine.getPos(0);
+        for (size_t i = 0; i < dusk::multiplayer::kFishingRodLineSampleCount;
+             ++i) {
+            cXyz offset = mRemoteFishingRodLineOffsets[i];
+            if (alpha < 1.0f) {
+                offset = mRemoteFishingRodPreviousLineOffsets[i] +
+                    (offset - mRemoteFishingRodPreviousLineOffsets[i]) * alpha;
+            }
+            linePoints[i] = position + offset;
+        }
+        if (i_presentation) {
+            // Match dusk-clean's MG_ROD interpolation fix: changing the line
+            // points is not enough because the camera-facing strip geometry
+            // was built at the simulation frame. Rebuild it for every
+            // presentation callback after interpolation.
+            static GXColor fishingLineColor = {0xFF, 0xFF, 0x96, 0xFF};
+            mRemoteFishingRodLine.update(
+                dusk::multiplayer::kFishingRodLineSampleCount,
+                fishingLineColor, &tevStr);
+        }
+    }
+    if (!mRemoteFishingRodEndValid) return;
+    for (J3DModel* model : mpFishingRodFloatModels) {
+        if (model == NULL) return;
+    }
+    for (J3DModel* model : mpFishingRodHookModels) {
+        if (model == NULL) return;
+    }
+    for (J3DModel* model : mpFishingRodBaitModels) {
+        if (model == NULL) return;
+    }
+
+    const auto lineOffsetAt = [&](size_t index) {
+        cXyz offset = mRemoteFishingRodLineOffsets[index];
+        if (alpha < 1.0f) {
+            offset = mRemoteFishingRodPreviousLineOffsets[index] +
+                (offset - mRemoteFishingRodPreviousLineOffsets[index]) * alpha;
+        }
+        return offset;
+    };
+    const auto angleAt = [&](size_t index) {
+        const s16 previous = mRemoteFishingRodPreviousBobberAngles[index];
+        const s16 delta = static_cast<s16>(
+            mRemoteFishingRodBobberAngles[index] - previous);
+        return static_cast<s16>(previous + static_cast<s16>(delta * alpha));
+    };
+    const cXyz endpoint = position +
+        lineOffsetAt(dusk::multiplayer::kFishingRodLineSampleCount - 1);
+    cXyz bobberOffset = mRemoteFishingRodBobberOffset;
+    if (alpha < 1.0f) {
+        bobberOffset = mRemoteFishingRodPreviousBobberOffset +
+            (bobberOffset - mRemoteFishingRodPreviousBobberOffset) * alpha;
+    }
+    const cXyz bobberPos = endpoint + bobberOffset;
+
+    // Native MG_ROD_KIND_UKI float body and tip transform.
+    mDoMtx_stack_c::transS(bobberPos);
+    mDoMtx_stack_c::YrotM(angleAt(0));
+    mDoMtx_stack_c::XrotM(angleAt(1));
+    mDoMtx_stack_c::YrotM(angleAt(2));
+    mDoMtx_stack_c::XrotM(angleAt(3));
+    mDoMtx_stack_c::ZrotM(angleAt(4));
+    mDoMtx_stack_c::XrotM(static_cast<s16>(
+        angleAt(5) * cM_ssin(angleAt(3))));
+    mDoMtx_stack_c::scaleM(0.7f, 0.7f, 0.7f);
+    mDoMtx_stack_c::transM(0.0f, 0.0f, -7.0f);
+    mpFishingRodFloatModels[0]->setBaseTRMtx(mDoMtx_stack_c::get());
+    mpFishingRodFloatModels[0]->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpFishingRodFloatModels[0]);
+    mDoMtx_stack_c::transM(0.0f, 0.0f, 35.0f);
+    mDoMtx_stack_c::scaleM(0.8f, 0.8f, 1.5f);
+    mpFishingRodFloatModels[1]->setBaseTRMtx(mDoMtx_stack_c::get());
+    mpFishingRodFloatModels[1]->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpFishingRodFloatModels[1]);
+
+    // Hook and bait share the final line endpoint and native orientation.
+    const cXyz hookDirection =
+        position + lineOffsetAt(dusk::multiplayer::kFishingRodLineSampleCount - 2) -
+        endpoint;
+    const s16 hookRotX = -cM_atan2s(hookDirection.y, hookDirection.z);
+    const s16 hookRotY = cM_atan2s(
+        hookDirection.x,
+        JMAFastSqrt(hookDirection.y * hookDirection.y +
+                    hookDirection.z * hookDirection.z));
+    const s16 rollDelta = static_cast<s16>(
+        mRemoteFishingRodEndRoll - mRemoteFishingRodPreviousEndRoll);
+    const s16 hookRoll = static_cast<s16>(
+        mRemoteFishingRodPreviousEndRoll +
+        static_cast<s16>(rollDelta * alpha));
+    mDoMtx_stack_c::transS(endpoint);
+    mDoMtx_stack_c::XrotM(hookRotX);
+    mDoMtx_stack_c::YrotM(hookRotY);
+    mDoMtx_stack_c::ZrotM(hookRoll);
+    mDoMtx_stack_c::push();
+    mDoMtx_stack_c::XrotM(0x4000);
+    const f32 hookScale = mRemoteFishingRodHookKind == 1 ? 0.5f : 1.0f;
+    mDoMtx_stack_c::scaleM(hookScale, hookScale, hookScale);
+    mpFishingRodHookModels[mRemoteFishingRodHookKind]->setBaseTRMtx(
+        mDoMtx_stack_c::get());
+    mpFishingRodHookModels[mRemoteFishingRodHookKind]->calc();
+    if (i_presentation) {
+        overrideRemoteModelMatrices(
+            mpFishingRodHookModels[mRemoteFishingRodHookKind]);
+    }
+    mDoMtx_stack_c::pop();
+
+    if (mRemoteFishingRodBaitKind == 1) {
+        mDoMtx_stack_c::XrotM(-0x8000);
+        mDoMtx_stack_c::transM(
+            0.0f, -0.5f,
+            mRemoteFishingRodHookKind == 1 ? 16.5f : 9.0f);
+        mDoMtx_stack_c::scaleM(0.1f, 0.1f, 0.1f);
+    } else if (mRemoteFishingRodBaitKind == 2) {
+        mDoMtx_stack_c::transM(
+            0.0f, -1.0f,
+            mRemoteFishingRodHookKind == 1 ? -9.0f : -3.0f);
+        mDoMtx_stack_c::scaleM(0.065f, 0.065f, 0.065f);
+    }
+    if (mRemoteFishingRodBaitKind != 0) {
+        J3DModel* bait =
+            mpFishingRodBaitModels[mRemoteFishingRodBaitKind - 1];
+        bait->setBaseTRMtx(mDoMtx_stack_c::get());
+        bait->calc();
+        if (i_presentation) overrideRemoteModelMatrices(bait);
+    }
+}
+
 void daRemoteLink_c::updateRemoteBowVisual(bool i_presentation) {
     if (!mRemoteBowVisualValid || mpHeldItemModel == NULL ||
         mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
@@ -5981,6 +6279,57 @@ void daRemoteLink_c::setRemoteCopyRodVisualState(bool i_valid, bool i_topUse) {
     }
     mHeldItemMatrixValid = mRemoteItemDraw && mpHeldItemModel != NULL;
     clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
+}
+
+void daRemoteLink_c::setRemoteFishingRodVisualState(
+    bool i_valid, bool i_lineValid, bool i_endValid,
+    const std::array<cXyz, 15>& i_segmentDeltas,
+    const std::array<cXyz,
+        dusk::multiplayer::kFishingRodLineSampleCount>& i_lineOffsets,
+    u8 i_action, u8 i_hookKind, u8 i_baitKind, s16 i_endRoll,
+    const cXyz& i_bobberOffset,
+    const std::array<s16, 6>& i_bobberAngles, s16 i_counter) {
+    const bool fishingItem = mRemoteEquipItem == dItemNo_FISHING_ROD_1_e ||
+        (mRemoteEquipItem >= dItemNo_BEE_ROD_e &&
+         mRemoteEquipItem <= dItemNo_JEWEL_WORM_ROD_e);
+    const bool wasValid = mRemoteFishingRodVisualValid;
+    // The fishing rod is a separate MG_ROD actor in TP, not Link's ordinary
+    // held-item model, so checkItemDraw()/mRemoteItemDraw does not govern it.
+    mRemoteFishingRodVisualValid =
+        i_valid && fishingItem && mVisualState.form != FORM_WOLF;
+    mRemoteFishingRodLineValid =
+        mRemoteFishingRodVisualValid && i_lineValid;
+    mRemoteFishingRodEndValid =
+        mRemoteFishingRodVisualValid && i_endValid;
+    if (!mRemoteFishingRodVisualValid) {
+        mRemoteFishingRodPreviousValid = false;
+        return;
+    }
+    if (wasValid) {
+        mRemoteFishingRodPreviousSegmentDeltas = mRemoteFishingRodSegmentDeltas;
+        mRemoteFishingRodPreviousLineOffsets = mRemoteFishingRodLineOffsets;
+        mRemoteFishingRodPreviousEndRoll = mRemoteFishingRodEndRoll;
+        mRemoteFishingRodPreviousBobberOffset = mRemoteFishingRodBobberOffset;
+        mRemoteFishingRodPreviousBobberAngles = mRemoteFishingRodBobberAngles;
+        mRemoteFishingRodPreviousValid = true;
+    } else {
+        mRemoteFishingRodPreviousSegmentDeltas = i_segmentDeltas;
+        mRemoteFishingRodPreviousLineOffsets = i_lineOffsets;
+        mRemoteFishingRodPreviousEndRoll = i_endRoll;
+        mRemoteFishingRodPreviousBobberOffset = i_bobberOffset;
+        mRemoteFishingRodPreviousBobberAngles = i_bobberAngles;
+        mRemoteFishingRodPreviousValid = false;
+    }
+    mRemoteFishingRodSegmentDeltas = i_segmentDeltas;
+    mRemoteFishingRodLineOffsets = i_lineOffsets;
+    mRemoteFishingRodAction = i_action;
+    mRemoteFishingRodHookKind = i_hookKind;
+    mRemoteFishingRodBaitKind = i_baitKind;
+    mRemoteFishingRodEndRoll = i_endRoll;
+    mRemoteFishingRodBobberOffset = i_bobberOffset;
+    mRemoteFishingRodBobberAngles = i_bobberAngles;
+    mRemoteFishingRodCounter = i_counter;
+    setupFishingRodModels();
 }
 
 void daRemoteLink_c::setRemoteBowVisualState(bool i_valid, bool i_grabLeft,
@@ -7249,6 +7598,28 @@ int daRemoteLink_c::Draw() {
 
     if (mHeldItemMatrixValid) {
         drawModel(mpHeldItemModel);
+    }
+    if (mRemoteFishingRodVisualValid) {
+        for (J3DModel* model : mpFishingRodModels) drawModel(model);
+        if (mRemoteFishingRodLineInitialized && mRemoteFishingRodLineValid) {
+            static GXColor fishingLineColor = {0xFF, 0xFF, 0x96, 0xFF};
+            mRemoteFishingRodLine.update(
+                dusk::multiplayer::kFishingRodLineSampleCount,
+                fishingLineColor, &tevStr);
+            dComIfGd_set3DlineMat(&mRemoteFishingRodLine);
+        }
+        if (mRemoteFishingRodEndValid) {
+            drawModel(mpFishingRodFloatModels[0]);
+            drawModel(mpFishingRodFloatModels[1]);
+            if (mRemoteFishingRodAction != 5 &&
+                mRemoteFishingRodAction != 6) {
+                drawModel(mpFishingRodHookModels[mRemoteFishingRodHookKind]);
+                if (mRemoteFishingRodBaitKind != 0) {
+                    drawModel(mpFishingRodBaitModels[
+                        mRemoteFishingRodBaitKind - 1]);
+                }
+            }
+        }
     }
     if (mRemoteIronBallVisualValid && mRemoteIronBallChainCount > 0 &&
         mpIronBallChainModelData != NULL) {

@@ -17,6 +17,7 @@
 #include "JSystem/J3DGraphAnimator/J3DMtxBuffer.h"
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_arrow.h"
+#include "d/actor/d_a_mg_rod.h"
 #include "d/actor/d_a_spinner.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item.h"
@@ -436,6 +437,13 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         link->mEquipItem == dItemNo_FAIRY_e ? 1 :
         link->mEquipItem == dItemNo_WORM_e ? 2 :
         link->mEquipItem == dItemNo_BEE_CHILD_e ? 3 : 0;
+    dmg_rod_class* fishingRodActor =
+        itemActor != nullptr && fopAcM_GetName(itemActor) == fpcNm_MG_ROD_e ?
+            reinterpret_cast<dmg_rod_class*>(itemActor) : nullptr;
+    const bool fishingRodVisualValid =
+        humanParts && fishingRodActor != nullptr &&
+        fishingRodActor->kind == MG_ROD_KIND_UKI &&
+        link->checkFishingRodItem(link->mEquipItem);
     fopAc_ac_c* rideActor = humanParts ? link->mRideAcKeep.getActor() : nullptr;
     daSpinner_c* spinnerActor =
         rideActor != nullptr && fopAcM_GetName(rideActor) == fpcNm_SPINNER_e ?
@@ -738,6 +746,86 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     if (semanticGameplay && copyRodVisualValid) {
         state["copy_rod_visual"] = {
             {"top_use", bool(link->checkCopyRodTopUse())},
+        };
+    }
+    if (semanticGameplay && fishingRodVisualValid) {
+        // The ordinary fishing rod is fifteen tapered display pieces driven by
+        // the Mg_rod actor's bend simulation. Preserve the simulated segment
+        // deltas at 1/32 world-unit precision; the receiver anchors the first
+        // piece to its own final right-hand pose and recreates the native model
+        // transforms without creating a fishing actor or any collision.
+        std::vector<uint8_t> segments;
+        segments.reserve(15 * 3 * sizeof(int16_t));
+        const auto appendDelta = [&segments](float value) {
+            const int packed = static_cast<int>(std::lround(
+                std::clamp(value * 32.0f, -32768.0f, 32767.0f)));
+            const uint16_t bits = static_cast<uint16_t>(static_cast<int16_t>(packed));
+            segments.push_back(static_cast<uint8_t>(bits & 0xFF));
+            segments.push_back(static_cast<uint8_t>(bits >> 8));
+        };
+        for (int i = 0; i < 15; ++i) {
+            const cXyz delta = fishingRodActor->mg_rod.field_0x0[i + 1] -
+                               fishingRodActor->mg_rod.field_0x0[i];
+            appendDelta(delta.x);
+            appendDelta(delta.y);
+            appendDelta(delta.z);
+        }
+        // Preserve the sender's simulated line curve without streaming all
+        // one hundred physics points. Point zero is the recreated rod tip, so
+        // only twenty fixed samples relative to it need to cross the wire.
+        static constexpr std::array<int,
+            dusk::multiplayer::kFishingRodLineSampleCount> lineSampleIndices = {
+                0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+                55, 60, 65, 70, 75, 80, 85, 90, 95, 99,
+            };
+        std::vector<uint8_t> line;
+        line.reserve((lineSampleIndices.size() - 1) * 3 * sizeof(int16_t));
+        const cXyz lineOrigin = fishingRodActor->mg_line.pos[0];
+        const auto appendLineOffset = [&line](float value) {
+            const int packed = static_cast<int>(std::lround(
+                std::clamp(value * 4.0f, -32768.0f, 32767.0f)));
+            const uint16_t bits = static_cast<uint16_t>(static_cast<int16_t>(packed));
+            line.push_back(static_cast<uint8_t>(bits & 0xFF));
+            line.push_back(static_cast<uint8_t>(bits >> 8));
+        };
+        for (size_t i = 1; i < lineSampleIndices.size(); ++i) {
+            const cXyz offset =
+                fishingRodActor->mg_line.pos[lineSampleIndices[i]] - lineOrigin;
+            appendLineOffset(offset.x);
+            appendLineOffset(offset.y);
+            appendLineOffset(offset.z);
+        }
+        std::vector<uint8_t> end;
+        end.reserve(25);
+        end.push_back(static_cast<uint8_t>(fishingRodActor->action));
+        end.push_back(static_cast<uint8_t>(fishingRodActor->hook_kind));
+        end.push_back(static_cast<uint8_t>(fishingRodActor->esa_kind));
+        const auto appendEndI16 = [&end](int value) {
+            const uint16_t bits = static_cast<uint16_t>(
+                static_cast<int16_t>(std::clamp(value, -32768, 32767)));
+            end.push_back(static_cast<uint8_t>(bits & 0xFF));
+            end.push_back(static_cast<uint8_t>(bits >> 8));
+        };
+        appendEndI16(fishingRodActor->actor.current.angle.z);
+        const cXyz bobberOffset = fishingRodActor->hook_pos -
+                                  fishingRodActor->mg_line.pos[99];
+        appendEndI16(static_cast<int>(std::lround(
+            std::clamp(bobberOffset.x * 4.0f, -32768.0f, 32767.0f))));
+        appendEndI16(static_cast<int>(std::lround(
+            std::clamp(bobberOffset.y * 4.0f, -32768.0f, 32767.0f))));
+        appendEndI16(static_cast<int>(std::lround(
+            std::clamp(bobberOffset.z * 4.0f, -32768.0f, 32767.0f))));
+        appendEndI16(fishingRodActor->field_0x10a0);
+        appendEndI16(fishingRodActor->field_0x10a2);
+        appendEndI16(fishingRodActor->field_0x1084.y);
+        appendEndI16(fishingRodActor->field_0x1084.x);
+        appendEndI16(fishingRodActor->field_0x108e);
+        appendEndI16(fishingRodActor->field_0x108a);
+        appendEndI16(fishingRodActor->counter);
+        state["fishing_rod_visual"] = {
+            {"segments", json::binary(std::move(segments))},
+            {"line", json::binary(std::move(line))},
+            {"end", json::binary(std::move(end))},
         };
     }
     if (semanticGameplay && bowVisualValid) {

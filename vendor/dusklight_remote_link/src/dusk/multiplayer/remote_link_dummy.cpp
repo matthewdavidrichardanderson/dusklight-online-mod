@@ -1558,6 +1558,35 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             presentationMode == ReceiverPresentationMode::SemanticGameplay &&
                 dummy.copyRodPresentationValid,
             dummy.copyRodTopUse);
+        std::array<cXyz, 15> fishingRodSegments{};
+        std::array<cXyz, kFishingRodLineSampleCount> fishingRodLine{};
+        if (pose.fishingRodVisualValid) {
+            for (size_t i = 0; i < fishingRodSegments.size(); ++i) {
+                fishingRodSegments[i].set(
+                    pose.fishingRodSegmentDeltas[i * 3],
+                    pose.fishingRodSegmentDeltas[i * 3 + 1],
+                    pose.fishingRodSegmentDeltas[i * 3 + 2]);
+            }
+            for (size_t i = 0; i < fishingRodLine.size(); ++i) {
+                fishingRodLine[i].set(
+                    pose.fishingRodLineOffsets[i * 3],
+                    pose.fishingRodLineOffsets[i * 3 + 1],
+                    pose.fishingRodLineOffsets[i * 3 + 2]);
+            }
+        }
+        actor->setRemoteFishingRodVisualState(
+            presentationMode == ReceiverPresentationMode::SemanticGameplay &&
+                pose.fishingRodVisualValid,
+            pose.fishingRodLineValid, pose.fishingRodEndValid,
+            fishingRodSegments, fishingRodLine,
+            pose.fishingRodAction, pose.fishingRodHookKind,
+            pose.fishingRodBaitKind,
+            static_cast<s16>(pose.fishingRodEndRoll),
+            cXyz(pose.fishingRodBobberOffset[0],
+                 pose.fishingRodBobberOffset[1],
+                 pose.fishingRodBobberOffset[2]),
+            pose.fishingRodBobberAngles,
+            static_cast<s16>(pose.fishingRodCounter));
         actor->setRemoteBowVisualState(
             presentationMode == ReceiverPresentationMode::SemanticGameplay &&
                 dummy.bowPresentationValid,

@@ -85,6 +85,14 @@ public:
     void setRemoteBoomerangVisualState(bool i_valid, bool i_linkAnchored,
                                        const cXyz& i_pos, const csXyz& i_angle);
     void setRemoteCopyRodVisualState(bool i_valid, bool i_topUse);
+    void setRemoteFishingRodVisualState(
+        bool i_valid, bool i_lineValid, bool i_endValid,
+        const std::array<cXyz, 15>& i_segmentDeltas,
+        const std::array<cXyz,
+            dusk::multiplayer::kFishingRodLineSampleCount>& i_lineOffsets,
+        u8 i_action, u8 i_hookKind, u8 i_baitKind, s16 i_endRoll,
+        const cXyz& i_bobberOffset,
+        const std::array<s16, 6>& i_bobberAngles, s16 i_counter);
     void setRemoteBowVisualState(bool i_valid, bool i_grabLeft, u16 i_bck,
                                  f32 i_frame, bool i_arrowVisible,
                                  bool i_arrowBomb);
@@ -229,6 +237,7 @@ private:
     J3DAnmTextureSRTKey* loadAramItemBtk(u16 i_resId, J3DModel* i_model);
     J3DAnmTexPattern* loadAramItemBtp(u16 i_resId, J3DModel* i_model);
     void setupHeldItemModel();
+    void setupFishingRodModels();
     void drawIronBallChain();
     void drawHookshotChains();
     void clearHeldItemExtras();
@@ -277,6 +286,7 @@ private:
     void updateRemoteHookshotVisual(bool i_presentation);
     void updateRemoteBoomerangVisual(bool i_presentation);
     void updateRemoteCopyRodVisual(bool i_presentation);
+    void updateRemoteFishingRodVisual(bool i_presentation);
     void updateRemoteBowVisual(bool i_presentation);
     void updateRemoteLanternVisual(bool i_presentation);
     void updateRemoteLanternFlame(bool i_presentation, const cXyz& i_flamePos);
@@ -343,6 +353,10 @@ private:
     /* 0x93C */ J3DModel* mpSheathModel;
     /* 0x940 */ J3DModel* mpShieldModel;
     /* 0x944 */ J3DModel* mpHeldItemModel;
+    J3DModel* mpFishingRodModels[15];
+    J3DModel* mpFishingRodFloatModels[2];
+    J3DModel* mpFishingRodHookModels[2];
+    J3DModel* mpFishingRodBaitModels[2];
     /* 0x948 */ J3DModel* mpHookTipModel;
     /* 0x94C */ J3DModel* mpHookSubItemModel;
     /* 0x950 */ J3DModel* mpHookSubTipModel;
@@ -614,6 +628,28 @@ private:
     csXyz mRemoteBoomerangRenderedAngle;
     bool mRemoteCopyRodVisualValid;
     bool mRemoteCopyRodTopUse;
+    bool mRemoteFishingRodVisualValid;
+    bool mRemoteFishingRodLineValid;
+    bool mRemoteFishingRodEndValid;
+    bool mRemoteFishingRodPreviousValid;
+    std::array<cXyz, 15> mRemoteFishingRodSegmentDeltas;
+    std::array<cXyz, 15> mRemoteFishingRodPreviousSegmentDeltas;
+    std::array<cXyz, dusk::multiplayer::kFishingRodLineSampleCount>
+        mRemoteFishingRodLineOffsets;
+    std::array<cXyz, dusk::multiplayer::kFishingRodLineSampleCount>
+        mRemoteFishingRodPreviousLineOffsets;
+    mDoExt_3DlineMat0_c mRemoteFishingRodLine;
+    bool mRemoteFishingRodLineInitialized;
+    u8 mRemoteFishingRodAction;
+    u8 mRemoteFishingRodHookKind;
+    u8 mRemoteFishingRodBaitKind;
+    s16 mRemoteFishingRodEndRoll;
+    s16 mRemoteFishingRodPreviousEndRoll;
+    cXyz mRemoteFishingRodBobberOffset;
+    cXyz mRemoteFishingRodPreviousBobberOffset;
+    std::array<s16, 6> mRemoteFishingRodBobberAngles;
+    std::array<s16, 6> mRemoteFishingRodPreviousBobberAngles;
+    s16 mRemoteFishingRodCounter;
     bool mRemoteBowVisualValid;
     bool mRemoteBowGrabLeft;
     u16 mRemoteBowBck;

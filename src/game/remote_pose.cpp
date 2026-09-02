@@ -984,6 +984,99 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
             pose.copyRodTopUse = copyRod.value("top_use", false);
             pose.copyRodVisualValid = true;
         }
+        pose.fishingRodVisualValid = false;
+        pose.fishingRodLineValid = false;
+        pose.fishingRodEndValid = false;
+        if (state.contains("fishing_rod_visual")) {
+            const json& fishingRod = state.at("fishing_rod_visual");
+            if (!fishingRod.is_object() || !fishingRod.contains("segments")) {
+                error = "pose contains invalid fishing rod visual state";
+                return false;
+            }
+            json packedContainer = {{"data", fishingRod.at("segments")}};
+            std::string packed;
+            if (!packed_bytes(packedContainer, packed) || packed.size() != 90) {
+                error = "pose contains invalid fishing rod segment state";
+                return false;
+            }
+            const auto readI16 = [&packed](size_t offset) {
+                const uint16_t bits = static_cast<uint8_t>(packed[offset]) |
+                    (static_cast<uint16_t>(static_cast<uint8_t>(packed[offset + 1])) << 8);
+                return static_cast<int16_t>(bits);
+            };
+            for (size_t i = 0; i < 15; ++i) {
+                const size_t offset = i * 6;
+                pose.fishingRodSegmentDeltas[i * 3] =
+                    static_cast<float>(readI16(offset)) / 32.0f;
+                pose.fishingRodSegmentDeltas[i * 3 + 1] =
+                    static_cast<float>(readI16(offset + 2)) / 32.0f;
+                pose.fishingRodSegmentDeltas[i * 3 + 2] =
+                    static_cast<float>(readI16(offset + 4)) / 32.0f;
+            }
+            pose.fishingRodLineOffsets.fill(0.0f);
+            pose.fishingRodLineValid = false;
+            if (fishingRod.contains("line")) {
+                json packedLineContainer = {{"data", fishingRod.at("line")}};
+                std::string packedLine;
+                constexpr size_t lineBytes =
+                    (kFishingRodLineSampleCount - 1) * 3 * sizeof(int16_t);
+                if (!packed_bytes(packedLineContainer, packedLine) ||
+                    packedLine.size() != lineBytes) {
+                    error = "pose contains invalid fishing rod line state";
+                    return false;
+                }
+                const auto readLineI16 = [&packedLine](size_t offset) {
+                    const uint16_t bits = static_cast<uint8_t>(packedLine[offset]) |
+                        (static_cast<uint16_t>(static_cast<uint8_t>(
+                             packedLine[offset + 1])) << 8);
+                    return static_cast<int16_t>(bits);
+                };
+                for (size_t i = 1; i < kFishingRodLineSampleCount; ++i) {
+                    const size_t offset = (i - 1) * 6;
+                    pose.fishingRodLineOffsets[i * 3] =
+                        static_cast<float>(readLineI16(offset)) / 4.0f;
+                    pose.fishingRodLineOffsets[i * 3 + 1] =
+                        static_cast<float>(readLineI16(offset + 2)) / 4.0f;
+                    pose.fishingRodLineOffsets[i * 3 + 2] =
+                        static_cast<float>(readLineI16(offset + 4)) / 4.0f;
+                }
+                pose.fishingRodLineValid = true;
+            }
+            if (fishingRod.contains("end")) {
+                json packedEndContainer = {{"data", fishingRod.at("end")}};
+                std::string packedEnd;
+                if (!packed_bytes(packedEndContainer, packedEnd) ||
+                    packedEnd.size() != 25) {
+                    error = "pose contains invalid fishing rod end state";
+                    return false;
+                }
+                const auto readEndI16 = [&packedEnd](size_t offset) {
+                    const uint16_t bits = static_cast<uint8_t>(packedEnd[offset]) |
+                        (static_cast<uint16_t>(static_cast<uint8_t>(
+                             packedEnd[offset + 1])) << 8);
+                    return static_cast<int16_t>(bits);
+                };
+                pose.fishingRodAction = static_cast<uint8_t>(packedEnd[0]);
+                pose.fishingRodHookKind = static_cast<uint8_t>(packedEnd[1]);
+                pose.fishingRodBaitKind = static_cast<uint8_t>(packedEnd[2]);
+                pose.fishingRodEndRoll = readEndI16(3);
+                for (size_t i = 0; i < 3; ++i) {
+                    pose.fishingRodBobberOffset[i] =
+                        static_cast<float>(readEndI16(5 + i * 2)) / 4.0f;
+                }
+                for (size_t i = 0; i < 6; ++i) {
+                    pose.fishingRodBobberAngles[i] = readEndI16(11 + i * 2);
+                }
+                pose.fishingRodCounter = readEndI16(23);
+                if (pose.fishingRodAction > 6 || pose.fishingRodHookKind > 1 ||
+                    pose.fishingRodBaitKind > 2) {
+                    error = "pose contains out-of-range fishing rod end state";
+                    return false;
+                }
+                pose.fishingRodEndValid = true;
+            }
+            pose.fishingRodVisualValid = true;
+        }
         pose.bowVisualValid = false;
         if (state.contains("bow_visual")) {
             const json& bow = state.at("bow_visual");
@@ -1137,6 +1230,11 @@ bool enforce_semantic_pose_invariants(PeerPoseSnapshot& pose, std::string& error
     if (pose.copyRodVisualValid && pose.equipItem != 0x46 &&
         pose.equipItem != 0x4C) {
         error = "semantic copy rod state has no equipped copy rod";
+        return false;
+    }
+    if (pose.fishingRodVisualValid && pose.equipItem != 0x4A &&
+        (pose.equipItem < 0x5B || pose.equipItem > 0x5F)) {
+        error = "semantic fishing rod state has no equipped fishing rod";
         return false;
     }
     if (pose.bowVisualValid && pose.equipItem != 0x43 &&
