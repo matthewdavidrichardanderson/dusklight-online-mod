@@ -245,12 +245,39 @@ std::string read_clipboard() {
 }
 
 void push_clipboard_toast(const char* message, bool warning = false) {
+    const std::string body = warning ?
+        "<row><span>" + rml_escape(message) +
+            "</span><icon class=\"warning\"></icon></row>" :
+        rml_escape(message);
     UiToastDesc toast = UI_TOAST_DESC_INIT;
-    toast.type = warning ? "warning" : nullptr;
-    toast.body_rml = message;
+    toast.type = warning ? "online-warning" : "online";
+    toast.body_rml = body.c_str();
     toast.duration_ms = 2500;
     svc_ui->push_toast(mod_ctx, &toast);
 }
+
+constexpr const char* kOnlineOverlayRcss = R"RCSS(
+toast[mod-id="io.github.mdra5000.dusklight_online"] {
+    top: 76dp;
+    padding: 7dp 10dp;
+    gap: 3dp;
+    border-radius: 10dp;
+}
+toast.online heading,
+toast.online-warning heading {
+    display: none;
+}
+toast.online-warning {
+    border: 1dp #C2A42D;
+}
+toast.online-warning message row {
+    align-items: center;
+    gap: 10dp;
+}
+toast.online-warning message row > span {
+    flex: 1 1 auto;
+}
+)RCSS";
 
 constexpr const char* kOnlineWindowRcss = R"RCSS(
 window content pane:last-of-type > div {
@@ -670,6 +697,10 @@ void OnlineApp::shutdown() {
         svc_ui->unregister_menu_tab(mod_ctx, menuTab_);
         menuTab_ = 0;
     }
+    if (overlayStyle_ != 0) {
+        svc_ui->unregister_styles(mod_ctx, overlayStyle_);
+        overlayStyle_ = 0;
+    }
     panelStatus_ = 0;
     windowStatus_ = 0;
     router_.reset();
@@ -743,6 +774,10 @@ ModResult OnlineApp::register_ui(ModError* error) {
     menu.user_data = this;
     if (svc_ui->register_menu_tab(mod_ctx, &menu, &menuTab_) != MOD_OK) {
         return mods::set_error(error, MOD_ERROR, "failed to register Online menu tab");
+    }
+    if (svc_ui->register_styles(mod_ctx, UI_SCOPE_OVERLAY, kOnlineOverlayRcss,
+                                &overlayStyle_) != MOD_OK) {
+        return mods::set_error(error, MOD_ERROR, "failed to register Online overlay styles");
     }
     return MOD_OK;
 }

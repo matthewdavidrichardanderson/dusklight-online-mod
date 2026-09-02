@@ -61,6 +61,7 @@ private:
     UiWindowHandle settingsWindow_ = 0;
     UiWindowHandle syncWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
+    UiStyleHandle overlayStyle_ = 0;
     UiElementHandle panelStatus_ = 0;
     UiElementHandle windowStatus_ = 0;
     UiElementHandle sessionActionsHeading_ = 0;

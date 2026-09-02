@@ -776,9 +776,12 @@ void update_visual_overlays(
 
 void push_online_notification(std::string text, float durationSeconds, bool warning) {
     if (text.empty()) return;
-    const std::string body = escape_toast_rml(text);
+    const std::string escaped = escape_toast_rml(text);
+    const std::string body = warning ?
+        "<row><span>" + escaped + "</span><icon class=\"warning\"></icon></row>" :
+        escaped;
     UiToastDesc toast = UI_TOAST_DESC_INIT;
-    toast.type = warning ? "warning" : nullptr;
+    toast.type = warning ? "online-warning" : "online";
     toast.body_rml = body.c_str();
     toast.duration_ms = static_cast<uint32_t>(
         std::clamp(durationSeconds * 1000.0f, 1.0f, 3600000.0f));
