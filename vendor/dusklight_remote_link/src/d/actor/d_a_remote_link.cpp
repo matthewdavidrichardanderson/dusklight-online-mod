@@ -352,6 +352,8 @@ static bool isRemoteLinkMotionAudio(const dusk::multiplayer::RemoteAudioEvent& i
     case Z2SE_WL_WALK_R_DUMMY:
     case Z2SE_WL_RUN_L_DUMMY:
     case Z2SE_WL_RUN_R_DUMMY:
+    case Z2SE_WL_V_ATTACK_THRUST:
+    case Z2SE_WOLFATTACK_WIND_RUSH:
         return true;
     default:
         return false;
@@ -404,6 +406,24 @@ static void calcRemoteLinkAudioMix(const cXyz& i_pos,
                            0.0f, 1.0f);
     *o_pan = audience->calcRelPosPan(relPos, 0);
     *o_dolby = audience->calcRelPosDolby(relPos, 0);
+}
+
+static void applyRemoteWolfLockAttackWindMix(
+    Z2SoundObjSimple& i_soundObj, const cXyz& i_pos,
+    const dusk::multiplayer::RemoteAudioEvent& i_event) {
+    if (i_event.soundId != Z2SE_WOLFATTACK_WIND_RUSH) return;
+
+    Z2SoundHandlePool* handle = i_soundObj.getHandleSoundID(i_event.soundId);
+    if (handle == NULL || !*handle) return;
+
+    f32 volume;
+    f32 pan;
+    f32 dolby;
+    calcRemoteLinkAudioMix(i_pos, i_event, &volume, &pan, &dolby);
+    JAISoundParamsMove& params = (*handle)->getAuxiliary();
+    params.moveVolume(volume, 0);
+    params.movePan(pan, 0);
+    params.moveDolby(dolby, 0);
 }
 
 static J3DShape* getMaterialShape(J3DModelData* i_modelData, u16 i_materialNo) {
@@ -4081,6 +4101,7 @@ int daRemoteLink_c::Execute() {
         if (!sound.active) {
             continue;
         }
+        applyRemoteWolfLockAttackWindMix(mActiveSoundObj, current.pos, sound.event);
         if (++sound.ageTicks > 8) {
             mActiveSoundObj.stopSound(sound.event.soundId, 2);
             sound.active = false;
@@ -7509,6 +7530,7 @@ void daRemoteLink_c::syncRemoteActiveSounds(
         const s8 reverb = event.reverb < 0 ? dComIfGp_getReverb(fopAcM_GetRoomNo(this)) :
                                              event.reverb;
         mActiveSoundObj.startLevelSound(event.soundId, event.mapInfo, reverb);
+        applyRemoteWolfLockAttackWindMix(mActiveSoundObj, current.pos, event);
     }
 }
 
