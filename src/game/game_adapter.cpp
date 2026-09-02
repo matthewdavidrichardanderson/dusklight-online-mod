@@ -2668,7 +2668,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
     syncFlagsEnabled_ = syncFlagsEnabled;
     syncWorldEnabled_ = syncWorldEnabled;
-    set_randomizer_audio_filter(randomizer_active());
+    const bool randomizerActive = randomizer_active();
+    set_randomizer_audio_filter(randomizerActive);
     sWorldSyncEnabled = syncWorldEnabled && transport_.status().welcomed;
     if (!syncFlagsEnabled_) {
         if (syncFlagsWereEnabled) clear_disabled_sync_flags_state();
@@ -2740,7 +2741,30 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         clear_remote_matrix_history();
     }
     if (visualReceiveActive && remoteGameplayReady) {
+        if (randomizerActive) {
+            // Foolish Item plays this level sound locally when rando_item_get is
+            // applied. Reject a streamed copy as well, including packets from
+            // older peers that do not have the sender-side filter.
+            const uint32_t foolishSound =
+                static_cast<uint32_t>(Z2SE_WL_V_LAND_DAMAGE);
+            for (auto& [peerId, pose] : peerPoses_) {
+                (void)peerId;
+                const auto isFoolishSound = [foolishSound](const auto& event) {
+                    return event.soundId == foolishSound;
+                };
+                std::erase_if(pose.audioEvents, isFoolishSound);
+                std::erase_if(pose.activeAudioEvents, isFoolishSound);
+            }
+        }
         dusk::multiplayer::sync_remote_link_actor_dummies(peerPoses_);
+        // peerPoses_ retains the latest UDP snapshot between arrivals. Active
+        // level sounds are a per-snapshot refresh, so consuming them once lets
+        // the actor's existing timeout stop a sound when packets cease instead
+        // of refreshing a stale event forever on every game tick.
+        for (auto& [peerId, pose] : peerPoses_) {
+            (void)peerId;
+            pose.activeAudioEvents.clear();
+        }
     } else if (!visualReceiveActive) {
         // Disconnecting or disabling remote models is owned by the mod and
         // requires explicit cleanup. During room/stage transitions, however,
