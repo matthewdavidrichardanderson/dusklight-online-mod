@@ -328,6 +328,48 @@ window content pane.online-form-pane > div {
     flex: 1 1 auto;
     min-width: 0;
 }
+.online-player-list {
+    display: flex;
+    flex-direction: column;
+}
+.online-player-row,
+.online-player-empty {
+    display: flex;
+    align-items: center;
+    padding: 12dp 14dp;
+    margin-bottom: 8dp;
+    border: 1dp rgba(146, 135, 91, 55%);
+    border-radius: 8dp;
+    background-color: rgba(224, 219, 200, 5%);
+}
+.online-player-indicator {
+    display: block;
+    width: 8dp;
+    height: 8dp;
+    margin-right: 11dp;
+    border-radius: 4dp;
+    background-color: #d4b83f;
+    box-shadow: rgba(212, 184, 63, 35%) 0 0 5dp 1dp;
+}
+.online-player-name {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 20dp;
+}
+.online-player-empty {
+    display: block;
+    color: rgba(224, 219, 200, 72%);
+}
+.online-player-empty-title,
+.online-player-empty-detail {
+    display: block;
+}
+.online-player-empty-detail {
+    margin-top: 3dp;
+    font-size: 16dp;
+    color: rgba(224, 219, 200, 48%);
+}
 button.online-peer-selected {
     color: #e0dbc8;
     background-color: rgba(194, 164, 45, 24%);
@@ -1283,20 +1325,11 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     svc_ui->pane_add_rml(mod_ctx, left, status.c_str(), &app.windowStatus_);
     app.windowRenderedStatus_ = status;
 
-    svc_ui->pane_add_section(mod_ctx, left, "Connected players");
-    if (!app.manualPeerLabels_.empty()) {
-        for (const std::string& name : app.manualPeerLabels_) {
-            svc_ui->pane_add_text(mod_ctx, left, name.c_str(), nullptr);
-        }
-    } else {
-        svc_ui->pane_add_text(mod_ctx, left, "No other players are connected.", nullptr);
-    }
-
-    svc_ui->pane_add_section(mod_ctx, right, "Session");
-    add_button(right, "Settings", &OnlineApp::settings_pressed, &app);
-    add_button(right, "Sync players", &OnlineApp::sync_menu_pressed, &app,
+    svc_ui->pane_add_section(mod_ctx, left, "Session");
+    add_button(left, "Settings", &OnlineApp::settings_pressed, &app);
+    add_button(left, "Sync players", &OnlineApp::sync_menu_pressed, &app,
                &OnlineApp::sync_menu_unavailable);
-    svc_ui->pane_add_rml(mod_ctx, right,
+    svc_ui->pane_add_rml(mod_ctx, left,
                          "<div class=\"section-heading\">Session actions</div>",
                          &app.sessionActionsHeading_);
     app.sessionActionsVisible_ = app.transport_.status().enabled;
@@ -1305,10 +1338,30 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                                "online-session-actions-hidden",
                                !app.sessionActionsVisible_);
     }
-    add_button(right, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
                &OnlineApp::host_inactive, nullptr, "online-danger-action");
-    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+    add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app,
                &OnlineApp::joiner_inactive, nullptr, "online-danger-action");
+
+    svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
+    svc_ui->pane_add_section(mod_ctx, right, "Connected players");
+    if (!app.manualPeerLabels_.empty()) {
+        std::string players = "<div class=\"online-player-list\">";
+        for (const std::string& name : app.manualPeerLabels_) {
+            players += "<div class=\"online-player-row\"><span class=\"online-player-indicator\"></span>"
+                       "<span class=\"online-player-name\">" + rml_escape(name) +
+                       "</span></div>";
+        }
+        players += "</div>";
+        svc_ui->pane_add_rml(mod_ctx, right, players.c_str(), nullptr);
+    } else {
+        svc_ui->pane_add_rml(
+            mod_ctx, right,
+            "<div class=\"online-player-empty\">"
+            "<span class=\"online-player-empty-title\">No other players are connected.</span>"
+            "<span class=\"online-player-empty-detail\">Players will appear here after joining.</span>"
+            "</div>", nullptr);
+    }
     return MOD_OK;
 }
 

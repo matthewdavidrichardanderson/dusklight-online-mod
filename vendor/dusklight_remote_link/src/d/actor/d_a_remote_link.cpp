@@ -784,6 +784,7 @@ daRemoteLink_c::daRemoteLink_c()
       mpHookshotTipBck(NULL),
       mpBowBck(NULL),
       mpBottleContentBck(NULL),
+      mBottleContentBckInitialized(false),
       mpTransformEffectBck(NULL),
       mpMidnaModel(NULL),
       mpMidnaMaskModel(NULL),
@@ -2215,13 +2216,20 @@ void daRemoteLink_c::setupHeldItemModel() {
         if (contentBmd != 0) {
             mpHookTipModel = initModel(loadAramBmd(contentBmd, contentBmdSize), 0);
         }
+        mBottleContentBckInitialized = false;
         if (mpHookTipModel != NULL && contentBck != 0) {
             J3DAnmTransform* bck = static_cast<J3DAnmTransform*>(
                 loadAramResource(contentBck, contentBckSize, false));
             if (mpBottleContentBck == NULL) mpBottleContentBck = JKR_NEW mDoExt_bckAnm();
             if (mpBottleContentBck != NULL && bck != NULL) {
-                mpBottleContentBck->init(bck, FALSE, J3DFrameCtrl::EMode_LOOP,
-                                         1.0f, 0, -1, true);
+                mBottleContentBckInitialized =
+                    mpBottleContentBck->init(bck, FALSE, J3DFrameCtrl::EMode_LOOP,
+                                             1.0f, 0, -1,
+                                             mpBottleContentBck->getBckAnm() != NULL) != 0;
+                if (!mBottleContentBckInitialized) {
+                    DuskLog.warn("RemoteLink: bottle content animation load failed kind={}",
+                                 mRemoteBottleContentKind);
+                }
             }
         }
         mLoadedBottleContentKind = mRemoteBottleContentKind;
@@ -6065,7 +6073,8 @@ void daRemoteLink_c::updateRemoteBottleVisual(bool i_presentation) {
 
     if (mpHookTipModel != NULL && mRemoteBottleContentKind != 0) {
         mpHookTipModel->setBaseTRMtx(mpHeldItemModel->getBaseTRMtx());
-        if (mpBottleContentBck != NULL && mRemoteBottleContentKind != 3) {
+        if (mpBottleContentBck != NULL && mBottleContentBckInitialized &&
+            mRemoteBottleContentKind != 3) {
             mpBottleContentBck->entry(mpHookTipModel->getModelData(),
                                       mRemoteBottleContentFrame);
         }
@@ -6414,11 +6423,17 @@ void daRemoteLink_c::setRemoteBottleVisualState(
     f32 i_btpFrame, f32 i_btkSwingFrame, f32 i_btkActionFrame,
     f32 i_btkFinishFrame, int i_contentKind, f32 i_contentFrame) {
     const bool bottleItem = isBottleItem(mRemoteEquipItem);
+    const bool valuesValid =
+        i_materialStage >= 0 && i_materialStage <= 2 &&
+        i_contentKind >= 0 && i_contentKind <= 3 &&
+        std::isfinite(i_brkFrame) && std::isfinite(i_btpFrame) &&
+        std::isfinite(i_btkSwingFrame) && std::isfinite(i_btkActionFrame) &&
+        std::isfinite(i_btkFinishFrame) && std::isfinite(i_contentFrame);
     const bool resourceLayoutChanged =
         mRemoteBottleDrinkMaterialSet != i_drinkMaterialSet ||
         mRemoteBottleContentKind != i_contentKind;
     mRemoteBottleVisualValid =
-        i_valid && bottleItem && mVisualState.form != FORM_WOLF;
+        i_valid && bottleItem && valuesValid && mVisualState.form != FORM_WOLF;
     mRemoteBottleOilRightAttached = i_oilRightAttached;
     mRemoteBottleJointRightAttached = i_jointRightAttached;
     mRemoteBottleDrinkMaterialSet = i_drinkMaterialSet;

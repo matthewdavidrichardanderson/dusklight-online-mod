@@ -372,6 +372,7 @@ private:
     mDoExt_bckAnm* mpHookshotTipBck;
     mDoExt_bckAnm* mpBowBck;
     mDoExt_bckAnm* mpBottleContentBck;
+    bool mBottleContentBckInitialized;
     mDoExt_bckAnm* mpTransformEffectBck;
     dKy_tevstr_c mRemoteMidnaTevStr;
     /* 0x968 */ J3DModel* mpMidnaModel;

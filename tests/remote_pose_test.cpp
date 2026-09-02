@@ -403,6 +403,23 @@ int main() {
         return 1;
     }
 
+    json invalidBottleItem = bottle;
+    invalidBottleItem["sequence"] = 13;
+    invalidBottleItem["state"]["equip_item"] = 0x90;
+    PeerPoseSnapshot invalidBottlePose;
+    if (decode_and_enforce(invalidBottleItem, &bottlePose, invalidBottlePose, error)) {
+        std::cerr << "non-bottle item accepted bottle visual state\n";
+        return 1;
+    }
+
+    json overflowingItem = pose_message(14, "semantic_gameplay");
+    overflowingItem["state"]["equip_item"] = 0x10000;
+    PeerPoseSnapshot overflowingItemPose;
+    if (decode_and_enforce(overflowingItem, &bottlePose, overflowingItemPose, error)) {
+        std::cerr << "out-of-range equipped item was accepted\n";
+        return 1;
+    }
+
     // Even malformed/malicious type-7 input cannot restore any body,
     // equipment, held-item, actor or effect matrix.
     json injected = pose_message(7, "semantic_gameplay");

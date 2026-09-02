@@ -34,6 +34,11 @@ constexpr uint32_t kSnapshotFullInterval = 120;
 std::map<std::string, std::map<uint32_t, std::string>> sMatrixHistory;
 std::map<std::string, std::map<uint32_t, json>> sSemanticSnapshotHistory;
 
+bool is_bottle_item(uint16_t item) {
+    return (item >= 0x60 && item <= 0x6C) || item == 0x73 || item == 0x74 ||
+           item == 0x76 || (item >= 0x77 && item <= 0x7F) || item == 0x9F;
+}
+
 bool decode_base64(std::string_view text, std::string& out) {
     static constexpr char alphabet[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -813,7 +818,12 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         pose.transformProcVar2 = state.value("transform_proc_v2", 0);
         pose.transformProcVar3 = state.value("transform_proc_v3", 0);
         pose.transformShapeX = state.value("transform_shape_x", 0);
-        pose.equipItem = uint16_t(state.value("equip_item", 0xffff));
+        const int64_t equipItem = state.value("equip_item", int64_t{0xffff});
+        if (equipItem < 0 || equipItem > std::numeric_limits<uint16_t>::max()) {
+            error = "pose contains invalid equipped item";
+            return false;
+        }
+        pose.equipItem = static_cast<uint16_t>(equipItem);
         pose.swordVariant = state.value("sword_variant", 0);
         pose.shieldVariant = state.value("shield_variant", 0);
         pose.clothesVariant = state.value("clothes_variant", 0);
@@ -1243,8 +1253,7 @@ bool enforce_semantic_pose_invariants(PeerPoseSnapshot& pose, std::string& error
         error = "semantic bow/slingshot state has no equipped projectile item";
         return false;
     }
-    if (pose.bottleVisualValid &&
-        (pose.equipItem < 0x60 || pose.equipItem > 0x9F)) {
+    if (pose.bottleVisualValid && !is_bottle_item(pose.equipItem)) {
         error = "semantic bottle state has no equipped bottle";
         return false;
     }
