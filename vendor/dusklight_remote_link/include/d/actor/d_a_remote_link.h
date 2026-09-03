@@ -108,6 +108,7 @@ public:
                                     f32 i_btkSwingFrame, f32 i_btkActionFrame,
                                     f32 i_btkFinishFrame, int i_contentKind,
                                     f32 i_contentFrame);
+    void setRemotePresentedItem(u16 i_itemNo);
     void setRemotePresentationVisible(bool i_visible);
     bool isRemotePresentationVisible() const { return mRemotePresentationVisible; }
     void setRemoteTransformBridgeState(bool i_visible, bool i_senderWolf,
@@ -289,9 +290,12 @@ private:
     void updateRemoteFishingRodVisual(bool i_presentation);
     void updateRemoteBowVisual(bool i_presentation);
     void updateRemoteLanternVisual(bool i_presentation);
+    void updateRemoteSimpleHeldItemVisual(bool i_presentation);
     void updateRemoteLanternFlame(bool i_presentation, const cXyz& i_flamePos);
     void stopRemoteLanternFlame(bool i_release);
     void updateRemoteBottleVisual(bool i_presentation);
+    void setupPresentedItemModel();
+    void updateRemotePresentedItemVisual(bool i_presentation);
     void captureRemoteModelMatrixSnapshot(
         J3DModel* i_model, const dusk::multiplayer::RemoteModelMatrixSnapshot& i_source,
         RemoteModelMatrixInterpState& io_state);
@@ -343,6 +347,7 @@ private:
     /* 0x5F8 */ s32 mOwnedArchiveEntry;
     /* 0x5FC */ bool mOwnedArchiveMounted;
     /* 0x600 */ OwnedArchiveSlot mEquipmentArchives[5];
+    OwnedArchiveSlot mPresentedItemArchive;
     /* 0x920 */ VisualState mVisualState;
     /* 0x924 */ void* mpWarpTexData;
     /* 0x928 */ J3DModel* mpBodyModel;
@@ -365,6 +370,7 @@ private:
     /* 0x95C */ J3DModel* mpKanteraGlowModel;
     /* 0x960 */ J3DModel* mpItemActorModel;
     /* 0x964 */ J3DModel* mpRideActorModel;
+    J3DModel* mpPresentedItemModel;
     J3DModel* mpTransformBridgeModel;
     J3DModel* mpTransformEffectModel;
     mDoExt_bckAnm* mpSpinnerBck;
@@ -508,6 +514,9 @@ private:
     /* 0xBD0 */ f32 mRemoteTransformFrame;
     /* 0xBD4 */ bool mRemoteTransformFrameValid;
     /* 0xBD8 */ u16 mRemoteEquipItem;
+    u16 mRemotePresentedItem;
+    u16 mLoadedPresentedItem;
+    s16 mPresentedItemAngle;
     /* 0xBDC */ int mRemoteSwordVariant;
     /* 0xBE0 */ int mRemoteShieldVariant;
     /* 0xBE4 */ int mLoadedSwordVariant;

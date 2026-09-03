@@ -1607,6 +1607,9 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
             pose.bottleBtkSwingFrame, pose.bottleBtkActionFrame,
             pose.bottleBtkFinishFrame, pose.bottleContentKind,
             pose.bottleContentFrame);
+        actor->setRemotePresentedItem(
+            presentationMode == ReceiverPresentationMode::SemanticGameplay ?
+                pose.presentedItem : 0xFFFF);
         dummy.presentationMode = presentationMode;
         RemoteBombObjectSnapshot bombObject;
         if (get_remote_bomb_object_for_peer(peerId, &bombObject)) {

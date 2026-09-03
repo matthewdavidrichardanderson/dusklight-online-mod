@@ -27,7 +27,7 @@ endif ()
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "3ded32438846a1af122b9a8112c20a19618fc82c")
+    set(DUSKLIGHT_VERSION "5e12bb55f7c2888e198f5fe078349820ad809fd9")
 endif ()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
@@ -103,13 +103,13 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "228EDDF2521BBE79E6934E28C18FB4E3F7B9D0FC75AFE7630D94B3EC31D68BF3")
+    "A3228B6DD8AEFA8088F5B5AF0F2549B194D1EA62F64F2805AA7BF12FA43D3AB3")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
-    "3A2AAC56955275B509B13A28AA3CD4F9D0A1627CBF4E6CA42501771F70E7F0FA")
+    "1586BB1BA1110B05DE7B26B41B6EB78D850EB40BB0F7B4737D51B344C222ED04")
 dusklight_remote_link_require_sha256(
     "src/dusk/multiplayer/remote_link_dummy.cpp"
-    "91B6E06B73CDECE791B4CF37F2C08AF91C795F58F0B97EFF60B4D39C75F9970E")
+    "4F075B0A1727EB52CA0300BFF4AA6620EF50D15F945AC07627E580C88AC74499")
 dusklight_remote_link_require_sha256(
     "include/dusk/multiplayer/remote_link_dummy.hpp"
     "0B5041A924C629747CDE888F126850B83A30C496AD1DFD633C22B0032E6BE28E")

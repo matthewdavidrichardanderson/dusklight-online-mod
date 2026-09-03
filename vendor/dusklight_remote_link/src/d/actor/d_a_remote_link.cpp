@@ -775,6 +775,7 @@ daRemoteLink_c::daRemoteLink_c()
       mOwnedArchiveEntry(-1),
       mOwnedArchiveMounted(false),
       mEquipmentArchives(),
+      mPresentedItemArchive(),
       mVisualState(),
       mpWarpTexData(NULL),
       mpBodyModel(NULL),
@@ -797,6 +798,7 @@ daRemoteLink_c::daRemoteLink_c()
       mpKanteraGlowModel(NULL),
       mpItemActorModel(NULL),
       mpRideActorModel(NULL),
+      mpPresentedItemModel(NULL),
       mpTransformBridgeModel(NULL),
       mpTransformEffectModel(NULL),
       mpSpinnerBck(NULL),
@@ -935,6 +937,9 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteTransformFrame(0.0f),
       mRemoteTransformFrameValid(false),
       mRemoteEquipItem(0xFFFF),
+      mRemotePresentedItem(0xFFFF),
+      mLoadedPresentedItem(0xFFFF),
+      mPresentedItemAngle(0),
       mRemoteSwordVariant(0),
       mRemoteShieldVariant(0),
       mLoadedSwordVariant(-1),
@@ -1188,6 +1193,7 @@ daRemoteLink_c::daRemoteLink_c()
     initArchiveSlot(mEquipmentArchives[l_eqArcCarvingShield], "CWShd");
     initArchiveSlot(mEquipmentArchives[l_eqArcOrdonShield], "SWShd");
     initArchiveSlot(mEquipmentArchives[l_eqArcHylianShield], "HyShd");
+    initArchiveSlot(mPresentedItemArchive, "");
     mShadowMidnaInvModel.mModel = NULL;
     mShadowMidnaInvModel.mpPackets = NULL;
     mShadowMidnaMaskInvModel.mModel = NULL;
@@ -2007,6 +2013,8 @@ const daRemoteLink_c::HeldItemVisualDesc* daRemoteLink_c::getHeldItemVisualDesc(
          dRes_ID_ALANM_BRK_AL_CROD_CHANGE_COLOR_e},
         {dItemNo_PACHINKO_e, dRes_ID_ALANM_BMD_AL_PACHI_e, 0x2C00, 0x80000, 0,
          0},
+        {dItemNo_HORSE_FLUTE_e, dRes_ID_ALANM_BMD_AL_PEND_e, 0x3000, 0, 0,
+         0},
     };
 
     if (i_itemNo == dItemNo_BOW_e || i_itemNo == dItemNo_BOMB_ARROW_e ||
@@ -2313,6 +2321,37 @@ void daRemoteLink_c::setupHeldItemModel() {
                  mRemoteEquipItem, mLoadedHeldItem, (void*)mpHeldItemModel, desc->bmdResId,
                  (void*)mpHeldItemBrk, (void*)mpHookTipModel, (void*)mpHookSubItemModel,
                  (void*)mpHookSubTipModel, (void*)mpArrowModel);
+}
+
+void daRemoteLink_c::setupPresentedItemModel() {
+    mpPresentedItemModel = NULL;
+    mLoadedPresentedItem = 0xFFFF;
+    deleteArchiveSlot(mPresentedItemArchive);
+
+    if (mRemotePresentedItem == 0xFFFF || mRemotePresentedItem == dItemNo_NONE_e) return;
+    const char* arcName = dItem_data::getArcName(static_cast<u8>(mRemotePresentedItem));
+    const s16 bmdName = dItem_data::getBmdName(static_cast<u8>(mRemotePresentedItem));
+    if (arcName == NULL || arcName[0] == '\0' || bmdName < 0) {
+        DuskLog.warn("RemoteLink: presented item resource unavailable item={}",
+                     mRemotePresentedItem);
+        return;
+    }
+
+    initArchiveSlot(mPresentedItemArchive, arcName);
+    J3DModelData* modelData = static_cast<J3DModelData*>(
+        getArchiveObjectRes(mPresentedItemArchive, bmdName));
+    const u32 modelFlags = dItem_data::chkFlag(static_cast<u8>(mRemotePresentedItem), 4) ?
+                               0 : 0x80000;
+    mpPresentedItemModel = initModel(modelData, modelFlags, 0);
+    if (mpPresentedItemModel == NULL) {
+        DuskLog.warn("RemoteLink: presented item model load failed item={} arc={} bmd={}",
+                     mRemotePresentedItem, arcName, bmdName);
+        return;
+    }
+    mLoadedPresentedItem = mRemotePresentedItem;
+    mPresentedItemAngle = shape_angle.y;
+    DuskLog.info("RemoteLink: presented item loaded item={} arc={} bmd={}",
+                 mRemotePresentedItem, arcName, bmdName);
 }
 
 void daRemoteLink_c::setupFishingRodModels() {
@@ -3969,6 +4008,7 @@ void daRemoteLink_c::calcModels() {
     }
 
     applyHumanEquipmentMatrices(false);
+    updateRemotePresentedItemVisual(false);
 
     if (mpHeldItemModel != NULL) {
         if (mRemoteIronBallVisualValid) updateRemoteIronBallVisual(false);
@@ -3976,6 +4016,7 @@ void daRemoteLink_c::calcModels() {
         else if (mRemoteCopyRodVisualValid) updateRemoteCopyRodVisual(false);
         else if (mRemoteBowVisualValid) updateRemoteBowVisual(false);
         else if (mRemoteBottleVisualValid) updateRemoteBottleVisual(false);
+        else if (!mHasRemoteMatrices) updateRemoteSimpleHeldItemVisual(false);
         else mpHeldItemModel->calc();
     }
     if (mRemoteFishingRodVisualValid) updateRemoteFishingRodVisual(false);
@@ -4770,6 +4811,8 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
         updateRemoteBowVisual(true);
     } else if (mRemoteBottleVisualValid) {
         updateRemoteBottleVisual(true);
+    } else if (!mHasRemoteMatrices) {
+        updateRemoteSimpleHeldItemVisual(true);
     } else {
         applyInterpolatedRemoteModelMatrices(mpHeldItemModel, mHeldItemMatrixInterp,
                                              "held_item");
@@ -4809,6 +4852,7 @@ void daRemoteLink_c::applyInterpolatedRemoteAttachments() {
         applyInterpolatedRemoteModelMatrices(mpRideActorModel, mRideActorMatrixInterp,
                                              "ride_actor");
     }
+    updateRemotePresentedItemVisual(true);
 
     if (mRemoteMidnaShadowForm) {
         applyInterpolatedRemoteModelMatrices(mpShadowMidnaModel, mMidnaMatrixInterp, "midna");
@@ -6102,6 +6146,78 @@ void daRemoteLink_c::updateRemoteBottleVisual(bool i_presentation) {
         mpHookTipModel->calc();
         if (i_presentation) overrideRemoteModelMatrices(mpHookTipModel);
     }
+}
+
+void daRemoteLink_c::updateRemoteSimpleHeldItemVisual(bool i_presentation) {
+    if (!mRemoteItemDraw || mpHeldItemModel == NULL || mpBodyModel == NULL ||
+        mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 10) {
+        mHeldItemMatrixValid = false;
+        return;
+    }
+
+    Mtx anchor;
+    MtxP source = mpBodyModel->getAnmMtx(10);
+    if (!i_presentation ||
+        !dusk::frame_interp::lookup_replacement(source, anchor)) {
+        MTXCopy(source, anchor);
+    }
+    mpHeldItemModel->setBaseTRMtx(anchor);
+    mpHeldItemModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpHeldItemModel);
+    mHeldItemMatrixValid = true;
+}
+
+void daRemoteLink_c::setRemotePresentedItem(u16 i_itemNo) {
+    const bool supported =
+        i_itemNo == dItemNo_LETTER_e || i_itemNo == dItemNo_BILL_e ||
+        i_itemNo == dItemNo_IRIAS_PENDANT_e ||
+        i_itemNo == dItemNo_RAFRELS_MEMO_e ||
+        i_itemNo == dItemNo_ANCIENT_DOCUMENT_e ||
+        i_itemNo == dItemNo_ANCIENT_DOCUMENT2_e;
+    const u16 next = supported ? i_itemNo : 0xFFFF;
+    if (mRemotePresentedItem == next) return;
+    mRemotePresentedItem = next;
+    if (next == 0xFFFF) return;
+    if (mLoadedPresentedItem == next && mpPresentedItemModel != NULL) {
+        mPresentedItemAngle = shape_angle.y;
+        return;
+    }
+    setupPresentedItemModel();
+}
+
+void daRemoteLink_c::updateRemotePresentedItemVisual(bool i_presentation) {
+    if (mpPresentedItemModel == NULL || mRemotePresentedItem == 0xFFFF ||
+        mVisualState.form == FORM_WOLF) return;
+
+    cXyz anchor = current.pos;
+    s16 yaw = shape_angle.y;
+    if (i_presentation && dusk::frame_interp::is_enabled()) {
+        const f32 alpha = dusk::frame_interp::get_interpolation_step();
+        anchor = old.pos + (current.pos - old.pos) * alpha;
+        yaw = static_cast<s16>(old.angle.y +
+                               static_cast<s16>(shape_angle.y - old.angle.y) * alpha);
+    } else if (!i_presentation) {
+        mPresentedItemAngle += static_cast<s16>(0xFFFF / 250);
+    }
+
+    // Match daDitem_c::set_pos(): human presentation items are based on
+    // Link's animated left-foot height, then use l_player_offset (0, 115, 54).
+    // The earlier 90-unit offset is only an intermediate flag-table value;
+    // daDitem_c overwrites it for human Link before positioning the item.
+    if (mpBodyModel != NULL && mpBodyModel->getModelData() != NULL &&
+        mpBodyModel->getModelData()->getJointNum() > 0x15)
+    {
+        anchor.y = mpBodyModel->getAnmMtx(0x15)[1][3];
+    }
+
+    mDoMtx_stack_c::transS(anchor.x, anchor.y + 115.0f, anchor.z);
+    mDoMtx_stack_c::YrotM(yaw);
+    mDoMtx_stack_c::transM(0.0f, 0.0f, 54.0f);
+    mDoMtx_stack_c::YrotM(static_cast<s16>(mPresentedItemAngle - yaw));
+    mpPresentedItemModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    mpPresentedItemModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpPresentedItemModel);
 }
 
 void daRemoteLink_c::setRemoteSpinnerVisualState(bool i_valid, const cXyz& i_pos,
@@ -7636,6 +7752,9 @@ int daRemoteLink_c::Draw() {
     if (mHeldItemMatrixValid) {
         drawModel(mpHeldItemModel);
     }
+    if (mpPresentedItemModel != NULL && mRemotePresentedItem != 0xFFFF) {
+        drawModel(mpPresentedItemModel);
+    }
     if (mRemoteFishingRodVisualValid) {
         for (J3DModel* model : mpFishingRodModels) drawModel(model);
         if (mRemoteFishingRodLineInitialized && mRemoteFishingRodLineValid) {
@@ -7771,6 +7890,7 @@ int daRemoteLink_c::Delete() {
     for (u32 i = 0; i < ARRAY_SIZE(mEquipmentArchives); ++i) {
         deleteArchiveSlot(mEquipmentArchives[i]);
     }
+    deleteArchiveSlot(mPresentedItemArchive);
     if (mpOwnedArchive != NULL) {
         JKR_DELETE(mpOwnedArchive);
         mpOwnedArchive = NULL;

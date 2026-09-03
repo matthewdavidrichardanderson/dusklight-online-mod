@@ -420,6 +420,24 @@ int main() {
         return 1;
     }
 
+    json presentedItem = pose_message(15, "semantic_gameplay");
+    presentedItem["state"]["presented_item"] = 0x90;
+    PeerPoseSnapshot presentedItemPose;
+    if (!decode_and_enforce(presentedItem, &bottlePose, presentedItemPose, error) ||
+        presentedItemPose.presentedItem != 0x90) {
+        std::cerr << "supported presented item was not decoded: " << error << '\n';
+        return 1;
+    }
+
+    json invalidPresentedItem = pose_message(16, "semantic_gameplay");
+    invalidPresentedItem["state"]["presented_item"] = 0x42;
+    PeerPoseSnapshot invalidPresentedItemPose;
+    if (decode_and_enforce(invalidPresentedItem, &presentedItemPose,
+                           invalidPresentedItemPose, error)) {
+        std::cerr << "unsupported presented item was accepted\n";
+        return 1;
+    }
+
     // Even malformed/malicious type-7 input cannot restore any body,
     // equipment, held-item, actor or effect matrix.
     json injected = pose_message(7, "semantic_gameplay");

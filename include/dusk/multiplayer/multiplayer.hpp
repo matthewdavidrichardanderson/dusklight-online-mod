@@ -223,6 +223,7 @@ struct PeerPoseSnapshot {
     int transformProcVar3 = 0;
     int transformShapeX = 0;
     uint16_t equipItem = 0xFFFF;
+    uint16_t presentedItem = 0xFFFF;
     int swordVariant = 0;
     int shieldVariant = 0;
     int clothesVariant = 0;

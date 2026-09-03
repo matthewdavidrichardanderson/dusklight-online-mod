@@ -17,6 +17,7 @@
 #include "JSystem/J3DGraphAnimator/J3DMtxBuffer.h"
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_arrow.h"
+#include "d/actor/d_a_itembase.h"
 #include "d/actor/d_a_mg_rod.h"
 #include "d/actor/d_a_spinner.h"
 #include "d/d_com_inf_game.h"
@@ -433,6 +434,21 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         link->mHeldItemModel != nullptr;
     const bool bottleOilRightAttached =
         bottleVisualValid && link->checkOilBottleItemNotGet(link->mEquipItem);
+    u16 presentedItem = dItemNo_NONE_e;
+    fopAc_ac_c* presentedActor = humanParts ? link->field_0x280c.getActor() : nullptr;
+    if (presentedActor != nullptr &&
+        (fopAcM_GetName(presentedActor) == fpcNm_ITEM_e ||
+         fopAcM_GetName(presentedActor) == fpcNm_Demo_Item_e)) {
+        auto* item = static_cast<daItemBase_c*>(presentedActor);
+        const u16 itemNo = item->getItemNo();
+        const bool supported =
+            itemNo == dItemNo_LETTER_e || itemNo == dItemNo_BILL_e ||
+            itemNo == dItemNo_IRIAS_PENDANT_e ||
+            itemNo == dItemNo_RAFRELS_MEMO_e ||
+            itemNo == dItemNo_ANCIENT_DOCUMENT_e ||
+            itemNo == dItemNo_ANCIENT_DOCUMENT2_e;
+        if (supported && item->chkDraw()) presentedItem = itemNo;
+    }
     const int bottleContentKind =
         link->mEquipItem == dItemNo_FAIRY_e ? 1 :
         link->mEquipItem == dItemNo_WORM_e ? 2 :
@@ -889,6 +905,9 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
                                   link->mHookTipBck.getBckAnm() != nullptr ?
                                       link->mHookTipBck.getFrame() : 0.0f},
         };
+    }
+    if (semanticGameplay && presentedItem != dItemNo_NONE_e) {
+        state["presented_item"] = int(presentedItem);
     }
     if (semanticGameplay && boomerangVisualValid) {
         json boomerang = {{"link_anchored", boomerangLinkAnchored}};

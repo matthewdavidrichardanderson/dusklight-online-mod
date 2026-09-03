@@ -39,6 +39,11 @@ bool is_bottle_item(uint16_t item) {
            item == 0x76 || (item >= 0x77 && item <= 0x7F) || item == 0x9F;
 }
 
+bool is_supported_presented_item(uint16_t item) {
+    return item == 0x80 || item == 0x81 || item == 0x83 || item == 0x90 ||
+           item == 0xE9 || item == 0xEB;
+}
+
 bool decode_base64(std::string_view text, std::string& out) {
     static constexpr char alphabet[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -824,6 +829,14 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
             return false;
         }
         pose.equipItem = static_cast<uint16_t>(equipItem);
+        const int64_t presentedItem = state.value("presented_item", int64_t{0xffff});
+        if (presentedItem < 0 || presentedItem > 0xffff ||
+            (presentedItem != 0xffff &&
+             !is_supported_presented_item(static_cast<uint16_t>(presentedItem)))) {
+            error = "pose contains invalid presented item";
+            return false;
+        }
+        pose.presentedItem = static_cast<uint16_t>(presentedItem);
         pose.swordVariant = state.value("sword_variant", 0);
         pose.shieldVariant = state.value("shield_variant", 0);
         pose.clothesVariant = state.value("clothes_variant", 0);
