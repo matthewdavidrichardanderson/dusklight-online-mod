@@ -2423,7 +2423,7 @@ bool GameAdapter::applying_remote() const { return applyingRemote_; }
 
 void GameAdapter::maybe_queue_progression_switch_prompt(std::string_view peerId,
                                                         int stage, int flag) {
-    if (peerId.empty()) return;
+    if (peerId.empty() || randomizer_active()) return;
     const auto queue = [&](std::string_view cueKey, std::string_view action,
                            std::string_view area) {
         const std::string guard = std::string(peerId) + ':' + std::string(cueKey);
@@ -2484,7 +2484,7 @@ void GameAdapter::maybe_queue_progression_switch_prompt(std::string_view peerId,
 
 void GameAdapter::maybe_queue_progression_event_prompt(std::string_view peerId,
                                                        uint16_t flag) {
-    if (peerId.empty()) return;
+    if (peerId.empty() || randomizer_active()) return;
     auto queue = [&](std::string_view cueKey, std::string title,
                      std::string_view expectedStage = {}) {
         const std::string guard = std::string(peerId) + ':' + std::string(cueKey);
@@ -2518,6 +2518,15 @@ void GameAdapter::maybe_queue_progression_event_prompt(std::string_view peerId,
 }
 
 void GameAdapter::update_progression_prompts() {
+    if (randomizer_active()) {
+        progressionPrompt_ = {};
+        progressionPromptAcceptHeld_ = false;
+        pendingProgressionCues_.clear();
+        pendingProgressionPeerId_.clear();
+        pendingProgressionCueKey_.clear();
+        return;
+    }
+
     auto peer_ready = [&](std::string_view peerId, const nlohmann::json** stateOut = nullptr) {
         const auto stateIt = peerProgressionStates_.find(std::string(peerId));
         const auto ageIt = peerProgressionAges_.find(std::string(peerId));
@@ -2589,7 +2598,7 @@ void GameAdapter::update_progression_prompts() {
 
 void GameAdapter::consume_progression_prompt_input() {
     progressionPromptAcceptHeld_ = false;
-    if (!progressionPrompt_.active) {
+    if (randomizer_active() || !progressionPrompt_.active) {
         return;
     }
 
@@ -2686,9 +2695,12 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         (void)peerId;
         if (age < std::numeric_limits<uint32_t>::max()) ++age;
     }
-    if (syncFlagsEnabled_) update_progression_prompts();
+    if (syncFlagsEnabled_ || randomizerActive) update_progression_prompts();
     ProgressionPromptView promptView;
-    promptView.active = progressionPrompt_.active;
+    // Randomizer progression is owned by the randomizer. Keep its screen
+    // completely free of vanilla-world sync prompts, even if stale prompt
+    // state survived a settings or save-mode transition.
+    promptView.active = !randomizerActive && progressionPrompt_.active;
     promptView.waiting = progressionPrompt_.waiting;
     promptView.title = progressionPrompt_.title;
     promptView.body = progressionPrompt_.body;
