@@ -92,9 +92,55 @@ jobs:
           path: build/mods/*.dusk
           if-no-files-found: error
 
+  relay:
+    name: Build relay ${{matrix.platform}}
+    runs-on: ${{matrix.runner}}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            build_launcher: OFF
+          - platform: windows-amd64
+            runner: windows-latest
+            build_launcher: ON
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Enable Visual Studio environment
+        if: runner.os == 'Windows'
+        uses: step-security/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Configure relay
+        shell: bash
+        run: >-
+          cmake -S tools/multiplayer_relay -B build/relay-release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDUSKLIGHT_RELAY_BUILD_LAUNCHER=${{matrix.build_launcher}}
+
+      - name: Build relay
+        run: cmake --build build/relay-release --parallel
+
+      - name: Test relay
+        run: ctest --test-dir build/relay-release --output-on-failure
+
+      - name: Package relay
+        run: cpack --config build/relay-release/CPackConfig.cmake
+
+      - name: Upload relay artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: relay-${{matrix.platform}}
+          path: build/relay-release/package/*.zip
+          if-no-files-found: error
+
   combine:
     name: Combine bundles
-    needs: build
+    needs: [build, relay]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -124,8 +170,18 @@ jobs:
           path: combined/*.dusk
           if-no-files-found: error
 
+      - name: Download relay bundles
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/download-artifact@v8
+        with:
+          pattern: relay-*
+          path: relay
+          merge-multiple: true
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{github.token}}
-        run: gh release create "$GITHUB_REF_NAME" combined/*.dusk --verify-tag --generate-notes
+        run: >-
+          gh release create "$GITHUB_REF_NAME" combined/*.dusk relay/*.zip
+          --verify-tag --generate-notes

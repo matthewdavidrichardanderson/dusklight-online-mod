@@ -280,6 +280,7 @@ endif ()
 # The relay is intentionally a standalone/headless operator process. It uses
 # the same invite-code source as the mod so endpoint codes cannot drift.
 option(DUSKLIGHT_ONLINE_BUILD_RELAY "Build the desktop relay operator tools" ON)
+include("${CMAKE_CURRENT_SOURCE_DIR}/tools/multiplayer_relay/version.cmake")
 if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(dusklight_online_relay
         tools/multiplayer_relay/relay.cpp
@@ -288,6 +289,8 @@ if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQ
     target_compile_features(dusklight_online_relay PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_relay PRIVATE include src)
     target_link_libraries(dusklight_online_relay PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_definitions(dusklight_online_relay PRIVATE
+        DUSKLIGHT_RELAY_VERSION="${DUSKLIGHT_ONLINE_RELAY_VERSION}")
 
     if (WIN32)
         target_link_libraries(dusklight_online_relay PRIVATE ws2_32)
@@ -306,9 +309,12 @@ if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQ
         )
         target_compile_features(dusklight_online_relay_launcher PRIVATE cxx_std_20)
         target_include_directories(dusklight_online_relay_launcher PRIVATE include src)
+        target_compile_definitions(dusklight_online_relay_launcher PRIVATE
+            DUSKLIGHT_RELAY_VERSION="${DUSKLIGHT_ONLINE_RELAY_VERSION}")
         target_link_libraries(dusklight_online_relay_launcher PRIVATE
             nlohmann_json::nlohmann_json
             ws2_32
+            shell32
         )
         if (MSVC)
             set_property(TARGET dusklight_online_relay_launcher PROPERTY
@@ -412,6 +418,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 --relay $<TARGET_FILE:dusklight_online_relay>
         )
         set_tests_properties(dusklight_online_relay_integration PROPERTIES TIMEOUT 30)
+        add_test(NAME dusklight_online_relay_version
+                 COMMAND $<TARGET_FILE:dusklight_online_relay> --version)
+        set_tests_properties(dusklight_online_relay_version PROPERTIES
+            PASS_REGULAR_EXPRESSION
+                "dusklight_online_relay ${DUSKLIGHT_ONLINE_RELAY_VERSION}")
         add_test(
             NAME dusklight_online_relay_transport
             COMMAND "${Python3_EXECUTABLE}"

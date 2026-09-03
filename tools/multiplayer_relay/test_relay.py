@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box, three-client compatibility tests for tp_multiplayer_relay."""
+"""Black-box, three-client compatibility tests for Dusklight Online Relay."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ GAMEPLAY_ROUTE_TYPES = (
     "bottle_slots",
     "bomb_bag_slot",
     "rupee_count",
+    "rupee_delta",
     "poe_count",
     "malo_fundraising",
     "charlo_offering",

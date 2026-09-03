@@ -48,6 +48,10 @@
 #include <unordered_set>
 #include <vector>
 
+#ifndef DUSKLIGHT_RELAY_VERSION
+#define DUSKLIGHT_RELAY_VERSION "dev"
+#endif
+
 namespace {
 
 using json = nlohmann::json;
@@ -116,6 +120,7 @@ const std::set<std::string> kGameplayRouteTypes = {
     "bottle_slots",
     "bomb_bag_slot",
     "rupee_count",
+    "rupee_delta",
     "poe_count",
     "malo_fundraising",
     "charlo_offering",
@@ -211,8 +216,8 @@ const char* packet_category(const std::string& type) {
     }
     if (type == "key_num" || type == "light_drop_num" || type == "light_drop_get_flag" ||
         type == "max_life_update" || type == "bottle_slots" || type == "rupee_count" ||
-        type == "poe_count" || type == "malo_fundraising" || type == "charlo_offering" ||
-        type == "fish_record")
+        type == "rupee_delta" || type == "poe_count" || type == "malo_fundraising" ||
+        type == "charlo_offering" || type == "fish_record")
     {
         return "counters";
     }
@@ -1336,10 +1341,14 @@ Options parse_options(int argc, char** argv) {
             options.helloTimeoutSeconds = static_cast<double>(timeoutMs) / 1000.0;
         } else if (arg == "--verbose") {
             options.verbose = true;
+        } else if (arg == "--version") {
+            std::cout << "dusklight_online_relay " << DUSKLIGHT_RELAY_VERSION << "\n";
+            std::exit(0);
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "Usage: tp_multiplayer_relay [--host 127.0.0.1] "
+            std::cout << "Usage: dusklight_online_relay [--host 127.0.0.1] "
                          "[--port 34197] [--public-host 127.0.0.1] "
-                         "[--public-port 34197] [--hello-timeout-ms 10000] [--verbose]\n";
+                         "[--public-port 34197] [--hello-timeout-ms 10000] "
+                         "[--verbose] [--version]\n";
             std::exit(0);
         } else {
             std::cerr << "unknown argument: " << arg << "\n";

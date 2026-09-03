@@ -170,7 +170,7 @@ std::filesystem::path sibling_relay_path() {
     const DWORD length =
         GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
     std::filesystem::path path(std::wstring(buffer.data(), length));
-    return path.parent_path() / L"tp_multiplayer_relay.exe";
+    return path.parent_path() / L"dusklight_online_relay.exe";
 }
 
 void start_relay() {
@@ -198,7 +198,7 @@ void start_relay() {
 
     const std::filesystem::path relayPath = sibling_relay_path();
     if (!std::filesystem::exists(relayPath)) {
-        MessageBoxW(nullptr, L"tp_multiplayer_relay.exe must be beside this launcher.",
+        MessageBoxW(nullptr, L"dusklight_online_relay.exe must be beside this launcher.",
                     L"Relay executable not found", MB_OK | MB_ICONERROR);
         return;
     }
