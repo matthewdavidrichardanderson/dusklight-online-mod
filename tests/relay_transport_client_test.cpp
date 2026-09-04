@@ -67,7 +67,6 @@ int main(int argc, char** argv) {
     ownerConfig.port = static_cast<uint16_t>(parsedPort);
     ownerConfig.createRoom = true;
     ownerConfig.settings.syncWorld = true;
-    ownerConfig.settings.performanceMode = true;
     ownerConfig.settings.pvp = true;
 
     std::string error;
@@ -91,8 +90,7 @@ int main(int argc, char** argv) {
         fail("joiner/UDP welcome timeout: " + joiner.status().error);
     }
     if (!owner.status().isOwner || joiner.status().isOwner ||
-        !joiner.status().settings.syncWorld ||
-        !joiner.status().settings.performanceMode || !joiner.status().settings.pvp ||
+        !joiner.status().settings.syncWorld || !joiner.status().settings.pvp ||
         !owner.status().semanticVisualsReady || !joiner.status().semanticVisualsReady ||
         !owner.status().snapshotDeltasReady || !joiner.status().snapshotDeltasReady) {
         fail("relay owner/settings state was not normalized from welcome");
@@ -158,15 +156,13 @@ int main(int argc, char** argv) {
     }
 
     auto changed = owner.status().settings;
-    changed.performanceMode = false;
     changed.remoteCollision = false;
     changed.pvp = true;
     if (!owner.publish_room_settings(changed)) {
         fail("owner room_settings send failed");
     }
     if (!wait_until(owner, joiner, [&] {
-            return !joiner.status().settings.performanceMode &&
-                   !joiner.status().settings.remoteCollision;
+            return !joiner.status().settings.remoteCollision;
         }) || joiner.status().settings.pvp) {
         fail("relay did not normalize and publish room settings");
     }

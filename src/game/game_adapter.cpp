@@ -159,7 +159,7 @@ struct VisualWireTraceAccumulator {
     uint64_t preparedMsgpackBytes = 0;
     uint64_t deltaSamples = 0;
     uint64_t fullSamples = 0;
-    uint64_t legacyWireBytes = 0;
+    uint64_t fullSnapshotWireBytes = 0;
     int preparedSizeBand = -1;
 };
 
@@ -1884,8 +1884,8 @@ void GameAdapter::notify_local_rupees(int previous, int value) {
 
 ModResult GameAdapter::initialize_hooks(ModError* error) {
     sActiveAdapter = this;
-    transport_.set_matrix_codec(&expand_remote_matrix_delta,
-                                &prepare_remote_matrix_delta);
+    transport_.set_pose_delta_codec(&expand_remote_pose_delta,
+                                    &prepare_remote_pose_delta);
     transport_.set_visual_wire_diagnostics(visual_wire_trace_enabled());
     if (install_remote_actor_profile(error) != MOD_OK ||
         install_audio_hooks(error) != MOD_OK ||
@@ -1970,7 +1970,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
 
 void GameAdapter::shutdown_hooks() {
     if (sActiveAdapter == this) sActiveAdapter = nullptr;
-    transport_.set_matrix_codec(nullptr, nullptr);
+    transport_.set_pose_delta_codec(nullptr, nullptr);
     dusk::multiplayer::set_remote_pvp_hit_callback(nullptr);
     // uninstall is idempotent for entries that were not fully installed.
     if (itemGiveObserver_ != 0) {
@@ -2658,7 +2658,7 @@ void GameAdapter::clear_disabled_sync_flags_state() {
 
 void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
                          bool nameLabelsEnabled, bool displayMidnaEnabled,
-                         bool semanticRenderingExperimentEnabled,
+                         bool matrixStreamingEnabled,
                          bool remoteCollisionEnabled,
                          bool pvpEnabled, bool playerListEnabled) {
     pvpLocalHitContactsThisUpdate_.clear();
@@ -2731,7 +2731,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                                 status.welcomed && syncWorldEnabled &&
                                                     status.settings.syncWorld,
                                                 remoteCollisionEnabled, pvpEnabled,
-                                                semanticRenderingExperimentEnabled);
+                                                !matrixStreamingEnabled);
     for (auto& [peerId, pose] : peerPoses_) {
         (void)peerId;
         if (pose.valid && pose.ageTicks < std::numeric_limits<uint32_t>::max()) ++pose.ageTicks;
@@ -2776,17 +2776,17 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     // must not stop this client's own pose/audio stream: other peers can still
     // have their models enabled and need our state.
     if (status.welcomed) {
-        const net::udp::PacketType activePoseType = semanticRenderingExperimentEnabled ?
-            net::udp::PacketType::SemanticPoseMsgpack :
-            net::udp::PacketType::PoseMsgpack;
+        const net::udp::PacketType activePoseType = matrixStreamingEnabled ?
+            net::udp::PacketType::PoseMsgpack :
+            net::udp::PacketType::SemanticPoseMsgpack;
         // Both visual representations are deliberately sampled every game tick.
-        // Performance Mode is the bandwidth-efficient default; matrix mode is the
-        // high-bandwidth accuracy/reference mode and must not silently degrade to 15 Hz.
+        // Semantic rendering is the normal bandwidth-efficient representation;
+        // matrix streaming is an explicit developer comparison mode.
         nlohmann::json poseMessage;
         LocalPoseDiagnostics poseDiagnostics;
         const uint32_t nextSequence = localPoseSequence_ + 1;
         if (build_local_pose(nextSequence, stage_ready() && !manualTransitionActive_,
-                             semanticRenderingExperimentEnabled, poseMessage,
+                             matrixStreamingEnabled, poseMessage,
                              &poseDiagnostics)) {
                 if (transport_.send_visual(poseMessage, activePoseType)) {
                     localPoseSequence_ = nextSequence;
@@ -2820,9 +2820,10 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                             wireStats.snapshotDeltas > 0 ? 1 : 0;
                         sVisualWireTrace.fullSamples +=
                             wireStats.snapshotFulls > 0 ? 1 : 0;
-                        const uint64_t normalizedLegacyWireBytes =
-                            wireStats.legacyWireBytes / wireStats.recipients;
-                        sVisualWireTrace.legacyWireBytes += normalizedLegacyWireBytes;
+                        const uint64_t normalizedFullSnapshotWireBytes =
+                            wireStats.fullSnapshotWireBytes / wireStats.recipients;
+                        sVisualWireTrace.fullSnapshotWireBytes +=
+                            normalizedFullSnapshotWireBytes;
                         const uint64_t normalizedPreparedBytes =
                             wireStats.preparedMsgpackBytes / wireStats.recipients;
                         const int preparedSizeBand = normalizedPreparedBytes <= 128 ? 0 :
@@ -2861,14 +2862,15 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                  << " snapshot_decision=" << wireStats.snapshotDecision
                                  << " full_msgpack=" << wireStats.fullMsgpackBytes
                                  << " prepared_msgpack=" << wireStats.preparedMsgpackBytes
-                                 << " legacy_prepared_msgpack="
-                                 << wireStats.legacyPreparedMsgpackBytes
-                                 << " legacy_wire_bytes=" << wireStats.legacyWireBytes
-                                 << " legacy_wire_per_recipient="
-                                 << normalizedLegacyWireBytes
+                                 << " full_snapshot_prepared_msgpack="
+                                 << wireStats.fullSnapshotPreparedMsgpackBytes
+                                 << " full_snapshot_wire_bytes="
+                                 << wireStats.fullSnapshotWireBytes
+                                 << " full_snapshot_wire_per_recipient="
+                                 << normalizedFullSnapshotWireBytes
                                  << " exact_wire_saved="
-                                 << (normalizedLegacyWireBytes > normalizedBytes ?
-                                         normalizedLegacyWireBytes - normalizedBytes : 0)
+                                 << (normalizedFullSnapshotWireBytes > normalizedBytes ?
+                                         normalizedFullSnapshotWireBytes - normalizedBytes : 0)
                                  << " changed_count="
                                  << wireStats.snapshotChangedKeys.size()
                                  << " changed_keys="
@@ -2887,8 +2889,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                  << " avg_prepared_msgpack="
                                  << (sVisualWireTrace.preparedMsgpackBytes /
                                      sVisualWireTrace.samples)
-                                 << " avg_legacy_wire_per_recipient="
-                                 << (sVisualWireTrace.legacyWireBytes /
+                                 << " avg_full_snapshot_wire_per_recipient="
+                                 << (sVisualWireTrace.fullSnapshotWireBytes /
                                      sVisualWireTrace.samples)
                                  << " delta_samples=" << sVisualWireTrace.deltaSamples
                                  << " full_samples=" << sVisualWireTrace.fullSamples
@@ -3369,7 +3371,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
     peerPoses_.erase(key);
     dusk::multiplayer::destroy_remote_link_dummy(key);
     dusk::multiplayer::erase_remote_actor_peer(key);
-    clear_remote_matrix_history(key);
+    clear_remote_pose_history(key);
     pendingProgressionCues_.erase(
         std::remove_if(pendingProgressionCues_.begin(), pendingProgressionCues_.end(),
                        [&](const PendingProgressionCue& cue) { return cue.peerId == key; }),
@@ -3428,7 +3430,7 @@ void GameAdapter::reset_session() {
     peerProgressionStates_.clear();
     peerProgressionAges_.clear();
     peerPoses_.clear();
-    clear_remote_matrix_history();
+    clear_remote_pose_history();
     latestAckSequence_.clear();
     pvpRemoteHitLastSequence_.clear();
     pvpLocalHitContactsThisUpdate_.clear();

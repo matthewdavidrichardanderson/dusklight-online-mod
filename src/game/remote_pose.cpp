@@ -1287,9 +1287,9 @@ bool merge_midna_pose(const json& message, PeerPoseSnapshot& pose, std::string& 
     return false;
 }
 
-bool expand_remote_matrix_delta(json& message, const std::string& peerId,
-                                uint8_t packetType, uint32_t sequence,
-                                std::string& error) {
+bool expand_remote_pose_delta(json& message, const std::string& peerId,
+                              uint8_t packetType, uint32_t sequence,
+                              std::string& error) {
     try {
         const std::string key = history_key(peerId, packetType);
         if (packetType == 7 &&
@@ -1347,12 +1347,12 @@ bool expand_remote_matrix_delta(json& message, const std::string& peerId,
     }
 }
 
-bool prepare_remote_matrix_delta(json& message, const std::string& peerId,
-                                 uint8_t packetType, uint32_t sequence,
-                                 uint32_t baselineSequence,
-                                 bool allowSemanticSnapshotDelta,
-                                 bool collectSnapshotDiagnostics,
-                                 std::string& error) {
+bool prepare_remote_pose_delta(json& message, const std::string& peerId,
+                               uint8_t packetType, uint32_t sequence,
+                               uint32_t baselineSequence,
+                               bool allowSemanticSnapshotDelta,
+                               bool collectSnapshotDiagnostics,
+                               std::string& error) {
     try {
         const std::string key = history_key(peerId, packetType);
         const json fullMessage = message;
@@ -1491,7 +1491,7 @@ bool prepare_remote_matrix_delta(json& message, const std::string& peerId,
     }
 }
 
-void clear_remote_matrix_history(const std::string& peerId) {
+void clear_remote_pose_history(const std::string& peerId) {
     if (peerId.empty()) {
         sMatrixHistory.clear();
         sSemanticSnapshotHistory.clear();

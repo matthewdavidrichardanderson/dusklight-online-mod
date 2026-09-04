@@ -133,7 +133,6 @@ int main() {
     hostConfig.publicHost = "127.0.0.1";
     hostConfig.port = port;
     hostConfig.settings.syncWorld = true;
-    hostConfig.settings.performanceMode = true;
     hostConfig.settings.pvp = true;
 
     std::string error;
@@ -152,9 +151,8 @@ int main() {
 
     DirectJoinConfig bobConfig = aliceConfig;
     bobConfig.name = "Bob";
-    // A missing capability is the legacy-client case. The host preference may
-    // remain enabled, but semantic visuals must not become effective room-wide.
-    bobConfig.supportsSemanticVisuals = false;
+    // Snapshot-delta support remains independently negotiated. Semantic
+    // rendering itself is always enabled by current clients.
     bobConfig.supportsSnapshotDeltas = false;
     if (!bob.start_direct_join(bobConfig, &error)) {
         fail("Bob start: " + error);
@@ -164,17 +162,16 @@ int main() {
     if (!alice.status().welcomed || !bob.status().welcomed || host.peers().size() != 2) {
         fail("three-way direct handshake did not complete");
     }
-    if (!alice.status().settings.syncWorld ||
-        !alice.status().settings.performanceMode || !alice.status().settings.pvp) {
+    if (!alice.status().settings.syncWorld || !alice.status().settings.pvp) {
         fail("host room settings were not applied by joiner");
     }
-    if (host.status().semanticVisualsReady || alice.status().semanticVisualsReady ||
-        bob.status().semanticVisualsReady) {
-        fail("legacy direct peer did not disable semantic visual negotiation");
+    if (!host.status().semanticVisualsReady || !alice.status().semanticVisualsReady ||
+        !bob.status().semanticVisualsReady) {
+        fail("current direct peers did not negotiate semantic visuals");
     }
     if (host.status().snapshotDeltasReady || alice.status().snapshotDeltasReady ||
         bob.status().snapshotDeltasReady) {
-        fail("legacy direct peer did not disable snapshot delta negotiation");
+        fail("unsupported direct peer did not disable snapshot delta negotiation");
     }
 
     while (host.has_events()) host.pop_event();
@@ -214,16 +211,16 @@ int main() {
     const auto semanticStats = host.last_visual_send_stats();
     if (semanticStats.sequence != 3 ||
         semanticStats.type != dusklight_online::net::udp::PacketType::SemanticPoseMsgpack ||
-        semanticStats.recipients != 1 || semanticStats.datagrams == 0 ||
+        semanticStats.recipients != 2 || semanticStats.datagrams == 0 ||
         semanticStats.wireBytes == 0) {
-        fail("semantic UDP wire statistics did not describe the capable recipient send");
+        fail("semantic UDP wire statistics did not describe all current recipients");
     }
     pump(host, alice, bob, 60);
     if (!drain_udp_for_sequence(alice, 3)) {
-        fail("semantic UDP pose did not reach capable direct peer");
+        fail("semantic UDP pose did not reach Alice");
     }
-    if (drain_udp_for_sequence(bob, 3)) {
-        fail("semantic UDP pose reached legacy direct peer");
+    if (!drain_udp_for_sequence(bob, 3)) {
+        fail("semantic UDP pose did not reach Bob");
     }
 
     dusklight_online::net::udp::RemoteObjectPacket object;
@@ -268,15 +265,13 @@ int main() {
     }
 
     dusklight_online::net::RoomSettings changed = host.status().settings;
-    changed.performanceMode = false;
     changed.remoteCollision = false;
     changed.pvp = true;
     if (!host.publish_room_settings(changed)) {
         fail("host room settings publish failed");
     }
     pump(host, alice, bob, 30);
-    if (alice.status().settings.performanceMode ||
-        alice.status().settings.remoteCollision || alice.status().settings.pvp) {
+    if (alice.status().settings.remoteCollision || alice.status().settings.pvp) {
         fail("joiner did not apply direct settings messages");
     }
     if (host.status().settings.pvp || bob.status().settings.pvp) {
@@ -289,10 +284,10 @@ int main() {
         fail("peer disconnect was not broadcast");
     }
     if (!host.status().semanticVisualsReady || !alice.status().semanticVisualsReady) {
-        fail("semantic visual negotiation did not recover after legacy peer left");
+        fail("semantic visual negotiation changed after peer left");
     }
     if (!host.status().snapshotDeltasReady || !alice.status().snapshotDeltasReady) {
-        fail("snapshot delta negotiation did not recover after legacy peer left");
+        fail("snapshot delta negotiation did not recover after unsupported peer left");
     }
 
     alice.disconnect();

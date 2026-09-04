@@ -310,7 +310,7 @@ RemoteBombActorCallback sBombCreated = nullptr;
 bool sDisplayMidna = false;
 bool sSyncWorld = false;
 bool sRemoteCollision = false;
-bool sSemanticRenderingExperiment = false;
+bool sSemanticRenderingEnabled = false;
 std::map<std::string, std::map<int32_t, RemoteBombObjectSnapshot>> sRemoteBombs;
 
 }  // namespace
@@ -332,12 +332,12 @@ void set_remote_bomb_actor_callback(RemoteBombActorCallback callback) {
 
 void set_remote_actor_options(bool displayMidna, bool syncWorld,
                               bool remoteCollision, bool pvpEnabled,
-                              bool semanticRenderingExperiment) {
+                              bool semanticRenderingEnabled) {
     sDisplayMidna = displayMidna;
     sSyncWorld = syncWorld;
     sRemoteCollision = remoteCollision;
     sPvpEnabled = pvpEnabled;
-    sSemanticRenderingExperiment = semanticRenderingExperiment;
+    sSemanticRenderingEnabled = semanticRenderingEnabled;
     if (!sSyncWorld) sRemoteBombs.clear();
 }
 
@@ -360,7 +360,7 @@ void reset_remote_actor_bridge() {
     sDisplayMidna = false;
     sSyncWorld = false;
     sRemoteCollision = false;
-    sSemanticRenderingExperiment = false;
+    sSemanticRenderingEnabled = false;
     sRemoteBombs.clear();
     dusk::frame_interp::reset_callbacks();
 }
@@ -377,8 +377,8 @@ bool remote_collision_enabled() {
     return sRemoteCollision;
 }
 
-bool semantic_rendering_experiment_enabled() {
-    return sSemanticRenderingExperiment;
+bool semantic_rendering_enabled() {
+    return sSemanticRenderingEnabled;
 }
 
 bool get_remote_bomb_object_for_peer(const std::string& peerId,

@@ -20,9 +20,10 @@ struct LocalPoseDiagnostics {
 };
 
 bool build_local_pose(uint32_t sequence, bool manualSyncReady,
-                      bool semanticVisualsEnabled,
+                      bool matrixStreamingEnabled,
                       nlohmann::json& poseMessage,
                       LocalPoseDiagnostics* diagnostics = nullptr);
+bool matrix_streaming_enabled();
 void reset_local_pose_state();
 
 }  // namespace dusklight_online::game

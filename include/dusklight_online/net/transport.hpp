@@ -32,7 +32,6 @@ struct RoomSettings {
     bool dummyModel = true;
     bool syncFlags = true;
     bool syncWorld = false;
-    bool performanceMode = false;
     bool remoteCollision = true;
     bool pvp = false;
 };
@@ -56,7 +55,6 @@ struct DirectHostConfig {
     RoomSettings settings;
     bool wantPuppet = true;
     bool wantMidna = false;
-    bool supportsSemanticVisuals = true;
     bool supportsSnapshotDeltas = true;
 };
 
@@ -70,7 +68,6 @@ struct DirectJoinConfig {
     RoomSettings settings;
     bool wantPuppet = true;
     bool wantMidna = false;
-    bool supportsSemanticVisuals = true;
     bool supportsSnapshotDeltas = true;
 };
 
@@ -86,7 +83,6 @@ struct RelayConfig {
     RoomSettings settings;
     bool wantPuppet = true;
     bool wantMidna = false;
-    bool supportsSemanticVisuals = true;
     bool supportsSnapshotDeltas = true;
 };
 
@@ -154,8 +150,8 @@ struct VisualSendStats {
     uint64_t wireBytes = 0;
     uint64_t fullMsgpackBytes = 0;
     uint64_t preparedMsgpackBytes = 0;
-    uint64_t legacyPreparedMsgpackBytes = 0;
-    uint64_t legacyWireBytes = 0;
+    uint64_t fullSnapshotPreparedMsgpackBytes = 0;
+    uint64_t fullSnapshotWireBytes = 0;
     uint32_t snapshotDeltas = 0;
     uint32_t snapshotFulls = 0;
     uint32_t snapshotBaseline = 0;
@@ -169,10 +165,10 @@ struct VisualSendStats {
 // called from the mod's update hook; it never waits for network input.
 class Transport {
 public:
-    using MatrixExpandCallback = bool (*)(nlohmann::json&, const std::string&, uint8_t,
-                                          uint32_t, std::string&);
-    using MatrixPrepareCallback = bool (*)(nlohmann::json&, const std::string&, uint8_t,
-                                           uint32_t, uint32_t, bool, bool, std::string&);
+    using PoseDeltaExpandCallback = bool (*)(nlohmann::json&, const std::string&, uint8_t,
+                                             uint32_t, std::string&);
+    using PoseDeltaPrepareCallback = bool (*)(nlohmann::json&, const std::string&, uint8_t,
+                                              uint32_t, uint32_t, bool, bool, std::string&);
     Transport();
     ~Transport();
 
@@ -202,7 +198,8 @@ public:
     // emit protocol-2 room_settings.
     bool publish_room_settings(const RoomSettings& settings);
     bool publish_visual_preferences(bool wantPuppet, bool wantMidna);
-    void set_matrix_codec(MatrixExpandCallback expand, MatrixPrepareCallback prepare);
+    void set_pose_delta_codec(PoseDeltaExpandCallback expand,
+                              PoseDeltaPrepareCallback prepare);
     void set_visual_wire_diagnostics(bool enabled);
 
 private:

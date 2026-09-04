@@ -364,14 +364,14 @@ void set_remote_pvp_hit_callback(RemotePvpHitCallback callback);
 void set_remote_bomb_actor_callback(RemoteBombActorCallback callback);
 void set_remote_actor_options(bool displayMidna, bool syncWorld,
                               bool remoteCollision, bool pvpEnabled,
-                              bool semanticRenderingExperiment);
+                              bool semanticRenderingEnabled);
 void set_remote_bomb_object(const RemoteBombObjectSnapshot& object);
 void erase_remote_actor_peer(const std::string& peerId);
 void reset_remote_actor_bridge();
 bool pvp_enabled();
 bool display_remote_midna_enabled();
 bool remote_collision_enabled();
-bool semantic_rendering_experiment_enabled();
+bool semantic_rendering_enabled();
 bool get_remote_bomb_object_for_peer(const std::string& peerId,
                                      RemoteBombObjectSnapshot* out);
 void report_remote_link_pvp_target_hit(fopAc_ac_c* remoteLinkActor,

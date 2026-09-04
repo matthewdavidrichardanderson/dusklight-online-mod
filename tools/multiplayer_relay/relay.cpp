@@ -314,7 +314,6 @@ struct Room {
     bool dummyModel = true;
     bool syncFlags = true;
     bool syncWorld = false;
-    bool performanceMode = false;
     bool semanticVisualsReady = false;
     bool snapshotDeltasReady = false;
     bool remoteCollision = true;
@@ -335,7 +334,6 @@ json room_settings_json(const Room& room) {
         {"dummy_model", room.dummyModel},
         {"sync_flags", room.syncFlags},
         {"sync_world", room.syncWorld},
-        {"performance_mode", room.performanceMode},
         {"remote_collision", room.remoteCollision},
         {"pvp", room.pvp},
     };
@@ -361,13 +359,11 @@ bool apply_room_settings(Room& room, const json& settings) {
     bool dummyModel = room.dummyModel;
     bool syncFlags = room.syncFlags;
     bool syncWorld = room.syncWorld;
-    bool performanceMode = room.performanceMode;
     bool remoteCollision = room.remoteCollision;
     bool pvp = room.pvp;
     if (!read_bool("dummy_model", dummyModel) ||
         !read_bool("sync_flags", syncFlags) ||
         !read_bool("sync_world", syncWorld) ||
-        !read_bool("performance_mode", performanceMode) ||
         !read_bool("remote_collision", remoteCollision) ||
         !read_bool("pvp", pvp))
     {
@@ -377,7 +373,6 @@ bool apply_room_settings(Room& room, const json& settings) {
     room.dummyModel = dummyModel;
     room.syncFlags = syncFlags;
     room.syncWorld = syncWorld;
-    room.performanceMode = performanceMode;
     room.remoteCollision = remoteCollision;
     room.pvp = remoteCollision && pvp;
     return true;

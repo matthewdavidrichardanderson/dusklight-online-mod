@@ -52,7 +52,7 @@ int main() {
     std::string error;
     PeerPoseSnapshot pose;
 
-    // Performance Mode rejects even an explicitly empty matrix container: the
+    // Semantic rendering rejects even an explicitly empty matrix container: the
     // representation itself is matrix-free, not merely all-absent by habit.
     json empty = pose_message(1, "semantic_gameplay");
     std::vector<std::uint8_t> packed{'D', 'M', 'P', 'M', 1, 21};
@@ -168,7 +168,7 @@ int main() {
         return 1;
     }
 
-    // Performance Mode carries only the small inputs to Spinner's visual
+    // Semantic rendering carries only the small inputs to Spinner's visual
     // matrix calculation. The monotonically increasing jump epoch makes the
     // one-shot extension animation recoverable after a dropped edge packet.
     json spinner = pose_message(4, "semantic_gameplay");
@@ -492,7 +492,7 @@ int main() {
     // Quake-style snapshot deltas always reference an explicitly acknowledged
     // full state. Losing the packet that starts a roll must not make subsequent
     // snapshots depend on that missing packet.
-    dusklight_online::game::clear_remote_matrix_history();
+    dusklight_online::game::clear_remote_pose_history();
     json idle = pose_message(10, "semantic_gameplay");
     idle["state"].update({
         {"proc_id", 1}, {"proc_var", 0}, {"anim_frame", 0.0f},
@@ -501,7 +501,7 @@ int main() {
         {"hair_angles", json::array({1, 2, 3, 4, 5, 6})},
     });
     json senderIdle = idle;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             senderIdle, "snapshot-peer", 7, 10, 0, true, false, error) ||
         senderIdle.value("snapshot_delta_v1", false)) {
         std::cerr << "initial semantic snapshot was not full: " << error << '\n';
@@ -512,7 +512,7 @@ int main() {
     rollStart["sequence"] = 11;
     rollStart["state"]["proc_id"] = 77;
     rollStart["state"]["anim_frame"] = 1.0f;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             rollStart, "snapshot-peer", 7, 11, 10, true, true, error) ||
         !rollStart.value("snapshot_delta_v1", false)) {
         std::cerr << "roll-start snapshot was not delta encoded: " << error << '\n';
@@ -534,7 +534,7 @@ int main() {
     rollContinues["sequence"] = 12;
     rollContinues["state"]["proc_id"] = 77;
     rollContinues["state"]["anim_frame"] = 2.0f;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             rollContinues, "snapshot-peer", 7, 12, 10, true, false, error) ||
         !rollContinues.value("snapshot_delta_v1", false) ||
         rollContinues.value("snapshot_base", 0U) != 10) {
@@ -545,10 +545,10 @@ int main() {
     rollContinues.erase("_snapshot_debug_reason");
 
     // Simulate a separate receiver which got snapshot 10, lost 11, and got 12.
-    dusklight_online::game::clear_remote_matrix_history();
-    if (!dusklight_online::game::expand_remote_matrix_delta(
+    dusklight_online::game::clear_remote_pose_history();
+    if (!dusklight_online::game::expand_remote_pose_delta(
             idle, "snapshot-peer", 7, 10, error) ||
-        !dusklight_online::game::expand_remote_matrix_delta(
+        !dusklight_online::game::expand_remote_pose_delta(
             rollContinues, "snapshot-peer", 7, 12, error) ||
         rollContinues["state"].value("proc_id", 0) != 77 ||
         rollContinues["state"].value("anim_frame", 0.0f) != 2.0f) {
@@ -560,8 +560,8 @@ int main() {
     missingBaseline["state"] = {{"proc_id", 77}, {"anim_frame", 2.0f}};
     missingBaseline["snapshot_delta_v1"] = true;
     missingBaseline["snapshot_base"] = 10;
-    dusklight_online::game::clear_remote_matrix_history();
-    if (dusklight_online::game::expand_remote_matrix_delta(
+    dusklight_online::game::clear_remote_pose_history();
+    if (dusklight_online::game::expand_remote_pose_delta(
             missingBaseline, "snapshot-peer", 7, 12, error) ||
         error.rfind("semantic snapshot delta", 0) != 0) {
         std::cerr << "missing semantic baseline was not rejected\n";
@@ -570,23 +570,23 @@ int main() {
 
     // Applying an empty/small patch to the named idle baseline must restore
     // idle even if the receiver's current presentation is still the roll.
-    dusklight_online::game::clear_remote_matrix_history();
+    dusklight_online::game::clear_remote_pose_history();
     json senderBaseline = idle;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             senderBaseline, "snapshot-peer", 7, 10, 0, true, false, error)) return 1;
     json backToIdle = idle;
     backToIdle["sequence"] = 13;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             backToIdle, "snapshot-peer", 7, 13, 10, true, false, error) ||
         !backToIdle.value("snapshot_delta_v1", false)) {
         std::cerr << "idle restoration snapshot was not delta encoded: " << error << '\n';
         return 1;
     }
     backToIdle.erase("_snapshot_debug_reason");
-    dusklight_online::game::clear_remote_matrix_history();
-    if (!dusklight_online::game::expand_remote_matrix_delta(
+    dusklight_online::game::clear_remote_pose_history();
+    if (!dusklight_online::game::expand_remote_pose_delta(
             idle, "snapshot-peer", 7, 10, error) ||
-        !dusklight_online::game::expand_remote_matrix_delta(
+        !dusklight_online::game::expand_remote_pose_delta(
             backToIdle, "snapshot-peer", 7, 13, error) ||
         backToIdle["state"].value("proc_id", 0) != 1) {
         std::cerr << "named baseline did not restore idle state: " << error << '\n';
@@ -596,18 +596,18 @@ int main() {
     // A Spinner jump is an epoch, not a one-tick boolean edge. If the packet
     // that first increments it is lost, every later delta against the last
     // acknowledged baseline must continue carrying the new epoch.
-    dusklight_online::game::clear_remote_matrix_history();
+    dusklight_online::game::clear_remote_pose_history();
     json spinnerIdle = spinner;
     spinnerIdle["sequence"] = 20;
     spinnerIdle["state"]["spinner_jump_epoch"] = 40U;
     json spinnerBaseline = spinnerIdle;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             spinnerBaseline, "spinner-peer", 7, 20, 0, true, false, error)) return 1;
     json spinnerAfterLostJump = spinnerIdle;
     spinnerAfterLostJump["sequence"] = 22;
     spinnerAfterLostJump["state"]["spinner_jump_epoch"] = 41U;
     spinnerAfterLostJump["state"]["spinner_x"] = 12.0f;
-    if (!dusklight_online::game::prepare_remote_matrix_delta(
+    if (!dusklight_online::game::prepare_remote_pose_delta(
             spinnerAfterLostJump, "spinner-peer", 7, 22, 20, true, false, error) ||
         !spinnerAfterLostJump.value("snapshot_delta_v1", false) ||
         spinnerAfterLostJump["state"].value("spinner_jump_epoch", 0U) != 41U) {

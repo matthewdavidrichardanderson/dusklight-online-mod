@@ -67,7 +67,6 @@ HOST_CONTROL_TYPES = (
     "dummy_model",
     "sync_flags",
     "sync_world",
-    "performance_mode",
     "remote_collision",
     "pvp_enabled",
 )
@@ -584,7 +583,6 @@ class RelayTests(unittest.TestCase):
                     "dummy_model": False,
                     "sync_flags": True,
                     "sync_world": True,
-                    "performance_mode": True,
                     "remote_collision": False,
                     "pvp": True,
                 },
@@ -593,7 +591,6 @@ class RelayTests(unittest.TestCase):
         owner_welcome = owner.expect_type("welcome")
         self.assertFalse(owner_welcome["settings"]["dummy_model"])
         self.assertTrue(owner_welcome["settings"]["sync_world"])
-        self.assertTrue(owner_welcome["settings"]["performance_mode"])
         self.assertFalse(owner_welcome["settings"]["remote_collision"])
         self.assertFalse(owner_welcome["settings"]["pvp"])
 
@@ -618,7 +615,6 @@ class RelayTests(unittest.TestCase):
                     "dummy_model": True,
                     "sync_flags": False,
                     "sync_world": False,
-                    "performance_mode": False,
                     "remote_collision": True,
                     "pvp": True,
                 },
@@ -629,7 +625,6 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(owner_update["settings"], member_update["settings"])
         self.assertTrue(member_update["settings"]["pvp"])
         self.assertFalse(member_update["settings"]["sync_flags"])
-        self.assertFalse(member_update["settings"]["performance_mode"])
 
     def test_owner_transfers_to_oldest_remaining_member(self) -> None:
         owner, owner_welcome = self.join("Owner", "owner-transfer")

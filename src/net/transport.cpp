@@ -164,7 +164,6 @@ json settings_json(const RoomSettings& settings) {
         {"dummy_model", settings.dummyModel},
         {"sync_flags", settings.syncFlags},
         {"sync_world", settings.syncWorld},
-        {"performance_mode", settings.performanceMode},
         {"remote_collision", settings.remoteCollision},
         {"pvp", effective_pvp(settings)},
     };
@@ -177,7 +176,6 @@ RoomSettings parse_settings(const json& value, RoomSettings fallback) {
     fallback.dummyModel = value.value("dummy_model", fallback.dummyModel);
     fallback.syncFlags = value.value("sync_flags", fallback.syncFlags);
     fallback.syncWorld = value.value("sync_world", fallback.syncWorld);
-    fallback.performanceMode = value.value("performance_mode", fallback.performanceMode);
     fallback.remoteCollision = value.value("remote_collision", fallback.remoteCollision);
     fallback.pvp = value.value("pvp", fallback.pvp) && fallback.remoteCollision;
     return fallback;
@@ -271,7 +269,6 @@ struct Transport::Impl {
     bool handshakeRejected = false;
     bool wantPuppet = true;
     bool wantMidna = false;
-    bool supportsSemanticVisuals = true;
     bool supportsSnapshotDeltas = true;
     bool visualWireDiagnostics = false;
     std::string password;
@@ -279,10 +276,10 @@ struct Transport::Impl {
     std::string sessionKey;
     bool udpRemoteAddressKnown = false;
     udp::Decoder udpDecoder;
-    Transport::MatrixExpandCallback matrixExpand = nullptr;
-    Transport::MatrixPrepareCallback matrixPrepare = nullptr;
-    std::map<std::string, uint32_t> matrixAckSequences;
-    std::map<std::string, uint32_t> matrixAckResetFloors;
+    Transport::PoseDeltaExpandCallback poseDeltaExpand = nullptr;
+    Transport::PoseDeltaPrepareCallback poseDeltaPrepare = nullptr;
+    std::map<std::string, uint32_t> poseAckSequences;
+    std::map<std::string, uint32_t> poseAckResetFloors;
     std::mutex udpTxMutex;
     std::condition_variable udpTxCv;
     std::deque<PacedDatagram> udpTxQueue;
@@ -574,8 +571,8 @@ struct Transport::Impl {
         peerNames.clear();
         peerStages.clear();
         peerPoseStages.clear();
-        matrixAckSequences.clear();
-        matrixAckResetFloors.clear();
+        poseAckSequences.clear();
+        poseAckResetFloors.clear();
         status.clientId.clear();
         status.ownerClientId.clear();
         status.udpToken.clear();
@@ -729,7 +726,6 @@ struct Transport::Impl {
     }
 
     bool direct_semantic_visuals_ready(const Peer* pendingPeer = nullptr) const {
-        if (!supportsSemanticVisuals) return false;
         for (const auto& [id, peer] : directPeers) {
             (void)id;
             if ((peer.welcomed || &peer == pendingPeer) && !peer.supportsSemanticVisuals) {
@@ -765,7 +761,6 @@ struct Transport::Impl {
             {"dummy_model", status.settings.dummyModel},
             {"sync_flags", status.settings.syncFlags},
             {"sync_world", status.settings.syncWorld},
-            {"performance_mode", status.settings.performanceMode},
             {"remote_collision", status.settings.remoteCollision},
             {"pvp", status.settings.pvp && status.settings.remoteCollision},
             {"semantic_visuals_ready", semanticVisualsReady},
@@ -794,7 +789,7 @@ struct Transport::Impl {
             {"want_puppet", wantPuppet},
             {"want_midna", wantMidna},
             {"capabilities", {
-                {kSemanticVisualCapability, supportsSemanticVisuals},
+                {kSemanticVisualCapability, true},
                 {kSnapshotDeltaCapability, supportsSnapshotDeltas},
             }},
         };
@@ -938,18 +933,18 @@ struct Transport::Impl {
         return "direct";
     }
 
-    static std::string matrix_ack_key(std::string_view receiverId,
-                                      std::string_view senderId,
-                                      udp::PacketType type) {
+    static std::string pose_ack_key(std::string_view receiverId,
+                                    std::string_view senderId,
+                                    udp::PacketType type) {
         return std::string(receiverId) + '\x1f' + std::string(senderId) + '\x1f' +
                std::to_string(static_cast<uint8_t>(type));
     }
 
-    uint32_t matrix_ack_sequence(std::string_view receiverId,
-                                 std::string_view senderId,
-                                 udp::PacketType type) const {
-        const auto it = matrixAckSequences.find(matrix_ack_key(receiverId, senderId, type));
-        return it == matrixAckSequences.end() ? 0 : it->second;
+    uint32_t pose_ack_sequence(std::string_view receiverId,
+                               std::string_view senderId,
+                               udp::PacketType type) const {
+        const auto it = poseAckSequences.find(pose_ack_key(receiverId, senderId, type));
+        return it == poseAckSequences.end() ? 0 : it->second;
     }
 
     uint32_t relay_common_ack_sequence(std::string_view senderId,
@@ -961,7 +956,7 @@ struct Transport::Impl {
             (void)name;
             if (peerId == senderId) continue;
             hasRecipient = true;
-            const uint32_t ack = matrix_ack_sequence(peerId, senderId, type);
+            const uint32_t ack = pose_ack_sequence(peerId, senderId, type);
             if (ack == 0) return 0;
             common = std::min(common, ack);
         }
@@ -1003,31 +998,31 @@ struct Transport::Impl {
             }
             json wireMessage = message;
             const uint32_t sequence = wireMessage.value("sequence", 0U);
-            const uint32_t baseline = matrix_ack_sequence(id, senderId, type);
+            const uint32_t baseline = pose_ack_sequence(id, senderId, type);
             const bool allowSnapshotDelta =
                 supportsSnapshotDeltas && peer.supportsSnapshotDeltas;
             std::string error;
-            uint64_t legacyPreparedBytes = 0;
-            uint64_t legacyWireBytes = 0;
+            uint64_t fullSnapshotPreparedBytes = 0;
+            uint64_t fullSnapshotWireBytes = 0;
             if (visualWireDiagnostics &&
                 type == udp::PacketType::SemanticPoseMsgpack) {
-                json legacyWireMessage = message;
+                json fullSnapshotMessage = message;
                 std::string diagnosticError;
-                if (matrixPrepare == nullptr ||
-                    matrixPrepare(legacyWireMessage, std::string(senderId),
+                if (poseDeltaPrepare == nullptr ||
+                    poseDeltaPrepare(fullSnapshotMessage, std::string(senderId),
                                   static_cast<uint8_t>(type), sequence, baseline,
                                   false, false, diagnosticError)) {
-                    legacyWireMessage.erase("_snapshot_debug_reason");
-                    legacyPreparedBytes = json::to_msgpack(legacyWireMessage).size();
-                    const auto legacyDatagrams = udp::encode_message(
-                        legacyWireMessage, senderId, type, &diagnosticError);
-                    for (const auto& datagram : legacyDatagrams) {
-                        legacyWireBytes += datagram.bytes.size();
+                    fullSnapshotMessage.erase("_snapshot_debug_reason");
+                    fullSnapshotPreparedBytes = json::to_msgpack(fullSnapshotMessage).size();
+                    const auto fullSnapshotDatagrams = udp::encode_message(
+                        fullSnapshotMessage, senderId, type, &diagnosticError);
+                    for (const auto& datagram : fullSnapshotDatagrams) {
+                        fullSnapshotWireBytes += datagram.bytes.size();
                     }
                 }
             }
-            if (matrixPrepare != nullptr &&
-                !matrixPrepare(wireMessage, std::string(senderId),
+            if (poseDeltaPrepare != nullptr &&
+                !poseDeltaPrepare(wireMessage, std::string(senderId),
                                static_cast<uint8_t>(type), sequence,
                                baseline, allowSnapshotDelta, visualWireDiagnostics,
                                error)) {
@@ -1060,8 +1055,9 @@ struct Transport::Impl {
                 peer.udpAddress, datagrams, senderId, id, type);
             if (peerOk) {
                 ++lastVisualSend.recipients;
-                lastVisualSend.legacyPreparedMsgpackBytes += legacyPreparedBytes;
-                lastVisualSend.legacyWireBytes += legacyWireBytes;
+                lastVisualSend.fullSnapshotPreparedMsgpackBytes +=
+                    fullSnapshotPreparedBytes;
+                lastVisualSend.fullSnapshotWireBytes += fullSnapshotWireBytes;
                 lastVisualSend.datagrams += static_cast<uint32_t>(datagrams.size());
                 for (const auto& datagram : datagrams) {
                     lastVisualSend.wireBytes += datagram.bytes.size();
@@ -1120,9 +1116,9 @@ struct Transport::Impl {
             if (decoded.senderId != "direct") {
                 routed["client_id"] = decoded.senderId;
             }
-            if (matrixExpand != nullptr) {
+            if (poseDeltaExpand != nullptr) {
                 std::string error;
-                if (!matrixExpand(routed, decoded.senderId,
+                if (!poseDeltaExpand(routed, decoded.senderId,
                                   static_cast<uint8_t>(decoded.type), decoded.sequence,
                                   error)) {
                     udpDecoder.discard_message(decoded.messageToken);
@@ -1132,7 +1128,7 @@ struct Transport::Impl {
                             decoded.sequence, udp::AckBaselineReset));
                     }
                     emit(EventKind::Error, decoded.senderId,
-                         error.empty() ? "matrix delta expansion failed" : error);
+                         error.empty() ? "pose delta expansion failed" : error);
                     return;
                 }
             }
@@ -1141,7 +1137,7 @@ struct Transport::Impl {
                 const json state = routed.value("state", json::object());
                 if (state.is_object()) poseStage = state.value("stage", "");
             }
-            // A corrupt/missing matrix delta is not a valid pose observation
+            // A corrupt or missing pose delta is not a valid observation
             // and must not poison DirectHost's stage-routing fallback.
             if (!decoded.senderId.empty() && !poseStage.empty()) {
                 peerPoseStages[decoded.senderId] = std::move(poseStage);
@@ -1186,18 +1182,18 @@ struct Transport::Impl {
         } else if (decoded.kind == udp::DecodeKind::Ack) {
             const auto ackedType = static_cast<udp::PacketType>(decoded.ack.ackedType);
             const std::string ackedSender = udp::acked_sender_id(decoded.ack);
-            const std::string key = matrix_ack_key(decoded.senderId, ackedSender, ackedType);
-            uint32_t& ackedSequence = matrixAckSequences[key];
+            const std::string key = pose_ack_key(decoded.senderId, ackedSender, ackedType);
+            uint32_t& ackedSequence = poseAckSequences[key];
             if ((decoded.ack.stressFlags & udp::AckBaselineReset) != 0) {
-                matrixAckResetFloors[key] = std::max(matrixAckResetFloors[key],
-                                                     decoded.ack.sequence);
+                poseAckResetFloors[key] = std::max(poseAckResetFloors[key],
+                                                   decoded.ack.sequence);
                 ackedSequence = 0;
                 return;
             }
-            const auto resetFloor = matrixAckResetFloors.find(key);
-            if (resetFloor != matrixAckResetFloors.end()) {
+            const auto resetFloor = poseAckResetFloors.find(key);
+            if (resetFloor != poseAckResetFloors.end()) {
                 if (decoded.ack.sequence <= resetFloor->second) return;
-                matrixAckResetFloors.erase(resetFloor);
+                poseAckResetFloors.erase(resetFloor);
             }
             if (decoded.ack.sequence <= ackedSequence) return;
             ackedSequence = decoded.ack.sequence;
@@ -1424,8 +1420,6 @@ struct Transport::Impl {
                 status.settings.dummyModel = message.value("dummy_model", status.settings.dummyModel);
                 status.settings.syncFlags = message.value("sync_flags", status.settings.syncFlags);
                 status.settings.syncWorld = message.value("sync_world", status.settings.syncWorld);
-                status.settings.performanceMode =
-                    message.value("performance_mode", status.settings.performanceMode);
                 status.settings.remoteCollision =
                     message.value("remote_collision", status.settings.remoteCollision);
                 status.settings.pvp = message.value("pvp", status.settings.pvp) &&
@@ -1494,10 +1488,6 @@ struct Transport::Impl {
             emit(EventKind::Message, {}, {}, message);
         } else if (status.mode == Mode::DirectJoin && type == "sync_world") {
             status.settings.syncWorld = message.value("enabled", status.settings.syncWorld);
-            emit(EventKind::Message, {}, {}, message);
-        } else if (status.mode == Mode::DirectJoin && type == "performance_mode") {
-            status.settings.performanceMode =
-                message.value("enabled", status.settings.performanceMode);
             emit(EventKind::Message, {}, {}, message);
         } else if (status.mode == Mode::DirectJoin && type == "remote_collision") {
             status.settings.remoteCollision =
@@ -1689,7 +1679,6 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
     impl_->sessionKey = config.sessionKey;
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
-    impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
     impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
     impl_->automaticReconnect = true;
     if (!impl_->begin_host()) {
@@ -1725,7 +1714,6 @@ bool Transport::start_direct_join(const DirectJoinConfig& config, std::string* e
     impl_->sessionKey = config.sessionKey;
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
-    impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
     impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
     impl_->automaticReconnect = true;
     if (!impl_->begin_connect() && impl_->status.state == State::Disconnected) {
@@ -1769,7 +1757,6 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
     impl_->relayMayRecreateRoom = false;
     impl_->wantPuppet = config.wantPuppet;
     impl_->wantMidna = false;
-    impl_->supportsSemanticVisuals = config.supportsSemanticVisuals;
     impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
     impl_->automaticReconnect = true;
     if (!impl_->begin_connect() && impl_->status.state == State::Disconnected) {
@@ -1841,30 +1828,31 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
     const uint32_t sequence = wireMessage.value("sequence", 0U);
     const uint32_t baseline = impl_->status.mode == Mode::Relay ?
         impl_->relay_common_ack_sequence(senderId, type) :
-        impl_->matrix_ack_sequence(receiverId, senderId, type);
+        impl_->pose_ack_sequence(receiverId, senderId, type);
     const bool allowSnapshotDelta = impl_->status.snapshotDeltasReady;
     std::string error;
-    uint64_t legacyPreparedBytes = 0;
-    uint64_t legacyWireBytes = 0;
+    uint64_t fullSnapshotPreparedBytes = 0;
+    uint64_t fullSnapshotWireBytes = 0;
     if (impl_->visualWireDiagnostics &&
         type == udp::PacketType::SemanticPoseMsgpack) {
-        nlohmann::json legacyWireMessage = message;
+        nlohmann::json fullSnapshotMessage = message;
         std::string diagnosticError;
-        if (impl_->matrixPrepare == nullptr ||
-            impl_->matrixPrepare(legacyWireMessage, senderId,
+        if (impl_->poseDeltaPrepare == nullptr ||
+            impl_->poseDeltaPrepare(fullSnapshotMessage, senderId,
                                  static_cast<uint8_t>(type), sequence, baseline,
                                  false, false, diagnosticError)) {
-            legacyWireMessage.erase("_snapshot_debug_reason");
-            legacyPreparedBytes = nlohmann::json::to_msgpack(legacyWireMessage).size();
-            const auto legacyDatagrams = udp::encode_message(
-                legacyWireMessage, senderId, type, &diagnosticError);
-            for (const auto& datagram : legacyDatagrams) {
-                legacyWireBytes += datagram.bytes.size();
+            fullSnapshotMessage.erase("_snapshot_debug_reason");
+            fullSnapshotPreparedBytes =
+                nlohmann::json::to_msgpack(fullSnapshotMessage).size();
+            const auto fullSnapshotDatagrams = udp::encode_message(
+                fullSnapshotMessage, senderId, type, &diagnosticError);
+            for (const auto& datagram : fullSnapshotDatagrams) {
+                fullSnapshotWireBytes += datagram.bytes.size();
             }
         }
     }
-    if (impl_->matrixPrepare != nullptr &&
-        !impl_->matrixPrepare(wireMessage, senderId, static_cast<uint8_t>(type), sequence,
+    if (impl_->poseDeltaPrepare != nullptr &&
+        !impl_->poseDeltaPrepare(wireMessage, senderId, static_cast<uint8_t>(type), sequence,
                               baseline, allowSnapshotDelta, impl_->visualWireDiagnostics,
                               error)) {
         impl_->emit(EventKind::Error, {}, error);
@@ -1898,8 +1886,9 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
                                                         senderId, receiverId, type);
     if (queued) {
         impl_->lastVisualSend.recipients = 1;
-        impl_->lastVisualSend.legacyPreparedMsgpackBytes = legacyPreparedBytes;
-        impl_->lastVisualSend.legacyWireBytes = legacyWireBytes;
+        impl_->lastVisualSend.fullSnapshotPreparedMsgpackBytes =
+            fullSnapshotPreparedBytes;
+        impl_->lastVisualSend.fullSnapshotWireBytes = fullSnapshotWireBytes;
         impl_->lastVisualSend.datagrams = static_cast<uint32_t>(datagrams.size());
         for (const auto& datagram : datagrams) {
             impl_->lastVisualSend.wireBytes += datagram.bytes.size();
@@ -1983,10 +1972,6 @@ bool Transport::publish_room_settings(const RoomSettings& settings) {
         ok &= send({{"type", "sync_world"},
                     {"enabled", impl_->status.settings.syncWorld}});
     }
-    if (previous.performanceMode != impl_->status.settings.performanceMode) {
-        ok &= send({{"type", "performance_mode"},
-                    {"enabled", impl_->status.settings.performanceMode}});
-    }
     const bool collisionChanged =
         previous.remoteCollision != impl_->status.settings.remoteCollision;
     if (collisionChanged) {
@@ -2009,10 +1994,10 @@ bool Transport::publish_visual_preferences(bool wantPuppet, bool wantMidna) {
                  {"want_midna", false}});
 }
 
-void Transport::set_matrix_codec(MatrixExpandCallback expand,
-                                 MatrixPrepareCallback prepare) {
-    impl_->matrixExpand = expand;
-    impl_->matrixPrepare = prepare;
+void Transport::set_pose_delta_codec(PoseDeltaExpandCallback expand,
+                                     PoseDeltaPrepareCallback prepare) {
+    impl_->poseDeltaExpand = expand;
+    impl_->poseDeltaPrepare = prepare;
 }
 
 void Transport::set_visual_wire_diagnostics(bool enabled) {

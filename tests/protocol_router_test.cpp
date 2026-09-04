@@ -52,7 +52,6 @@ int main() {
         {"owner_changed",Domain::Membership,false,false}, {"room_settings",Domain::Membership,false,false},
         {"name_labels",Domain::Membership,false,false}, {"dummy_model",Domain::Membership,false,false},
         {"sync_flags",Domain::Membership,false,false}, {"sync_world",Domain::Membership,false,false},
-        {"performance_mode",Domain::Membership,false,false},
         {"remote_collision",Domain::Membership,false,false}, {"pvp_enabled",Domain::Membership,false,false},
         {"presence",Domain::Presence,false,false}, {"progression_state",Domain::Presence,false,true},
         {"puppet_preference",Domain::Presence,false,false}, {"midna_preference",Domain::Presence,false,false},

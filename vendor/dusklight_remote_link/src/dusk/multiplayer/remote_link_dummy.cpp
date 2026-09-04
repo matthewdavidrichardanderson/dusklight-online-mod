@@ -219,7 +219,7 @@ bool phase3_semantic_pose_supported(const PeerPoseSnapshot& pose) {
 }
 
 ReceiverPresentationMode choose_presentation_mode(const PeerPoseSnapshot& pose) {
-    if (!semantic_rendering_experiment_enabled()) {
+    if (!semantic_rendering_enabled()) {
         return ReceiverPresentationMode::FullMatrices;
     }
     return phase3_semantic_pose_supported(pose) ?

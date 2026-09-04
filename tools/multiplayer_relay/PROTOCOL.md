@@ -119,7 +119,7 @@ The following messages may be broadcast or may include `target_client_id`:
 The relay transports these payloads but does not interpret or persist their
 gameplay state. Late join synchronization remains client-to-client.
 
-Semantic Performance Mode snapshots use UDP packet type 7. The relay does not
+Semantic rendering snapshots use UDP packet type 7. The relay does not
 decode snapshot deltas; clients select a snapshot acknowledged by every
 eligible receiver and broadcast one delta against that explicitly named
 baseline.
@@ -131,7 +131,6 @@ The owner sends all current values in one `room_settings` message:
 - `dummy_model`
 - `sync_flags`
 - `sync_world`
-- `performance_mode`
 - `remote_collision`
 - `pvp`
 

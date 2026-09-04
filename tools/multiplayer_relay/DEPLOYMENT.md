@@ -7,7 +7,7 @@ traffic for both protocols in the operating-system and server firewalls. The
 default port is `34197`.
 
 Minimum practical private-server size is one CPU core and 1 GB RAM. Bandwidth
-depends on lobby size and whether clients negotiate semantic Performance Mode.
+depends on lobby size and the rate of semantic rendering snapshots.
 
 ## Windows
 

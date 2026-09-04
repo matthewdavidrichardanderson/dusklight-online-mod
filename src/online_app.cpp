@@ -2,6 +2,7 @@
 
 #include "dusk/multiplayer/invite_code.hpp"
 #include "dusklight_online/game/game_adapter.hpp"
+#include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
 
@@ -687,13 +688,13 @@ void OnlineApp::update() {
         const bool pvpEnabled = currentStatus.enabled ?
             net::effective_pvp(currentStatus.settings) :
             remoteCollisionEnabled && bool_value(config_.pvp, false);
-        const bool semanticRenderingEnabled = currentStatus.enabled ?
-            currentStatus.settings.performanceMode &&
-                currentStatus.semanticVisualsReady :
-            bool_value(config_.semanticRenderingExperiment, true);
+        // Semantic recreation is the normal representation. Matrix streaming is
+        // retained only as an explicit developer diagnostic and is never a room
+        // setting that another peer can enable or disable.
+        const bool matrixStreamingEnabled = game::matrix_streaming_enabled();
         game_->update(syncFlagsEnabled, syncWorldEnabled, remoteModelEnabled,
                       bool_value(config_.nameLabels, true), false,
-                      semanticRenderingEnabled,
+                      matrixStreamingEnabled,
                       remoteCollisionEnabled, pvpEnabled,
                       bool_value(config_.playerList, false));
         const bool waiting = game_->manual_sync_waiting();
@@ -787,8 +788,6 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"name-labels", true, &config_.nameLabels},
         BoolVar{"sync-flags", true, &config_.syncFlags},
         BoolVar{"display-midna", false, &config_.displayMidna},
-        BoolVar{"semantic-rendering-experiment", true,
-                &config_.semanticRenderingExperiment},
         BoolVar{"remote-collision", true, &config_.remoteCollision},
         BoolVar{"pvp", false, &config_.pvp},
         BoolVar{"player-list-overlay", false, &config_.playerList},
@@ -853,7 +852,6 @@ net::RoomSettings OnlineApp::configured_settings() const {
     settings.dummyModel = bool_value(config_.dummyModel, true);
     settings.syncFlags = bool_value(config_.syncFlags, true);
     settings.syncWorld = false;
-    settings.performanceMode = bool_value(config_.semanticRenderingExperiment, true);
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
     settings.pvp = bool_value(config_.pvp, false) && settings.remoteCollision;
     return settings;
@@ -1379,10 +1377,6 @@ ModResult OnlineApp::build_settings_tab(ModContext*, UiWindowHandle, UiElementHa
         &OnlineApp::room_setting_locked, &app,
         "<p>Share supported story, item and progression state with the lobby.</p>");
     add_session_toggle(
-        left, "Performance Mode (Recommended)", &OnlineApp::performance_mode_get,
-        &OnlineApp::performance_mode_set, &OnlineApp::room_setting_locked, &app,
-        "<p>Recreate Remote Link locally using compact animation state for substantially lower bandwidth.</p>");
-    add_session_toggle(
         left, "Remote collision", &OnlineApp::remote_collision_get,
         &OnlineApp::remote_collision_set, &OnlineApp::remote_collision_setting_locked, &app,
         "<p>Allow connected players' Link models to collide with the local player.</p>");
@@ -1779,28 +1773,6 @@ void OnlineApp::sync_flags_set(ModContext*, void* data, const UiControlValue* va
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.syncFlags = value->bool_value;
-        settings.syncWorld = false;
-        app.transport_.publish_room_settings(settings);
-    }
-}
-
-void OnlineApp::performance_mode_get(ModContext*, void* data, UiControlValue* value) {
-    value->bool_value =
-        static_cast<OnlineApp*>(data)->displayed_settings().performanceMode;
-}
-
-void OnlineApp::performance_mode_set(ModContext*, void* data,
-                                     const UiControlValue* value) {
-    auto& app = *static_cast<OnlineApp*>(data);
-    const net::Status status = app.transport_.status();
-    if (room_settings_locked(status, app.relayHostIntent_)) return;
-    svc_config->set_bool(mod_ctx, app.config_.semanticRenderingExperiment,
-                         value->bool_value);
-    if (status.enabled &&
-        (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner))) {
-        net::RoomSettings settings = status.settings;
-        settings.performanceMode = value->bool_value;
         settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }

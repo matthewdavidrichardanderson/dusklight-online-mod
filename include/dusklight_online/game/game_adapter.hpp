@@ -31,7 +31,7 @@ public:
     void shutdown_hooks();
     void update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
                 bool nameLabelsEnabled, bool displayMidnaEnabled,
-                bool semanticRenderingExperimentEnabled,
+                bool matrixStreamingEnabled,
                 bool remoteCollisionEnabled,
                 bool pvpEnabled, bool playerListEnabled);
     // Capture mutations made by the completed game tick before inbound

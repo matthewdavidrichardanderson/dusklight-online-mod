@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <string>
@@ -254,7 +255,7 @@ json audio_json(const std::vector<dusk::multiplayer::RemoteAudioEvent>& events) 
 }  // namespace
 
 bool build_local_pose(uint32_t sequence, bool manualSyncReady,
-                      bool semanticVisualsEnabled, json& poseMessage,
+                      bool matrixStreamingEnabled, json& poseMessage,
                       LocalPoseDiagnostics* diagnostics) {
     if (diagnostics != nullptr) *diagnostics = {};
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
@@ -521,7 +522,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"visual_mode", visualUnsupportedReasons == 0 ? "semantic_gameplay" :
                                                          "hidden_unsupported"},
         {"visual_unsupported_reasons", visualUnsupportedReasons},
-        {"matrix_scope", !semanticVisualsEnabled ? "full_body" : "none"},
+        {"matrix_scope", matrixStreamingEnabled ? "full_body" : "none"},
         {"stage", dComIfGp_getStartStageName()},
         {"room", int(fopAcM_GetRoomNo(player))},
         {"layer", int(dComIfGp_getStartStageLayer())},
@@ -924,7 +925,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         }
         state["boomerang_visual"] = std::move(boomerang);
     }
-    if (!semanticVisualsEnabled) {
+    if (matrixStreamingEnabled) {
         if (diagnostics != nullptr) {
             diagnostics->matrixScope = LocalPoseMatrixScope::FullBody;
         }
@@ -946,7 +947,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
             {nullptr}, {nullptr}, {nullptr}, {nullptr}, {nullptr},
         }, diagnostics);
     } else if (semanticGameplay) {
-        // Performance Mode is structurally matrix-free. Link, wolf, equipment,
+        // Semantic rendering is structurally matrix-free. Link, wolf, equipment,
         // held items and independently moving props all use semantic state or
         // their dedicated object lane; unsupported visuals remain absent.
         if (diagnostics != nullptr) {
@@ -958,6 +959,18 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
 
     poseMessage = {{"type", "pose"}, {"sequence", sequence}, {"state", std::move(state)}};
     return true;
+}
+
+bool matrix_streaming_enabled() {
+    // Matrix streaming is retained solely for explicit developer comparison.
+    // It is intentionally absent from configuration and room settings.
+    static const bool enabled = [] {
+        const char* value = std::getenv("DUSK_MP_MATRIX_STREAMING");
+        return value != nullptr &&
+               (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+                std::strcmp(value, "on") == 0);
+    }();
+    return enabled;
 }
 
 void reset_local_pose_state() {
