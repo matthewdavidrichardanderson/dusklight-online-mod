@@ -29,7 +29,7 @@ public:
 
     ModResult initialize_hooks(ModError* error);
     void shutdown_hooks();
-    void update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
+    void update(bool syncFlagsEnabled, bool remoteModelEnabled,
                 bool nameLabelsEnabled, bool displayMidnaEnabled,
                 bool matrixStreamingEnabled,
                 bool remoteCollisionEnabled,
@@ -114,7 +114,6 @@ private:
     uint32_t localPvpHitSequence_ = 0;
     bool applyingRemote_ = false;
     bool syncFlagsEnabled_ = true;
-    bool syncWorldEnabled_ = false;
     bool hooksInstalled_ = false;
     SaveObserverHandle saveObserver_ = 0;
     ItemGiveHandle itemGiveObserver_ = 0;
@@ -180,6 +179,7 @@ private:
     std::string awaitingManualSyncCueKey_;
     std::string awaitingManualSyncPeerId_;
     std::set<std::string> handledProgressionCues_;
+    std::set<std::string> shownPoseProgressionCues_;
     struct PendingSyncReply {
         std::string peerId;
         std::string cueKey;
@@ -239,6 +239,8 @@ private:
                                   std::string_view cueKey, std::string* error,
                                   bool trackStatus = true);
     void update_progression_prompts();
+    void maybe_queue_progression_pose_prompt(std::string_view peerId,
+                                             const dusk::multiplayer::PeerPoseSnapshot& pose);
     void maybe_queue_progression_event_prompt(std::string_view peerId, uint16_t flag);
     void maybe_queue_progression_switch_prompt(std::string_view peerId, int stage, int flag);
 };

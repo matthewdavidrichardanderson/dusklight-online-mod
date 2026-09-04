@@ -54,12 +54,12 @@ GAMEPLAY_ROUTE_TYPES = (
     "midna_preference",
     "midna_pose",
     "pvp_hit",
-    "ganondorf_owner_claim",
-    "ganondorf_owner",
+    "actor_owner_claim",
+    "actor_owner",
     "ganondorf_hit",
     "ganondorf_reaction",
     "ganondorf_player_damage",
-    "ganondorf_state",
+    "actor_state",
     "ooccoo_state",
 )
 

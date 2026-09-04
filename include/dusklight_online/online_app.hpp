@@ -79,6 +79,8 @@ private:
     bool lastWantPuppet_ = true;
     bool lastWantMidna_ = false;
     bool manualSyncWasWaiting_ = false;
+    bool worldSyncDebug_ = false;
+    bool worldSyncRequested_ = false;
     uint32_t manualSyncCooldownTicks_ = 0;
     UiElementHandle manualSyncFlagsButton_ = 0;
     UiElementHandle manualSyncWarpButton_ = 0;
@@ -174,6 +176,9 @@ public:
     static bool relay_host_inactive(ModContext*, void*);
     static bool relay_join_inactive(ModContext*, void*);
     static bool room_setting_locked(ModContext*, void*);
+    static bool sync_world_setting_locked(ModContext*, void*);
+    static void sync_world_get(ModContext*, void*, UiControlValue*);
+    static void sync_world_set(ModContext*, void*, const UiControlValue*);
     static bool remote_collision_setting_locked(ModContext*, void*);
     static bool pvp_setting_locked(ModContext*, void*);
     static void dummy_model_get(ModContext*, void*, UiControlValue*);

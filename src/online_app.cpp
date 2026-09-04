@@ -2,6 +2,7 @@
 
 #include "dusk/multiplayer/invite_code.hpp"
 #include "dusklight_online/game/game_adapter.hpp"
+#include "dusklight_online/game/actor_sync_registry.hpp"
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
@@ -14,6 +15,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -531,7 +533,11 @@ bool room_settings_locked(const net::Status& status, bool relayHostIntent) {
 
 }  // namespace
 
-OnlineApp::OnlineApp() = default;
+OnlineApp::OnlineApp() {
+    const char* debug = std::getenv("DUSK_MP_SYNC_WORLD_DEBUG");
+    worldSyncDebug_ = debug != nullptr && std::strcmp(debug, "1") == 0;
+    worldSyncRequested_ = worldSyncDebug_;
+}
 OnlineApp::~OnlineApp() = default;
 
 ModResult OnlineApp::initialize(ModError* error) {
@@ -678,9 +684,6 @@ void OnlineApp::update() {
     if (game_ != nullptr) {
         const bool remoteModelEnabled = currentStatus.enabled ? currentStatus.settings.dummyModel :
             bool_value(config_.dummyModel, true);
-        // World synchronization remains protocol-compatible but is intentionally
-        // dormant until it is complete enough to expose as a supported feature.
-        constexpr bool syncWorldEnabled = false;
         const bool remoteCollisionEnabled = currentStatus.enabled ?
             net::effective_remote_collision(currentStatus.settings) :
             bool_value(config_.dummyModel, true) &&
@@ -692,7 +695,7 @@ void OnlineApp::update() {
         // retained only as an explicit developer diagnostic and is never a room
         // setting that another peer can enable or disable.
         const bool matrixStreamingEnabled = game::matrix_streaming_enabled();
-        game_->update(syncFlagsEnabled, syncWorldEnabled, remoteModelEnabled,
+        game_->update(syncFlagsEnabled, remoteModelEnabled,
                       bool_value(config_.nameLabels, true), false,
                       matrixStreamingEnabled,
                       remoteCollisionEnabled, pvpEnabled,
@@ -851,7 +854,7 @@ net::RoomSettings OnlineApp::configured_settings() const {
     net::RoomSettings settings;
     settings.dummyModel = bool_value(config_.dummyModel, true);
     settings.syncFlags = bool_value(config_.syncFlags, true);
-    settings.syncWorld = false;
+    settings.syncWorld = worldSyncDebug_ && worldSyncRequested_;
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
     settings.pvp = bool_value(config_.pvp, false) && settings.remoteCollision;
     return settings;
@@ -1368,6 +1371,13 @@ ModResult OnlineApp::build_settings_tab(ModContext*, UiWindowHandle, UiElementHa
     auto& app = *static_cast<OnlineApp*>(data);
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
     svc_ui->pane_add_section(mod_ctx, left, "Gameplay");
+    if (app.worldSyncDebug_) {
+        add_session_toggle(
+            left, "Sync world (experimental)", &OnlineApp::sync_world_get,
+            &OnlineApp::sync_world_set, &OnlineApp::sync_world_setting_locked, &app,
+            "<p>Share supported world actors. Currently supports the final Ganondorf fight. "
+            "Does not share player-owned actors. Change this outside supported encounters.</p>");
+    }
     add_session_toggle(
         left, "Remote Link model", &OnlineApp::dummy_model_get, &OnlineApp::dummy_model_set,
         &OnlineApp::room_setting_locked, &app,
@@ -1721,6 +1731,30 @@ bool OnlineApp::room_setting_locked(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     return room_settings_locked(app.transport_.status(), app.relayHostIntent_);
 }
+
+bool OnlineApp::sync_world_setting_locked(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    return !app.worldSyncDebug_ ||
+           room_settings_locked(app.transport_.status(), app.relayHostIntent_) ||
+           game::actor_sync::registry().active();
+}
+
+void OnlineApp::sync_world_get(ModContext*, void* data, UiControlValue* value) {
+    value->bool_value = static_cast<OnlineApp*>(data)->displayed_settings().syncWorld;
+}
+
+void OnlineApp::sync_world_set(ModContext* ctx, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (sync_world_setting_locked(ctx, data)) return;
+    app.worldSyncRequested_ = value->bool_value;
+    const auto status = app.transport_.status();
+    if (status.welcomed) {
+        auto settings = status.settings;
+        settings.syncWorld = value->bool_value;
+        app.transport_.publish_room_settings(settings);
+    }
+}
+
 bool OnlineApp::remote_collision_setting_locked(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
@@ -1754,7 +1788,6 @@ void OnlineApp::dummy_model_set(ModContext*, void* data, const UiControlValue* v
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.dummyModel = value->bool_value;
-        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1773,7 +1806,6 @@ void OnlineApp::sync_flags_set(ModContext*, void* data, const UiControlValue* va
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.syncFlags = value->bool_value;
-        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1794,7 +1826,6 @@ void OnlineApp::remote_collision_set(ModContext*, void* data, const UiControlVal
         net::RoomSettings settings = status.settings;
         settings.remoteCollision = value->bool_value;
         if (!settings.remoteCollision) settings.pvp = false;
-        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }
@@ -1814,7 +1845,6 @@ void OnlineApp::pvp_set(ModContext*, void* data, const UiControlValue* value) {
          (status.mode == net::Mode::Relay && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.pvp = value->bool_value && settings.remoteCollision;
-        settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
     }
 }

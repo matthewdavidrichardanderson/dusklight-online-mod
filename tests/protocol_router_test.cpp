@@ -75,9 +75,9 @@ int main() {
         {"rando_item_get",Domain::OptionalRandomizer,false,true},
         {"pose",Domain::Visual,false,false}, {"midna_pose",Domain::Visual,false,false},
         {"pvp_hit",Domain::Interaction,false,false},
-        {"ganondorf_owner_claim",Domain::Ganondorf,false,true}, {"ganondorf_owner",Domain::Ganondorf,false,true},
-        {"ganondorf_hit",Domain::Ganondorf,false,true}, {"ganondorf_reaction",Domain::Ganondorf,false,true},
-        {"ganondorf_player_damage",Domain::Ganondorf,false,true}, {"ganondorf_state",Domain::Ganondorf,false,true},
+        {"actor_owner_claim",Domain::ActorSync,false,false}, {"actor_owner",Domain::ActorSync,false,false},
+        {"ganondorf_hit",Domain::ActorSync,false,false}, {"ganondorf_reaction",Domain::ActorSync,false,false},
+        {"ganondorf_player_damage",Domain::ActorSync,false,false}, {"actor_state",Domain::ActorSync,false,false},
     };
     for (const auto& item : expected) {
         const auto spec = ProtocolRouter::classify(item.type);
@@ -91,7 +91,7 @@ int main() {
     assert(ProtocolRouter::classify("rando_item_get").domain ==
            MessageDomain::OptionalRandomizer);
     assert(!ProtocolRouter::classify("rando_item_get").stageDependent);
-    assert(ProtocolRouter::classify("ganondorf_state").domain == MessageDomain::Ganondorf);
+    assert(ProtocolRouter::classify("actor_state").domain == MessageDomain::ActorSync);
     assert(!ProtocolRouter::is_known_type("future_unreviewed_lane"));
 
     Consumer consumer;

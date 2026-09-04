@@ -67,6 +67,53 @@ int main() {
         return 1;
     }
 
+    // Final-fight readiness is a semantic ownership gate as well as a UI cue.
+    // Losing this field leaves every receiver permanently unable to join the
+    // shared Ganondorf encounter.
+    json ganondorfReady = pose_message(2, "semantic_gameplay");
+    ganondorfReady["state"]["stage"] = "D_MN09B";
+    ganondorfReady["state"]["final_ganondorf_ready"] = true;
+    PeerPoseSnapshot ganondorfReadyPose;
+    if (!decode_and_enforce(ganondorfReady, &pose, ganondorfReadyPose, error) ||
+        !ganondorfReadyPose.finalGanondorfReady ||
+        ganondorfReadyPose.stage != "D_MN09B") {
+        std::cerr << "Ganondorf readiness was not decoded: " << error << '\n';
+        return 1;
+    }
+
+    dusklight_online::game::clear_remote_pose_history();
+    json ganondorfNotReady = pose_message(1, "semantic_gameplay");
+    ganondorfNotReady["state"]["stage"] = "D_MN09B";
+    ganondorfNotReady["state"]["final_ganondorf_ready"] = false;
+    ganondorfNotReady["state"]["unchanged_padding"] = std::string(256, 'x');
+    if (!dusklight_online::game::prepare_remote_pose_delta(
+            ganondorfNotReady, "ganondorf-peer", 7, 1, 0, true, false, error)) {
+        std::cerr << "Ganondorf baseline was not prepared: " << error << '\n';
+        return 1;
+    }
+    json ganondorfReadyDelta = ganondorfReady;
+    ganondorfReadyDelta["state"]["unchanged_padding"] = std::string(256, 'x');
+    if (!dusklight_online::game::prepare_remote_pose_delta(
+            ganondorfReadyDelta, "ganondorf-peer", 7, 2, 1, true, false, error) ||
+        !ganondorfReadyDelta.value("snapshot_delta_v1", false) ||
+        !ganondorfReadyDelta["state"].value("final_ganondorf_ready", false)) {
+        std::cerr << "Ganondorf readiness edge was lost while delta encoding: "
+                  << error << " reason="
+                  << ganondorfReadyDelta.value("_snapshot_debug_reason", "missing")
+                  << '\n';
+        return 1;
+    }
+    dusklight_online::game::clear_remote_pose_history();
+    if (!dusklight_online::game::expand_remote_pose_delta(
+            ganondorfNotReady, "ganondorf-peer", 7, 1, error) ||
+        !dusklight_online::game::expand_remote_pose_delta(
+            ganondorfReadyDelta, "ganondorf-peer", 7, 2, error) ||
+        !ganondorfReadyDelta["state"].value("final_ganondorf_ready", false)) {
+        std::cerr << "Ganondorf readiness edge was lost while delta decoding: "
+                  << error << '\n';
+        return 1;
+    }
+
     // Fishing rod movement is a pair of procedural arm rotations rather than
     // a BCK slot. Preserve it independently of the (optional) rod model.
     json fishing = pose_message(2, "semantic_gameplay");

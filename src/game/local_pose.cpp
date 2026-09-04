@@ -516,6 +516,9 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     };
     J3DAnmTransform* faceBck = link->mFaceBck.getBckAnm();
     const int clothesVariant = clothes_variant();
+    const char* stageName = dComIfGp_getStartStageName();
+    const bool finalGanondorfReady = stageName != nullptr &&
+        std::strcmp(stageName, "D_MN09B") == 0 && dComIfGs_isSaveDunSwitch(1);
 
     const bool semanticGameplay = visualUnsupportedReasons == 0;
     json state = {
@@ -523,7 +526,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
                                                          "hidden_unsupported"},
         {"visual_unsupported_reasons", visualUnsupportedReasons},
         {"matrix_scope", matrixStreamingEnabled ? "full_body" : "none"},
-        {"stage", dComIfGp_getStartStageName()},
+        {"stage", stageName != nullptr ? stageName : ""},
         {"room", int(fopAcM_GetRoomNo(player))},
         {"layer", int(dComIfGp_getStartStageLayer())},
         {"x", poseX}, {"y", poseY}, {"z", poseZ},
@@ -534,6 +537,7 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         {"cut_type", int(link->getCutType())}, {"cut_count", int(link->getCutCount())},
         {"jump_cancel_turn", bool(link->checkCutJumpCancelTurn())},
         {"manual_sync_ready", manualSyncReady},
+        {"final_ganondorf_ready", finalGanondorfReady},
         {"under_frame", underFrame0},
         {"under_bck0", underSlots[0].bck}, {"under_arc0", underSlots[0].arc},
         {"under_frame0", underSlots[0].frame}, {"under_rate0", underSlots[0].rate},

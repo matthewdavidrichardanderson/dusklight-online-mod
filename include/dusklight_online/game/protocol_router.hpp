@@ -19,7 +19,7 @@ enum class MessageDomain : uint8_t {
     Progression,
     Visual,
     Interaction,
-    Ganondorf,
+    ActorSync,
     OptionalRandomizer,
     Unknown,
 };

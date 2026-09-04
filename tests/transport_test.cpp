@@ -178,6 +178,33 @@ int main() {
     while (alice.has_events()) alice.pop_event();
     while (bob.has_events()) bob.pop_event();
 
+    // A host entering Ganon must notify joiners without depending on a single
+    // visual packet or on warp readiness. Exercise the reverse role as well.
+    const nlohmann::json encounterReady = {
+        {"type", "progression_state"}, {"stage", "D_MN09B"},
+        {"final_ganondorf_ready", true}, {"manual_sync_ready", false}
+    };
+    const auto receiveEncounter = [](Transport& receiver, const std::string& sender) {
+        bool found = false;
+        while (receiver.has_events()) {
+            const auto event = receiver.pop_event();
+            if (event.kind == EventKind::Message && event.peerId == sender &&
+                event.message.value("type", "") == "progression_state" &&
+                event.message.value("final_ganondorf_ready", false) &&
+                !event.message.value("manual_sync_ready", true)) found = true;
+        }
+        return found;
+    };
+    if (!host.send(encounterReady)) fail("host encounter readiness send failed");
+    pump(host, alice, bob, 60);
+    if (!receiveEncounter(alice, "direct") || !receiveEncounter(bob, "direct"))
+        fail("host encounter readiness lost its identity or fields");
+    if (!alice.send(encounterReady)) fail("joiner encounter readiness send failed");
+    pump(host, alice, bob, 60);
+    if (!receiveEncounter(host, alice.status().clientId) ||
+        !receiveEncounter(bob, alice.status().clientId))
+        fail("joiner encounter readiness lost its identity or fields");
+
     // Bob's first pose registers his observed UDP endpoint with the direct
     // host. Alice's following pose must then be decoded and re-encoded by the
     // host for Bob, retaining Alice's authenticated peer identity.

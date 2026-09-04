@@ -114,7 +114,8 @@ The following messages may be broadcast or may include `target_client_id`:
 | Counts and slots | `key_num`, `light_drop_num`, `light_drop_get_flag`, `max_life_update`, `bottle_slots`, `bomb_bag_slot`, `rupee_count`, `rupee_delta`, `poe_count`, `malo_fundraising`, `charlo_offering`, `fish_record` |
 | Peer status/preferences | `presence`, `progression_state`, `puppet_preference`, `midna_preference` |
 | Visual/PvP | `midna_pose`, `pvp_hit` |
-| Ganondorf encounter | `ganondorf_owner_claim`, `ganondorf_owner`, `ganondorf_hit`, `ganondorf_reaction`, `ganondorf_player_damage`, `ganondorf_state` |
+| Actor synchronization | `actor_owner_claim`, `actor_owner`, `actor_state` (registered `sync_id`, controlled by the room's `sync_world` setting) |
+| Legacy encounter messages (ignored by current actor adapter) | `ganondorf_hit`, `ganondorf_reaction`, `ganondorf_player_damage` |
 
 The relay transports these payloads but does not interpret or persist their
 gameplay state. Late join synchronization remains client-to-client.

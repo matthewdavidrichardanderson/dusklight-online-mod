@@ -227,8 +227,8 @@ set(ONLINE_CORE_SOURCES
 
 set(ONLINE_GAME_SOURCES
     src/game/audio_bridge.cpp
-    src/game/bomb_bridge.cpp
     src/game/collectible_visual_bridge.cpp
+    src/game/ganondorf_sync.cpp
     src/game/game_adapter.cpp
     src/game/local_pose.cpp
     src/game/protocol_router.cpp
@@ -328,6 +328,11 @@ endif ()
 option(DUSKLIGHT_ONLINE_BUILD_TESTS "Build standalone online core tests" ON)
 if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     enable_testing()
+    add_executable(dusklight_online_actor_sync_test tests/actor_sync_test.cpp)
+    target_compile_features(dusklight_online_actor_sync_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_actor_sync_test PRIVATE include)
+    target_link_libraries(dusklight_online_actor_sync_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME dusklight_online_actor_sync COMMAND dusklight_online_actor_sync_test)
     add_executable(dusklight_online_invite_code_test
         tests/invite_code_test.cpp
         ${ONLINE_INVITE_SOURCES}

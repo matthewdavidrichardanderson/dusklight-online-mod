@@ -1,7 +1,8 @@
 #include "dusklight_online/game/game_adapter.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
-#include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
+#include "dusklight_online/game/ganondorf_sync.hpp"
+#include "dusklight_online/game/actor_sync_registry.hpp"
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/randomizer_item_names.hpp"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
@@ -190,6 +191,7 @@ constexpr uint16_t kProgressionCueTempleOfTimeClearEventBit = 0x2004;
 constexpr std::string_view kProgressionCueTempleOfTimeExitStage = "F_SP117";
 constexpr std::string_view kProgressionCueSewersCompleteDestStage = "F_SP104";
 constexpr std::string_view kProgressionCueFaronTwilightDestStage = "F_SP108";
+constexpr std::string_view kProgressionCueFinalGanondorfStage = "D_MN09C";
 
 struct ProgressionCueDescriptor {
     std::string_view cueKey;
@@ -272,7 +274,6 @@ std::vector<int> sVisitedRoomPendingRegions;
 daAlink_c* sSyntheticDamagePlayer = nullptr;
 dCcD_GObjInf* sSyntheticDamageObject = nullptr;
 cXyz* sSyntheticDamageVector = nullptr;
-bool sWorldSyncEnabled = false;
 
 bool is_remote_link_actor(fopAc_ac_c* actor) {
     return actor != nullptr && fopAcM_GetName(actor) == fpcNm_REMOTE_LINK_e;
@@ -1889,7 +1890,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
     transport_.set_visual_wire_diagnostics(visual_wire_trace_enabled());
     if (install_remote_actor_profile(error) != MOD_OK ||
         install_audio_hooks(error) != MOD_OK ||
-        install_bomb_hooks(transport_, error) != MOD_OK ||
+        install_ganondorf_sync_hooks(transport_, error) != MOD_OK ||
         install_visual_hooks(error) != MOD_OK ||
         mods::hook::install<ToggleAutoSaveHook>() != MOD_OK ||
         mods::hook::add_pre<PvpDamageVectorHook>(&pvp_damage_vector_pre) != MOD_OK ||
@@ -1972,6 +1973,7 @@ void GameAdapter::shutdown_hooks() {
     if (sActiveAdapter == this) sActiveAdapter = nullptr;
     transport_.set_pose_delta_codec(nullptr, nullptr);
     dusk::multiplayer::set_remote_pvp_hit_callback(nullptr);
+    uninstall_ganondorf_sync_hooks();
     // uninstall is idempotent for entries that were not fully installed.
     if (itemGiveObserver_ != 0) {
         svc_item->unobserve_gives(mod_ctx, itemGiveObserver_);
@@ -2029,7 +2031,6 @@ void GameAdapter::shutdown_hooks() {
     mods::hook::uninstall<DeleteTagRepairHook>();
     mods::hook::uninstall<SafeLineQueueHook>();
     uninstall_visual_hooks();
-    uninstall_bomb_hooks();
     uninstall_audio_hooks();
     uninstall_remote_actor_profile();
     sExecutingProcessStack.clear();
@@ -2050,7 +2051,6 @@ void GameAdapter::shutdown_hooks() {
     sEmptyBottleItemMutations.clear();
     sVisitedRoomPendingRegions.clear();
     hooksInstalled_ = false;
-    sWorldSyncEnabled = false;
 }
 
 void GameAdapter::publish_local(nlohmann::json message) {
@@ -2517,6 +2517,31 @@ void GameAdapter::maybe_queue_progression_event_prompt(std::string_view peerId,
     }
 }
 
+void GameAdapter::maybe_queue_progression_pose_prompt(
+    std::string_view peerId, const dusk::multiplayer::PeerPoseSnapshot& pose) {
+    if (peerId.empty() || randomizer_active()) return;
+
+    constexpr std::string_view cueKey = "final_ganondorf_entered";
+    const std::string guard = std::string(peerId) + ':' + std::string(cueKey);
+    const bool reachedFinalFight = pose.finalGanondorfReady ||
+                                   pose.stage == kProgressionCueFinalGanondorfStage;
+    if (!reachedFinalFight) {
+        // Allow another prompt after this peer has genuinely left the final
+        // encounter. D_MN09B is retained during the transition into readiness.
+        if (pose.stage != "D_MN09B") shownPoseProgressionCues_.erase(guard);
+        return;
+    }
+    if (!shownPoseProgressionCues_.insert(guard).second) return;
+    dusklight_online::log_info("Ganondorf sync prompt queued from encounter readiness");
+
+    const auto nameIt = peerNames_.find(std::string(peerId));
+    const std::string name = nameIt != peerNames_.end() ? nameIt->second :
+                                                         std::string(peerId);
+    pendingProgressionCues_.push_back({std::string(peerId), std::string(cueKey),
+        name + " reached the final Ganondorf fight",
+        "Hold D-Pad Down to sync and reload", {}});
+}
+
 void GameAdapter::update_progression_prompts() {
     if (randomizer_active()) {
         progressionPrompt_ = {};
@@ -2541,9 +2566,27 @@ void GameAdapter::update_progression_prompts() {
 
     for (auto it = pendingProgressionCues_.begin(); it != pendingProgressionCues_.end();) {
         const nlohmann::json* state = nullptr;
-        if (!peer_ready(it->peerId, &state) ||
+        // Offering the encounter is not a warp. Its pose already proves the
+        // destination; only accepting the request must wait for warp safety.
+        const bool encounterPrompt = it->cueKey == "final_ganondorf_entered";
+        if (progressionPrompt_.active &&
+            (encounterPrompt || progressionPrompt_.cueKey == "final_ganondorf_entered") &&
+            (progressionPrompt_.peerId != it->peerId || progressionPrompt_.cueKey != it->cueKey)) {
+            ++it;
+            continue;
+        }
+        const bool canOffer = encounterPrompt || peer_ready(it->peerId, &state);
+        if (!canOffer ||
             (!it->expectedStage.empty() &&
-             state->value("stage", std::string()) != it->expectedStage)) {
+             (state == nullptr || state->value("stage", std::string()) != it->expectedStage))) {
+            ++it;
+            continue;
+        }
+        // Do not consume/replace a different visible offer, or expire an
+        // encounter invitation behind this client's title/load/cutscene.
+        if (encounterPrompt && (!stage_ready() || opening_or_title_active() ||
+            (progressionPrompt_.active && (progressionPrompt_.peerId != it->peerId ||
+                                          progressionPrompt_.cueKey != it->cueKey)))) {
             ++it;
             continue;
         }
@@ -2555,16 +2598,20 @@ void GameAdapter::update_progression_prompts() {
             progressionPrompt_ = {true, it->peerId,
                 nameIt != peerNames_.end() ? nameIt->second : it->peerId,
                 it->cueKey, it->title, it->body, 0, 0, false};
+            if (encounterPrompt)
+                dusklight_online::log_info("Ganondorf sync prompt displayed");
         }
         it = pendingProgressionCues_.erase(it);
     }
 
     if (progressionPrompt_.active) {
-        if (progressionPrompt_.ageTicks < std::numeric_limits<uint32_t>::max()) {
+        const bool encounterHidden = progressionPrompt_.cueKey == "final_ganondorf_entered" &&
+                                    (!stage_ready() || opening_or_title_active());
+        if (!encounterHidden && progressionPrompt_.ageTicks < std::numeric_limits<uint32_t>::max()) {
             ++progressionPrompt_.ageTicks;
         }
         if (!progressionPrompt_.waiting) {
-            progressionPrompt_.holdTicks = progressionPromptAcceptHeld_ ?
+            progressionPrompt_.holdTicks = !encounterHidden && progressionPromptAcceptHeld_ ?
                 std::min(progressionPrompt_.holdTicks + 1, kProgressionPromptHoldTicks) : 0;
             if (progressionPrompt_.holdTicks >= kProgressionPromptHoldTicks) {
                 pendingProgressionPeerId_ = progressionPrompt_.peerId;
@@ -2656,7 +2703,7 @@ void GameAdapter::clear_disabled_sync_flags_state() {
     localObservedState_ = nlohmann::json();
 }
 
-void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
+void GameAdapter::update(bool syncFlagsEnabled, bool remoteModelEnabled,
                          bool nameLabelsEnabled, bool displayMidnaEnabled,
                          bool matrixStreamingEnabled,
                          bool remoteCollisionEnabled,
@@ -2664,10 +2711,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     pvpLocalHitContactsThisUpdate_.clear();
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
     syncFlagsEnabled_ = syncFlagsEnabled;
-    syncWorldEnabled_ = syncWorldEnabled;
     const bool randomizerActive = randomizer_active();
     set_randomizer_audio_filter(randomizerActive);
-    sWorldSyncEnabled = syncWorldEnabled && transport_.status().welcomed;
     if (!syncFlagsEnabled_) {
         if (syncFlagsWereEnabled) clear_disabled_sync_flags_state();
     } else {
@@ -2690,7 +2735,6 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     }
     const net::Status status = transport_.status();
     if (!status.welcomed) clear_local_audio_events();
-    set_bomb_sync_enabled(status.welcomed && syncWorldEnabled);
     for (auto& [peerId, age] : peerProgressionAges_) {
         (void)peerId;
         if (age < std::numeric_limits<uint32_t>::max()) ++age;
@@ -2728,14 +2772,20 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     dusk::multiplayer::set_remote_actor_options(
                                                 dusk::multiplayer::kRemoteMidnaStreamingEnabled &&
                                                     displayMidnaEnabled,
-                                                status.welcomed && syncWorldEnabled &&
-                                                    status.settings.syncWorld,
+                                                false, // Retired world-bomb renderer feed.
                                                 remoteCollisionEnabled, pvpEnabled,
                                                 !matrixStreamingEnabled);
     for (auto& [peerId, pose] : peerPoses_) {
         (void)peerId;
         if (pose.valid && pose.ageTicks < std::numeric_limits<uint32_t>::max()) ++pose.ageTicks;
     }
+    // Registered world actors share the lobby's Sync world setting.
+    // A sword duel is an event, but it is still part of this encounter. Warp
+    // readiness would drop the owner as soon as the native duel camera starts.
+    const bool bossStageLoaded = dComIfGp_getStageStagInfo() != nullptr &&
+        !manualTransitionActive_ && !dComIfGp_isEnableNextStage() &&
+        !fopOvlpM_IsPeek() && !fopOvlpM_IsDoingReq();
+    actor_sync::registry().update(status, bossStageLoaded, peerPoses_);
     const bool visualReceiveActive = status.welcomed && remoteModelEnabled;
     if (!visualReceiveActive) {
         peerPoses_.clear();
@@ -3031,6 +3081,17 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
             if (type == "progression_state") {
                 peerProgressionStates_[message.peerId] = message.payload;
                 peerProgressionAges_[message.peerId] = 0;
+                // Encounter invitations must also work when the entering
+                // player's visual stream is unavailable (for example demos).
+                // Direct-host reliable messages are attributed to "direct"
+                // by Transport, exactly like their actor-state messages.
+                if (message.payload.contains("final_ganondorf_ready")) {
+                    dusk::multiplayer::PeerPoseSnapshot readiness;
+                    readiness.stage = message.payload.value("stage", std::string());
+                    readiness.finalGanondorfReady =
+                        message.payload.value("final_ganondorf_ready", false);
+                    maybe_queue_progression_pose_prompt(message.peerId, readiness);
+                }
             } else peerPresence_[message.peerId] = message.payload;
             return ApplyResult::Applied;
         case MessageDomain::Progression:
@@ -3052,11 +3113,8 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
             // Protocol 2 uses UDP exclusively for Link/Midna visuals. A TCP
             // copy must not clog the stage deferral queue.
             return ApplyResult::IgnoredByPolicy;
-        case MessageDomain::Ganondorf:
-            // Ganondorf synchronization is not implemented by this mod.
-            // Consume these packets as policy-disabled so they cannot fill
-            // the queue.
-            return ApplyResult::IgnoredByPolicy;
+        case MessageDomain::ActorSync:
+            return actor_sync::registry().consume(message);
         default:
             return reject("unclassified message reached game adapter: " + type);
         }
@@ -3237,32 +3295,12 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
             !enforce_semantic_pose_invariants(pose, error)) {
             return reject(std::move(error));
         }
+        maybe_queue_progression_pose_prompt(event.peerId, pose);
         peerPoses_[event.peerId] = std::move(pose);
         return ApplyResult::Applied;
     }
-    if (event.kind == net::EventKind::UdpRemoteObject) {
-        if (!event.ingress.welcomed || !event.ingress.settings.syncWorld) {
-            return ApplyResult::IgnoredByPolicy;
-        }
-        const auto& packet = event.remoteObject;
-        dusk::multiplayer::RemoteBombObjectSnapshot object;
-        object.valid = true;
-        object.peerId = event.peerId;
-        object.objectKind = packet.objectKind;
-        object.objectId = packet.objectId;
-        object.sequence = packet.sequence;
-        object.stage.assign(packet.stageName,
-            std::find(packet.stageName, packet.stageName + sizeof(packet.stageName), '\0'));
-        object.room = packet.room;
-        object.x = packet.x; object.y = packet.y; object.z = packet.z;
-        object.angleY = packet.angleY;
-        object.kind = packet.kind;
-        object.exTime = packet.exTime;
-        object.active = (packet.flags & net::udp::ObjectActive) != 0;
-        object.exploding = (packet.flags & net::udp::ObjectExploding) != 0;
-        dusk::multiplayer::set_remote_bomb_object(object);
-        return ApplyResult::Applied;
-    }
+    // The retired Sync-world bomb lane must not create gameplay actors.
+    if (event.kind == net::EventKind::UdpRemoteObject) return ApplyResult::IgnoredByPolicy;
     const std::string localSender = event.ingress.mode == net::Mode::DirectHost ?
                                         "direct" : event.ingress.clientId;
     if (event.kind != net::EventKind::UdpAck || event.detail != localSender) {
@@ -3360,6 +3398,7 @@ void GameAdapter::peer_joined(std::string_view peerId, std::string_view name) {
 
 void GameAdapter::peer_left(std::string_view peerId) {
     const std::string key(peerId);
+    actor_sync::registry().peer_left(peerId);
     const auto nameIt = peerNames_.find(key);
     push_online_notification((nameIt != peerNames_.end() ? nameIt->second : key) +
                              " left the lobby.");
@@ -3415,6 +3454,14 @@ void GameAdapter::peer_left(std::string_view peerId) {
             ++it;
         }
     }
+    for (auto it = shownPoseProgressionCues_.begin();
+         it != shownPoseProgressionCues_.end();) {
+        if (it->rfind(prefix, 0) == 0) {
+            it = shownPoseProgressionCues_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void GameAdapter::reset_session() {
@@ -3422,7 +3469,7 @@ void GameAdapter::reset_session() {
     reset_local_pose_state();
     dusk::multiplayer::destroy_all_remote_link_dummies();
     dusk::multiplayer::reset_remote_actor_bridge();
-    reset_bomb_sync_state();
+    actor_sync::registry().reset();
     peerNames_.clear();
     peerColorSlots_.clear();
     localColorSlot_ = 0;
@@ -3484,6 +3531,7 @@ void GameAdapter::reset_session() {
     awaitingManualSyncCueKey_.clear();
     awaitingManualSyncPeerId_.clear();
     handledProgressionCues_.clear();
+    shownPoseProgressionCues_.clear();
     pendingSyncReplies_.clear();
     manualSyncState_ = ManualSyncState::None;
     manualSyncFlagsOnly_ = false;
@@ -3706,6 +3754,8 @@ void GameAdapter::send_progression_state(bool force) {
 
     const char* stage = dComIfGp_getStartStageName();
     const bool hasStage = stage != nullptr && stage[0] != '\0';
+    const bool finalGanondorfReady = hasStage && std::strcmp(stage, "D_MN09B") == 0 &&
+                                    dComIfGs_isSaveDunSwitch(1);
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
     const int room = player != nullptr ? static_cast<int>(fopAcM_GetRoomNo(player)) :
                                         static_cast<int>(dComIfGp_roomControl_getStayNo());
@@ -3715,6 +3765,7 @@ void GameAdapter::send_progression_state(bool force) {
         {"room", room},
         {"layer", static_cast<int>(dComIfGp_getStartStageLayer())},
         {"manual_sync_ready", stage_ready()},
+        {"final_ganondorf_ready", finalGanondorfReady},
         {"faron_cage_sequence_active", localFaronCageSequenceActive_},
         {"faron_warp_sequence_active", localFaronWarpSequenceActive_},
     });
