@@ -78,13 +78,12 @@ constexpr std::array kEntries = {
     Entry{"pose", {Domain::Visual, false, false}},
     Entry{"midna_pose", {Domain::Visual, false, false}},
     Entry{"pvp_hit", {Domain::Interaction, false, false}},
-    // Registered world actors use Sync world, independently of progression flags.
-    Entry{"actor_owner_claim", {Domain::ActorSync, false, false}},
-    Entry{"actor_owner", {Domain::ActorSync, false, false}},
-    Entry{"ganondorf_hit", {Domain::ActorSync, false, false}},
-    Entry{"ganondorf_reaction", {Domain::ActorSync, false, false}},
-    Entry{"ganondorf_player_damage", {Domain::ActorSync, false, false}},
-    Entry{"actor_state", {Domain::ActorSync, false, false}},
+    Entry{"ganondorf_owner_claim", {Domain::Ganondorf, false, true}},
+    Entry{"ganondorf_owner", {Domain::Ganondorf, false, true}},
+    Entry{"ganondorf_hit", {Domain::Ganondorf, false, true}},
+    Entry{"ganondorf_reaction", {Domain::Ganondorf, false, true}},
+    Entry{"ganondorf_player_damage", {Domain::Ganondorf, false, true}},
+    Entry{"ganondorf_state", {Domain::Ganondorf, false, true}},
 };
 
 }  // namespace

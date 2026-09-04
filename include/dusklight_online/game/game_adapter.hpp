@@ -29,7 +29,7 @@ public:
 
     ModResult initialize_hooks(ModError* error);
     void shutdown_hooks();
-    void update(bool syncFlagsEnabled, bool remoteModelEnabled,
+    void update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
                 bool nameLabelsEnabled, bool displayMidnaEnabled,
                 bool matrixStreamingEnabled,
                 bool remoteCollisionEnabled,
@@ -114,6 +114,7 @@ private:
     uint32_t localPvpHitSequence_ = 0;
     bool applyingRemote_ = false;
     bool syncFlagsEnabled_ = true;
+    bool syncWorldEnabled_ = false;
     bool hooksInstalled_ = false;
     SaveObserverHandle saveObserver_ = 0;
     ItemGiveHandle itemGiveObserver_ = 0;

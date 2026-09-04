@@ -67,9 +67,8 @@ int main() {
         return 1;
     }
 
-    // Final-fight readiness is a semantic ownership gate as well as a UI cue.
-    // Losing this field leaves every receiver permanently unable to join the
-    // shared Ganondorf encounter.
+    // Final-fight readiness drives the progression invitation independently
+    // of actor sync. Preserve it through full poses and semantic deltas.
     json ganondorfReady = pose_message(2, "semantic_gameplay");
     ganondorfReady["state"]["stage"] = "D_MN09B";
     ganondorfReady["state"]["final_ganondorf_ready"] = true;

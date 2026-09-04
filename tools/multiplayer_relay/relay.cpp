@@ -143,12 +143,12 @@ const std::set<std::string> kGameplayRouteTypes = {
     "midna_preference",
     "midna_pose",
     "pvp_hit",
-    "actor_owner_claim",
-    "actor_owner",
+    "ganondorf_owner_claim",
+    "ganondorf_owner",
     "ganondorf_hit",
     "ganondorf_reaction",
     "ganondorf_player_damage",
-    "actor_state",
+    "ganondorf_state",
     "ooccoo_state",
 };
 
