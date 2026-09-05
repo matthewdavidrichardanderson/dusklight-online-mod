@@ -133,6 +133,7 @@ private:
     uint32_t localPermanentSequence_ = 0;
     uint32_t localFishSequence_ = 0;
     std::optional<uint16_t> pendingRupeePublicationToSuppress_;
+    std::optional<int> observedRupees_;
     std::optional<uint8_t> pendingMaxLifePublicationToSuppress_;
     std::vector<uint8_t> pendingManualInfo_;
     std::vector<uint8_t> pendingManualFlagsSave_;

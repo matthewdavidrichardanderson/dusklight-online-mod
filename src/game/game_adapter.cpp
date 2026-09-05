@@ -1,4 +1,5 @@
 #include "dusklight_online/game/game_adapter.hpp"
+#include "dusklight_online/game/pickup_sync.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -1708,7 +1709,11 @@ void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
         return;
     }
 
-    const std::string checkName = info.check_name != nullptr ? info.check_name : "";
+    std::string checkName = info.check_name != nullptr ? info.check_name : "";
+    if (repeatable_pickup_check(checkName)) checkName.clear();
+    // Ordinary currency pickups need only the wallet update. Named one-time
+    // rewards still carry their location and notification, but not extra money.
+    if (checkName.empty() && rupee_pickup_amount(info.item) != 0) return;
     if (!checkName.empty() && !completedRandomizerChecks_.insert(checkName).second) {
         svc_log->info(mod_ctx,
             ("Ignored duplicate local randomizer check '" + checkName + "'").c_str());
@@ -1856,31 +1861,24 @@ void GameAdapter::notify_local_bottle_slots(int previous, int value, uint8_t sou
 }
 
 void GameAdapter::notify_local_rupees(int previous, int value) {
+    // The meter hook and fallback polling observe the same setter. Remember
+    // it here so a local mutation is not published again on the next poll.
+    observedRupees_ = value;
     if (pendingRupeePublicationToSuppress_.has_value()) {
         const bool matches = *pendingRupeePublicationToSuppress_ == value;
         pendingRupeePublicationToSuppress_.reset();
-        if (matches) return;
+        if (matches) {
+            dusklight_online::log_info("Suppressed coalesced rupee total " + std::to_string(value));
+            return;
+        }
     }
     if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed) return;
 
-    if (randomizer_active()) {
-        // Positive randomizer rewards are authoritative through
-        // rando_item_get. Publishing the animated wallet total as well races
-        // that additive reward against absolute totals from every peer and
-        // can grant the same rupees repeatedly. Spending is independent of an
-        // item reward, so retain it as an ordered negative delta.
-        const int delta = value - previous;
-        if (delta >= 0) return;
-        if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
-        publish_local({
-            {"type", "rupee_delta"},
-            {"delta", delta},
-            {"event_sequence", localPermanentSequence_},
-        });
-        return;
-    }
-
+    // Match the AIO: wallet totals carry gains AND spending in both modes.
+    // Remote rupee item grants are notification/location metadata only below.
     publish_local({{"type", "rupee_count"}, {"value", value}});
+    dusklight_online::log_info("Sent rupee total " + std::to_string(value) +
+                              " (previous " + std::to_string(previous) + ")");
 }
 
 ModResult GameAdapter::initialize_hooks(ModError* error) {
@@ -2231,6 +2229,7 @@ void GameAdapter::clear_replaced_save_progression_state() {
     initializedRoomTicks_ = 0;
     localObservedState_ = nlohmann::json();
     pendingRupeePublicationToSuppress_.reset();
+    observedRupees_.reset();
     pendingMaxLifePublicationToSuppress_.reset();
     pendingManualVibration_.reset();
 }
@@ -2702,6 +2701,7 @@ void GameAdapter::clear_disabled_sync_flags_state() {
     // Mutations made while sharing is disabled are local-only. Re-enabling
     // must establish a fresh baseline rather than replaying them as pickups.
     localObservedState_ = nlohmann::json();
+    observedRupees_.reset();
 }
 
 void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remoteModelEnabled,
@@ -3014,6 +3014,18 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
 
 void GameAdapter::capture_local_mutations_before_remote(bool syncFlagsEnabled) {
     const net::Status status = transport_.status();
+    // The AIO hooked the inline wallet setter itself. Observe direct writes
+    // here as well as queued meter changes, before incoming state can hide
+    // them. Do not broadcast save loading/reset values or local-only changes.
+    if (!status.welcomed || !syncFlagsEnabled || opening_or_title_active() ||
+        manualTransitionActive_ || dComIfGp_getStageStagInfo() == nullptr) {
+        observedRupees_.reset();
+    } else {
+        const int value = dComIfGs_getRupee();
+        if (observedRupees_ && *observedRupees_ != value)
+            notify_local_rupees(*observedRupees_, value);
+        observedRupees_ = value;
+    }
     if (!status.welcomed || !syncFlagsEnabled || !stage_ready() ||
         opening_or_title_active()) {
         return;
@@ -3148,7 +3160,10 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
         if (checkName.empty() || checkName.size() > 255) {
             return reject("randomizer check_name has an invalid length");
         }
-        if (!completedRandomizerChecks_.insert(checkName).second) {
+        // Older senders may still attach the shared :255 sentinel name.
+        // It is not a one-time location and must not suppress another pickup.
+        if (repeatable_pickup_check(checkName)) checkName.clear();
+        if (!checkName.empty() && !completedRandomizerChecks_.insert(checkName).second) {
             svc_log->info(mod_ctx,
                 ("Ignored duplicate remote randomizer check '" + checkName + "'").c_str());
             return ApplyResult::Applied;
@@ -3175,7 +3190,12 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
     // ItemService observers report the sender's already-resolved reward.
     // Apply that exact item, matching execResolvedItemGet in the combined
     // implementation; never resolve the remote check a second time.
-    if (itemToApply != dItemNo_NONE_e) execItemGet(itemToApply, 0, nullptr);
+    // Currency is applied by rupee_count, not twice via this item grant too.
+    // Still retain the check's collected flag and its player notification.
+    if (remote_pickup_requires_grant(itemToApply))
+        execItemGet(itemToApply, 0, nullptr);
+    else if (rupee_pickup_amount(itemToApply) != 0)
+        dComIfGs_onItemFirstBit(itemToApply);
 
     const std::string localPeerId = message.ingress.mode == net::Mode::DirectHost ?
                                         "direct" : message.ingress.clientId;
@@ -3190,7 +3210,9 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
     }
 
     std::ostringstream log;
-    log << "Applied resolved randomizer item 0x" << std::hex << std::setw(2)
+    log << (rupee_pickup_amount(itemToApply) != 0 ?
+                "Received randomizer rupee reward (wallet total applied separately) 0x" :
+                "Applied resolved randomizer item 0x") << std::hex << std::setw(2)
         << std::setfill('0') << static_cast<int>(itemToApply);
     if (!checkName.empty()) log << " for check '" << checkName << "'";
     if (message.payload.contains("location_stage") &&
@@ -4352,24 +4374,24 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return ApplyResult::Applied;
     }
     if (type == "rupee_count") {
-        // A live absolute wallet total is not a randomizer reward. Current
-        // randomizer peers carry positive rewards through rando_item_get and
-        // spending through rupee_delta; ignore companion totals from older
-        // peers. Explicit/manual synchronization still applies the rupee
-        // total contained in save_snapshot.
-        if (randomizer_active()) return ApplyResult::IgnoredByPolicy;
+        // AIO wallet semantics apply in both vanilla and Randomizer modes.
         const int value = message.value("value", -1);
-        if (value < 0 || value > dComIfGs_getRupeeMax()) {
+        const int pending = dComIfGp_getItemRupeeCount();
+        const auto action = wallet_total_action(value, dComIfGs_getRupee(), pending,
+                                                dComIfGs_getRupeeMax());
+        if (action == WalletTotalAction::Reject) {
             return reject("invalid rupee_count value");
         }
-        const int pending = dComIfGp_getItemRupeeCount();
-        const int projected = std::clamp<int>(dComIfGs_getRupee() + pending, 0,
-                                              dComIfGs_getRupeeMax());
-        if (pending != 0 && value == projected) {
+        if (action == WalletTotalAction::Coalesce) {
             pendingRupeePublicationToSuppress_ = static_cast<uint16_t>(value);
+            dusklight_online::log_info("Coalesced rupee total " + std::to_string(value) +
+                                      " with pending change " + std::to_string(pending));
             return ApplyResult::IgnoredByPolicy;
         }
         dComIfGs_setRupee(static_cast<u16>(value));
+        observedRupees_ = value;
+        dusklight_online::log_info("Applied rupee total " + std::to_string(value) +
+                                  " from " + routed.peerId);
         return ApplyResult::Applied;
     }
     if (type == "rupee_delta") {
@@ -4388,6 +4410,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         const int value = std::clamp<int>(dComIfGs_getRupee() + delta, 0,
                                           dComIfGs_getRupeeMax());
         dComIfGs_setRupee(static_cast<u16>(value));
+        observedRupees_ = value;
         return ApplyResult::Applied;
     }
     if (type == "poe_count") {
@@ -5000,6 +5023,7 @@ void GameAdapter::tick_manual_transition() {
     }
     manualTransitionActive_ = false;
     localObservedState_ = nlohmann::json();
+    observedRupees_ = dComIfGs_getRupee();
 }
 
 ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
@@ -5191,7 +5215,10 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         }
     }
     const int rupees = message.value("rupees", -1);
-    if (rupees >= 0 && rupees <= dComIfGs_getRupeeMax()) dComIfGs_setRupee(static_cast<u16>(rupees));
+    if (rupees >= 0 && rupees <= dComIfGs_getRupeeMax()) {
+        dComIfGs_setRupee(static_cast<u16>(rupees));
+        observedRupees_ = rupees;
+    }
     const int poes = message.value("poe_count", -1);
     if (poes > dComIfGs_getPohSpiritNum() && poes <= MAX_POH_NUM)
         dComIfGs_setPohSpiritNum(static_cast<u8>(poes));

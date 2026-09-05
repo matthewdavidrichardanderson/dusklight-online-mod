@@ -375,6 +375,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     )
     add_test(NAME dusklight_online_protocol_router COMMAND dusklight_online_protocol_router_test)
 
+    add_executable(dusklight_online_pickup_sync_test tests/pickup_sync_test.cpp)
+    target_compile_features(dusklight_online_pickup_sync_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_pickup_sync_test PRIVATE include)
+    add_test(NAME dusklight_online_pickup_sync COMMAND dusklight_online_pickup_sync_test)
+
     add_executable(dusklight_online_randomizer_item_names_test
         tests/randomizer_item_names_test.cpp
         src/game/randomizer_item_names.cpp
