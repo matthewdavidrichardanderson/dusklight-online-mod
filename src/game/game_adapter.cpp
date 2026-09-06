@@ -37,6 +37,7 @@
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_door_shutter.h"
 #include "d/actor/d_a_obj_mirror_table.h"
+#include "d/actor/d_a_obj_mirror_chain.h"
 #include "d/actor/d_a_player.h"
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "f_op/f_op_overlap_mng.h"
@@ -105,6 +106,7 @@ DEFINE_HOOK(&fpcM_Execute, ProcessExecuteHook);
 DEFINE_HOOK(&daDoor20_c::checkExecute, Door20CheckExecuteHook);
 DEFINE_HOOK(&daDoor20_c::chkStopOpen, Door20StopOpenHook);
 DEFINE_HOOK(&daObjMirrorTable_c::execute, MirrorTableExecuteHook);
+DEFINE_HOOK_SYMBOL("daObjMirrorChain_Draw", int(daObjMirrorChain_c*), MirrorChainDrawHook);
 DEFINE_HOOK(&dSv_info_c::onSwitch, InfoSwitchOnHook);
 DEFINE_HOOK(&daAlink_c::getDamageVec, PvpDamageVectorHook);
 DEFINE_HOOK(&daAlink_c::checkEnemyGroup, RemoteEnemyGroupHook);
@@ -1587,6 +1589,19 @@ void mirror_table_set_base_mtx_compat(daObjMirrorTable_c* table) {
     }
 }
 
+HookAction mirror_chain_draw_pre(ModContext*, void* args, void* retval, void*) {
+    const auto* chain = mods::arg<daObjMirrorChain_c*>(args, 0);
+    if (chain != nullptr && chain->mpPortalModel == nullptr &&
+        dComIfGs_isEventBit(dSv_event_flag_c::saveBitLabels[354])) {
+        // Complete-only models are allocated at actor creation. A live flag
+        // update can precede room teardown; do not dereference the absent
+        // portal or submit partial draw/scissor state in that interval.
+        if (retval != nullptr) *static_cast<int*>(retval) = 1;
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
 HookAction mirror_table_execute_pre(ModContext*, void* args, void* retval, void*) {
     auto* table = mods::arg<daObjMirrorTable_c*>(args, 0);
     if (table == nullptr || table->mpStairBrkAnm != nullptr ||
@@ -1976,6 +1991,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_pre<Door20StopOpenHook>(&door20_stop_open_pre) != MOD_OK ||
         mods::hook::add_post<Door20StopOpenHook>(&door20_stop_open_post) != MOD_OK ||
         mods::hook::add_pre<MirrorTableExecuteHook>(&mirror_table_execute_pre) != MOD_OK ||
+        mods::hook::add_pre<MirrorChainDrawHook>(&mirror_chain_draw_pre) != MOD_OK ||
         mods::hook::add_pre<InfoSwitchOnHook>(&info_switch_on_pre) != MOD_OK ||
         mods::hook::add_post<InfoSwitchOnHook>(&info_switch_on_post) != MOD_OK) {
         shutdown_hooks();
@@ -2013,6 +2029,7 @@ void GameAdapter::shutdown_hooks() {
     }
     mods::hook::uninstall<InfoSwitchOnHook>();
     mods::hook::uninstall<MirrorTableExecuteHook>();
+    mods::hook::uninstall<MirrorChainDrawHook>();
     mods::hook::uninstall<Door20StopOpenHook>();
     mods::hook::uninstall<Door20CheckExecuteHook>();
     mods::hook::uninstall<ProcessExecuteHook>();
@@ -3904,7 +3921,9 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
         return ApplyResult::Applied;
     }
     maybe_queue_progression_event_prompt(routed.peerId, flag);
-    if (flag == 0x2B08 && is_mirror_complete_reload_stage(stableStageName_)) {
+    const char* eventStage = dComIfGp_getStartStageName();
+    if (flag == 0x2B08 && !dComIfGs_isEventBit(flag) && eventStage != nullptr &&
+        is_mirror_complete_reload_stage(eventStage)) {
         mirrorReloadPending_ = true;
         return ApplyResult::Retained;
     }
@@ -5100,7 +5119,14 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         const int value = raw.get<int>();
         if (value < 0 || value > 0xFFFF) continue;
         const uint16_t flag = static_cast<uint16_t>(value);
-        if (!is_unsynced_event_bit(flag)) dComIfGs_onEventBit(flag);
+        if (!is_unsynced_event_bit(flag)) {
+            if (flag == 0x2B08 && !dComIfGs_isEventBit(flag)) {
+                const char* currentStage = dComIfGp_getStartStageName();
+                if (currentStage != nullptr && is_mirror_complete_reload_stage(currentStage))
+                    mirrorReloadPending_ = true;
+            }
+            dComIfGs_onEventBit(flag);
+        }
     }
 
     auto apply_stage_flags = [&](std::string_view field, int limit, auto apply) {
