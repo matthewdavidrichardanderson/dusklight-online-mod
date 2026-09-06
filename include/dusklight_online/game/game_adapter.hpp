@@ -221,6 +221,7 @@ private:
     [[nodiscard]] bool engine_stage_ready() const;
     ApplyResult apply_event_bit(const RoutedMessage& message);
     void flush_story_events();
+    void flush_story_messages();
     void send_progression_state(bool force = false);
     void set_local_faron_warp_sequence_active(bool active);
     void update_local_faron_cage_sequence_state();

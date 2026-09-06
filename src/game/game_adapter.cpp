@@ -2997,6 +2997,9 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         // still require stage readiness and their participant safety checks.
         if (faronDayBroadcastHoldTicks_ > 0) --faronDayBroadcastHoldTicks_;
     }
+    // AIO releases network/story fences during demos too. Stage mutations
+    // remain gated individually; room reloads stay in the ready block below.
+    if (syncFlagsEnabled && !opening_or_title_active()) flush_story_messages();
     const char* stage = dComIfGp_getStartStageName();
     const bool hasStage = stage != nullptr && stage[0] != '\0';
     if (syncFlagsEnabled && hasStage && stage_ready() && !opening_or_title_active()) {
@@ -3923,7 +3926,7 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
             enqueue_unique_deferred_mutation(deferredStoryEvents_, std::move(queued));
             return ApplyResult::Retained;
         }
-        if (is_ordon_day_boundary_stage(stableStageName_)) {
+        if (current != nullptr && is_ordon_day_boundary_stage(current)) {
             if (pendingOrdonEventBits_.insert(flag).second) {
                 ordonReloadSafeTicks_ = 0;
                 ordonReloadWaitTicks_ = 0;
@@ -3937,7 +3940,7 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
     return ApplyResult::Applied;
 }
 
-void GameAdapter::flush_story_events() {
+void GameAdapter::flush_story_messages() {
     bool appliedDeferredRemote = false;
     const bool cageSequenceActive = localFaronCageSequenceActive_ ||
                                     has_active_faron_cage_sequence_peer();
@@ -3967,6 +3970,13 @@ void GameAdapter::flush_story_events() {
         deferredFaronInbound_.clear();
         RemoteApplicationGuard applying(applyingRemote_);
         for (RoutedMessage& routed : pending) {
+            // AIO re-enters its dispatcher: switches wait for stage readiness,
+            // while safe event bits can proceed during a cutscene. Retain the
+            // switch order without blocking those independent event bits.
+            if (routed.spec.stageDependent && !stage_ready()) {
+                deferredFaronInbound_.push_back(std::move(routed));
+                continue;
+            }
             (void)consume_progression(routed);
         }
         appliedDeferredRemote = true;
@@ -3994,6 +4004,9 @@ void GameAdapter::flush_story_events() {
         it = deferredLocalEvents_.erase(it);
     }
 
+}
+
+void GameAdapter::flush_story_events() {
     if (mirrorReloadPending_) {
         mirrorReloadPending_ = false;
         dComIfGs_onEventBit(0x2B08);
