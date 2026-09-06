@@ -1,5 +1,6 @@
 #include "dusklight_online/game/game_adapter.hpp"
 #include "dusklight_online/game/pickup_sync.hpp"
+#include "dusklight_online/game/poe_sync.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -110,6 +111,7 @@ DEFINE_HOOK(&daAlink_c::setAtnList, RemoteAttentionMarkHook);
 DEFINE_HOOK(&fpcLnIt_Queue, SafeLineQueueHook);
 DEFINE_HOOK(&fpcDt_ToQueue, DeleteTagRepairHook);
 DEFINE_HOOK(&JPABaseEmitter::deleteAllParticle, NullParticleDeleteHook);
+DEFINE_HOOK(&item_func_POU_SPIRIT, PoePickupHook);
 DEFINE_HOOK_SYMBOL("toggleAutoSave", void(bool), ToggleAutoSaveHook);
 
 namespace {
@@ -248,6 +250,7 @@ std::vector<bool> sInfoSwitchWasSetStack;
 std::vector<bool> sMemorySwitchWasSetStack;
 std::vector<bool> sMemorySwitchWasSetOffStack;
 std::vector<bool> sItemFirstWasOwnedStack;
+std::vector<int> sPoePickupPrevious;
 std::vector<bool> sItemFirstWasOwnedOffStack;
 std::vector<int> sStageKeyPreviousCounts;
 struct PendingMeterKeyMutation {
@@ -1453,6 +1456,19 @@ HookAction player_item_first_on_pre(ModContext*, void* args, void*, void*) {
     return HOOK_CONTINUE;
 }
 
+HookAction poe_pickup_pre(ModContext*, void*, void*, void*) {
+    sPoePickupPrevious.push_back(dComIfGs_getPohSpiritNum());
+    return HOOK_CONTINUE;
+}
+
+void poe_pickup_post(ModContext*, void*, void*, void*) {
+    if (sPoePickupPrevious.empty()) return;
+    const int previous = sPoePickupPrevious.back();
+    sPoePickupPrevious.pop_back();
+    if (sActiveAdapter != nullptr)
+        sActiveAdapter->notify_local_poe_pickup(previous, dComIfGs_getPohSpiritNum());
+}
+
 void player_item_first_on_post(ModContext*, void* args, void*, void*) {
     const bool wasOwned = !sItemFirstWasOwnedStack.empty() &&
                           sItemFirstWasOwnedStack.back();
@@ -1881,6 +1897,17 @@ void GameAdapter::notify_local_rupees(int previous, int value) {
                               " (previous " + std::to_string(previous) + ")");
 }
 
+void GameAdapter::notify_local_poe_pickup(int previous, int value) {
+    if (!syncFlagsEnabled_ || !transport_.status().welcomed) return;
+    const auto pickup = local_poe_pickup(previous, value, applyingRemote_,
+        randomizer_active(), localPermanentSequence_, MAX_POH_NUM);
+    if (!pickup) return;
+    publish_local({{"type", "poe_count"}, {"previous_value", pickup->previous},
+                   {"value", pickup->value}, {"event_sequence", pickup->sequence}});
+    dusklight_online::log_info("Sent Poe pickup previous=" + std::to_string(previous) +
+        " value=" + std::to_string(value) + " sequence=" + std::to_string(pickup->sequence));
+}
+
 ModResult GameAdapter::initialize_hooks(ModError* error) {
     sActiveAdapter = this;
     transport_.set_pose_delta_codec(&expand_remote_pose_delta,
@@ -1898,6 +1925,8 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_pre<SafeLineQueueHook>(&safe_line_queue_pre) != MOD_OK ||
         mods::hook::add_pre<DeleteTagRepairHook>(&delete_tag_repair_pre) != MOD_OK ||
         mods::hook::add_pre<NullParticleDeleteHook>(&null_particle_delete_pre) != MOD_OK ||
+        mods::hook::add_pre<PoePickupHook>(&poe_pickup_pre) != MOD_OK ||
+        mods::hook::add_post<PoePickupHook>(&poe_pickup_post) != MOD_OK ||
         mods::hook::add_post<EventBitOnHook>(&event_bit_on_post) != MOD_OK ||
         mods::hook::add_post<EventBitOffHook>(&event_bit_off_post) != MOD_OK ||
         mods::hook::add_post<MemoryTboxOnHook>(&memory_tbox_on_post) != MOD_OK ||
@@ -2038,6 +2067,8 @@ void GameAdapter::shutdown_hooks() {
     sMemorySwitchWasSetStack.clear();
     sMemorySwitchWasSetOffStack.clear();
     sItemFirstWasOwnedStack.clear();
+    mods::hook::uninstall<PoePickupHook>();
+    sPoePickupPrevious.clear();
     sItemFirstWasOwnedOffStack.clear();
     sStageKeyPreviousCounts.clear();
     sPendingMeterKeyMutations.clear();
@@ -4435,12 +4466,12 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return ApplyResult::IgnoredByPolicy;
         }
         const int current = dComIfGs_getPohSpiritNum();
-        int merged = std::max(current, value);
-        if (newPickup && current > previous) {
-            merged = std::min(current + (value - previous), static_cast<int>(MAX_POH_NUM));
-        }
+        const int merged = merge_poe_pickup(current, {previous, value, sequence}, MAX_POH_NUM);
         if (merged > current) {
             dComIfGs_setPohSpiritNum(static_cast<u8>(merged));
+            dusklight_online::log_info("Applied Poe count from " + routed.peerId +
+                " previous=" + std::to_string(current) + " value=" + std::to_string(merged) +
+                " sequence=" + std::to_string(sequence));
         }
         return ApplyResult::Applied;
     }
@@ -5311,15 +5342,9 @@ void GameAdapter::poll_local_state(bool publish) {
     // Polling every durable stage slot would misclassify off-stage engine
     // maintenance (for example the escort setup's stage-6 key write) as a
     // player progression event.
-    const auto nextPermanentSequence = [&]() {
-        if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
-        return localPermanentSequence_;
-    };
     const bool randomizerActive = randomizer_active();
-    if (!randomizerActive && state["poes"] > localObservedState_["poes"])
-        publish_local({{"type", "poe_count"},
-            {"previous_value", localObservedState_["poes"]}, {"value", state["poes"]},
-            {"event_sequence", nextPermanentSequence()}});
+    // Poe pickups are sent at the item grant. A sampled increase may instead
+    // be remote progression received while stage readiness was false.
     for (int index = 0; index < kSyncedFishSpeciesCount; ++index)
         if (state["fish_size"][index] != localObservedState_["fish_size"][index])
             publish_local({{"type", "fish_record"}, {"index", index},

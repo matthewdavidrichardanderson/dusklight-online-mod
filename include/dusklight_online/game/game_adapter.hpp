@@ -68,6 +68,7 @@ public:
     [[nodiscard]] bool should_suppress_local_bottle_source(uint8_t sourceItem) const;
     void notify_local_bottle_slots(int previous, int value, uint8_t sourceItem);
     void notify_local_rupees(int previous, int value);
+    void notify_local_poe_pickup(int previous, int value);
     void notify_local_item_grant(const ItemGiveInfo& info);
 
     void reset_session();
