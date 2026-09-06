@@ -1,6 +1,7 @@
 #include "dusklight_online/game/game_adapter.hpp"
 #include "dusklight_online/game/pickup_sync.hpp"
 #include "dusklight_online/game/poe_sync.hpp"
+#include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -5359,8 +5360,10 @@ void GameAdapter::poll_local_state(bool publish) {
             const auto& previous = localObservedState_["bombs"][bag];
             const int item = current.value("item", -1);
             const int count = current.value("count", 0);
-            if (!current.value("rental", false) && syncable_bomb_item(item) && count > 0 &&
-                (previous.value("item", -1) != item || previous.value("count", 0) == 0)) {
+            if (should_publish_bomb_bag(randomizerActive, syncable_bomb_item(item),
+                    current.value("rental", false), item, count,
+                    previous.value("rental", false), previous.value("item", -1),
+                    previous.value("count", 0))) {
                 publish_local({{"type", "bomb_bag_slot"}, {"bag", bag},
                                {"item", item}, {"count", count}});
             }
