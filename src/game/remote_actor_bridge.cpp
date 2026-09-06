@@ -14,6 +14,10 @@
 #include "f_pc/f_pc_name.h"
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
+#include "JSystem/JParticle/JPABaseShape.h"
+#include "JSystem/JParticle/JPAEmitter.h"
+#include "d/d_com_inf_game.h"
+#include "dusklight_online/game/particle_depth.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,6 +35,7 @@ namespace dusklight_online::game {
 DEFINE_HOOK(&fpcPf_Get, RemoteProfileLookupHook);
 DEFINE_HOOK(&fpcBs_Create, RemoteProcessCreateHook);
 DEFINE_HOOK(&fpcBs_Delete, RemoteProcessDeleteHook);
+DEFINE_HOOK(&JPABaseShape::setGX, RemoteParticleDepthHook);
 DEFINE_HOOK_SYMBOL("dusk::frame_interp::begin_frame",
                    void(uint8_t, bool, float), EngineInterpBeginFrameHook);
 DEFINE_HOOK_SYMBOL("dusk::frame_interp::begin_sim_tick",
@@ -61,6 +66,19 @@ std::set<fpc_ProcID> sPendingRemoteCreates;
 std::set<fpc_ProcID> sRemoteProcessIds;
 std::map<fpc_ProcID, base_process_class*> sRemoteProcesses;
 bool sResolvingRemoteProfile = false;
+ParticleDepthOwners sDepthParticles;
+
+void remote_particle_depth_post(ModContext*, void* args, void*, void*) {
+    const auto* shape = mods::arg<const JPABaseShape*>(args, 0);
+    const auto* work = mods::arg<JPAEmitterWorkData*>(args, 1);
+    if (shape == nullptr || work == nullptr || work->mpEmtr == nullptr ||
+        shape->getZEnable() || work->mpEmtr->getParticleCallBackPtr() != nullptr) return;
+    if (sDepthParticles.contains(work->mpEmtr, [](uint32_t id) {
+            return dComIfGp_particle_getEmitter(id);
+        })) {
+        GXSetZMode(GX_ENABLE, GX_LEQUAL, GX_DISABLE);
+    }
+}
 
 HookAction engine_interp_begin_frame_pre(ModContext*, void* args, void*, void*) {
     const uint8_t mode = mods::arg<uint8_t>(args, 0);
@@ -261,6 +279,12 @@ void destroy_remote_actor_processes_for_unload() {
 }
 
 ModResult install_remote_actor_profile(ModError* error) {
+    // Use the official drawing hook. No C++ virtual callback is handed to the
+    // engine, whose callback ABI may differ from the SDK used to build a mod.
+    if (mods::hook::add_post<RemoteParticleDepthHook>(&remote_particle_depth_post) != MOD_OK) {
+        uninstall_remote_actor_profile();
+        return mods::set_error(error, MOD_UNAVAILABLE, "Remote particle depth hook is unavailable");
+    }
     if (mods::hook::add_pre<EngineInterpBeginFrameHook>(
             &engine_interp_begin_frame_pre) != MOD_OK ||
         mods::hook::add_pre<EngineInterpBeginSimTickHook>(
@@ -284,7 +308,15 @@ ModResult install_remote_actor_profile(ModError* error) {
     return MOD_OK;
 }
 
+void register_remote_depth_particle(u32 emitterId) {
+    sDepthParticles.add(emitterId, [](uint32_t id) {
+        return dComIfGp_particle_getEmitter(id);
+    });
+}
+
 void uninstall_remote_actor_profile() {
+    mods::hook::uninstall<RemoteParticleDepthHook>();
+    sDepthParticles.clear();
     mods::hook::uninstall<RemoteProfileLookupHook>();
     mods::hook::uninstall<RemoteProcessDeleteHook>();
     mods::hook::uninstall<RemoteProcessCreateHook>();

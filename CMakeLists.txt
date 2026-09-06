@@ -103,7 +103,7 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "A3228B6DD8AEFA8088F5B5AF0F2549B194D1EA62F64F2805AA7BF12FA43D3AB3")
+    "C18ABA4FEEC025E0A267B52708641C70BF1CBAC926C20700D5FACF156C6C1877")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
     "1586BB1BA1110B05DE7B26B41B6EB78D850EB40BB0F7B4737D51B344C222ED04")
@@ -328,6 +328,10 @@ endif ()
 option(DUSKLIGHT_ONLINE_BUILD_TESTS "Build standalone online core tests" ON)
 if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     enable_testing()
+    add_executable(dusklight_online_particle_depth_test tests/particle_depth_test.cpp)
+    target_compile_features(dusklight_online_particle_depth_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_particle_depth_test PRIVATE include)
+    add_test(NAME dusklight_online_particle_depth COMMAND dusklight_online_particle_depth_test)
     add_executable(dusklight_online_invite_code_test
         tests/invite_code_test.cpp
         ${ONLINE_INVITE_SOURCES}

@@ -14,6 +14,7 @@
 #include "d/dolzel_rel.h"  // IWYU pragma: keep
 
 #include "d/actor/d_a_remote_link.h"
+#include "dusklight_online/game/remote_actor_bridge.hpp"
 
 #include "JSystem/J3DGraphAnimator/J3DAnimation.h"
 #include "JSystem/J3DGraphAnimator/J3DJoint.h"
@@ -251,17 +252,6 @@ static void initRemoteLinkTevCustomColor(dKy_tevstr_c* i_tevStr) {
     i_tevStr->TevKColor.r = 0;
     i_tevStr->TevKColor.b = 0;
 }
-
-class RemoteDepthParticleCallback : public JPAParticleCallBack {
-public:
-    ~RemoteDepthParticleCallback() override {}
-
-    void draw(JPABaseEmitter*, JPABaseParticle*) override {
-        GXSetZMode(GX_ENABLE, GX_LEQUAL, GX_DISABLE);
-    }
-};
-
-static RemoteDepthParticleCallback l_remoteDepthParticleCallback;
 
 static void enableRemoteTransformModelDepthTest(J3DModel* i_model) {
     if (i_model == NULL || i_model->getModelData() == NULL) {
@@ -6026,7 +6016,7 @@ void daRemoteLink_c::updateRemoteLanternFlame(bool i_presentation,
         !emitter->pRes->getBsp()->getZEnable() &&
         emitter->getParticleCallBackPtr() == NULL)
     {
-        emitter->setParticleCallBackPtr(&l_remoteDepthParticleCallback);
+        dusklight_online::game::register_remote_depth_particle(mRemoteLanternFlameEmitterId);
     }
     emitter->playDrawParticle();
 }
@@ -6737,7 +6727,7 @@ u32 daRemoteLink_c::setRemoteTransformEmitter(int i_slot, u16 i_effectId,
         !emitter->pRes->getBsp()->getZEnable() &&
         emitter->getParticleCallBackPtr() == NULL)
     {
-        emitter->setParticleCallBackPtr(&l_remoteDepthParticleCallback);
+        dusklight_online::game::register_remote_depth_particle(emitterId);
     }
     return emitterId;
 }
