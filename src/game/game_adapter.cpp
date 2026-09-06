@@ -2,6 +2,7 @@
 #include "dusklight_online/game/pickup_sync.hpp"
 #include "dusklight_online/game/poe_sync.hpp"
 #include "dusklight_online/game/bomb_bag_sync.hpp"
+#include "dusklight_online/game/bottle_sync.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -1859,11 +1860,11 @@ void GameAdapter::notify_local_bottle_slots(int previous, int value, uint8_t sou
     const bool knownSource = is_vanilla_bottle_source(sourceItem);
     if (knownSource) {
         completedBottleSources_.insert(sourceItem);
-        if (bottleSourcesComplete_ &&
-            static_cast<int>(completedBottleSources_.size()) != value) {
-            bottleSourcesComplete_ = false;
-        }
     }
+    // Unknown grants also invalidate an exact ledger. Never carry an old
+    // "complete" marker across a slot increase it cannot account for.
+    bottleSourcesComplete_ = bottle_sources_exact(
+        bottleSourcesComplete_, completedBottleSources_.size(), value);
     if (!syncFlagsEnabled_ || !transport_.status().welcomed) return;
     if (++localPermanentSequence_ == 0) ++localPermanentSequence_;
     nlohmann::json packet = {
@@ -4389,20 +4390,19 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return reject("invalid bottle_slots source");
         }
 
-        const bool exactBeforeMerge = bottleSourcesComplete_;
+        const bool exactBeforeMerge = bottle_sources_exact(
+            bottleSourcesComplete_, completedBottleSources_.size(), local);
         bool distinctSource = false;
         if (newPickup && hasSource) {
             distinctSource = completedBottleSources_.insert(
                 static_cast<uint8_t>(source)).second;
-            if (distinctSource && exactBeforeMerge) {
-                merged = std::min(local + (count - previous), 4);
-            }
             remember_vanilla_bottle_source(source);
         } else if (newPickup && !hasSource) {
             // Older peers cannot identify which fixed vanilla reward produced
             // the slot. Absolute max is safe; additive merging is not.
             merged = std::max(local, count);
         }
+        merged = merged_bottle_count(local, count, completedBottleSources_.size());
         for (int slot = local; slot < merged; ++slot) {
             dComIfGs_setEmptyBottle();
         }
@@ -4417,7 +4417,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             << " source=" << source << " local=" << local
             << " remote=" << count << " merged=" << merged
             << " distinct=" << (distinctSource ? "yes" : "no")
-            << " additive=" << (distinctSource && exactBeforeMerge ? "yes" : "no")
+            << " additive=no sources=" << completedBottleSources_.size()
             << " exact=" << (bottleSourcesComplete_ ? "yes" : "no");
         svc_log->info(mod_ctx, log.str().c_str());
         return ApplyResult::Applied;
@@ -5239,19 +5239,15 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
             static_cast<int>(completedBottleSources_.size()) <= localBottles) {
             const bool remoteComplete = message.value("bottle_sources_complete", false) &&
                 static_cast<int>(remoteBottleSources.size()) == bottles;
-            const bool bothComplete = bottleSourcesComplete_ && remoteComplete;
+            const bool bothComplete = bottle_sources_exact(
+                bottleSourcesComplete_, completedBottleSources_.size(), localBottles) &&
+                remoteComplete;
             completedBottleSources_.insert(remoteBottleSources.begin(), remoteBottleSources.end());
             for (uint8_t source : remoteBottleSources) {
                 remember_vanilla_bottle_source(source);
             }
-            if (bothComplete) {
-                mergedBottles = std::min<int>(completedBottleSources_.size(), 4);
-            } else {
-                // An anonymous baseline can overlap any named source. Its union
-                // is unknowable, so never add it to the named-source count.
-                mergedBottles = std::min<int>(
-                    std::max<int>(mergedBottles, completedBottleSources_.size()), 4);
-            }
+            mergedBottles = merged_bottle_count(
+                localBottles, bottles, completedBottleSources_.size());
             bottleSourcesComplete_ = bothComplete &&
                 static_cast<int>(completedBottleSources_.size()) == mergedBottles;
         } else if (mergedBottles > localBottles) {
