@@ -27,7 +27,7 @@ endif ()
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "5e12bb55f7c2888e198f5fe078349820ad809fd9")
+    set(DUSKLIGHT_VERSION "d67871181d6aba26c04366b095de6754b352154b")
 endif ()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
@@ -431,6 +431,20 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     if (WIN32)
         target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE ws2_32)
     endif ()
+
+    # Keep assertion-based tests effective in Release too, and prevent Windows
+    # assertion/abort dialogs from blocking unattended verification.
+    get_property(online_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach (test_target IN LISTS online_test_targets)
+        if (test_target MATCHES "_test$")
+            if (MSVC)
+                target_compile_options(${test_target} PRIVATE /UNDEBUG
+                    "/FI${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runtime.hpp")
+            else ()
+                target_compile_options(${test_target} PRIVATE -UNDEBUG)
+            endif ()
+        endif ()
+    endforeach ()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND AND TARGET dusklight_online_relay)

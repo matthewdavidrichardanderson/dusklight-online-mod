@@ -36,27 +36,27 @@ DEFINE_HOOK(&fpcPf_Get, RemoteProfileLookupHook);
 DEFINE_HOOK(&fpcBs_Create, RemoteProcessCreateHook);
 DEFINE_HOOK(&fpcBs_Delete, RemoteProcessDeleteHook);
 DEFINE_HOOK(&JPABaseShape::setGX, RemoteParticleDepthHook);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::begin_frame",
-                   void(uint8_t, bool, float), EngineInterpBeginFrameHook);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::begin_sim_tick",
+DEFINE_HOOK_SYMBOL("dusk::interp::begin_frame",
+                   void(float), EngineInterpBeginFrameHook);
+DEFINE_HOOK_SYMBOL("dusk::interp::begin_sim_tick",
                    void(), EngineInterpBeginSimTickHook);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::begin_presentation_camera",
-                   void(), EngineInterpPresentationHook);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::lookup_replacement",
+DEFINE_HOOK_SYMBOL("dusk::interp::begin_presentation",
+                   void(float), EngineInterpPresentationHook);
+DEFINE_HOOK_SYMBOL("dusk::interp::lookup_replacement",
                    bool(const void*, float (*)[4]), EngineInterpLookupHook);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::lookup_concat_replacement",
+DEFINE_HOOK_SYMBOL("dusk::interp::lookup_concat_replacement",
                    bool(const void*, const void*, float (*)[4]),
                    EngineInterpLookupConcatHook);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::is_enabled",
+DEFINE_HOOK_SYMBOL("dusk::interp::is_enabled",
                    bool(), EngineInterpIsEnabledSymbol);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::is_sim_frame",
+DEFINE_HOOK_SYMBOL("dusk::game_clock::is_sim_frame",
                    bool(), EngineInterpIsSimFrameSymbol);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::get_interpolation_step",
+DEFINE_HOOK_SYMBOL("dusk::interp::get_interpolation_step",
                    float(), EngineInterpStepSymbol);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::presentation_sync_active",
+DEFINE_HOOK_SYMBOL("dusk::interp::presentation_sync_active",
                    bool(), EngineInterpPresentationSyncSymbol);
-DEFINE_HOOK_SYMBOL("dusk::frame_interp::add_interpolation_callback",
-                   void(dusk::frame_interp::InterpolationCallBack, void*),
+DEFINE_HOOK_SYMBOL("dusk::interp::add_interpolation_callback",
+                   void(void (*)(void*), void*),
                    EngineInterpAddCallbackSymbol);
 
 namespace {
@@ -81,9 +81,9 @@ void remote_particle_depth_post(ModContext*, void* args, void*, void*) {
 }
 
 HookAction engine_interp_begin_frame_pre(ModContext*, void* args, void*, void*) {
-    const uint8_t mode = mods::arg<uint8_t>(args, 0);
-    dusk::frame_interp::observe_engine_frame(mode != 0, mods::arg<bool>(args, 1),
-                                             mods::arg<float>(args, 2));
+    dusk::frame_interp::observe_engine_frame(dusk::frame_interp::is_enabled(),
+                                             dusk::frame_interp::is_sim_frame(),
+                                             mods::arg<float>(args, 0));
     return HOOK_CONTINUE;
 }
 
@@ -497,7 +497,9 @@ bool engine_presentation_sync_active() {
     return function != nullptr && function();
 }
 
-void dispatch_interpolation_callback(bool isSimFrame, void* rawEntry) {
+void dispatch_interpolation_callback(void* rawEntry) {
+    // Upstream dispatches only during presentation. Keep the mod-local ABI.
+    constexpr bool isSimFrame = false;
     auto* entry = static_cast<CallbackEntry*>(rawEntry);
     if (entry == nullptr || !entry->active || entry->callback == nullptr ||
         entry->userWork == nullptr) {
@@ -611,7 +613,7 @@ void add_interpolation_callback(InterpolationCallBack callback, void* userWork) 
     sCallbacks.push_back({callback, userWork, true});
     CallbackEntry* const rawEntry = &sCallbacks.back();
 
-    using Function = void (*)(InterpolationCallBack, void*);
+    using Function = void (*)(void (*)(void*), void*);
     const Function hostAdd =
         resolved_engine_function<
             Function, dusklight_online::game::EngineInterpAddCallbackSymbol>();
@@ -636,7 +638,7 @@ void prepare_presentation_callbacks() {
 }
 
 void run_presentation_callbacks() {
-    // When the host callback API is present, begin_presentation_camera has
+    // When the host callback API is present, begin_presentation has
     // already dispatched these callbacks. The post hook is a fallback for a
     // host that exposes the timing hooks but not the callback API.
     if (using_engine_callback_dispatch() || !sEngineEnabled || sEngineSimFrame ||
@@ -645,7 +647,7 @@ void run_presentation_callbacks() {
     }
     sRunningPresentationCallbacks = true;
     for (CallbackEntry& entry : sCallbacks) {
-        dispatch_interpolation_callback(false, &entry);
+        dispatch_interpolation_callback(&entry);
     }
     sRunningPresentationCallbacks = false;
 }

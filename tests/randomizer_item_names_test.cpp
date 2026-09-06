@@ -18,6 +18,6 @@ int main() {
     assert(randomizer_item_name(0xEB) == "Progressive Sky Book");
     assert(randomizer_item_name(0xFA) == "Goron Mines Key Shard");
     assert(randomizer_item_name(0xFD) == "Goron Mines Key Shard");
-    assert(randomizer_item_name(0xFE) == "Coro Key");
+    assert(randomizer_item_name(0xFE) == "Faron Woods Coro Key");
     assert(randomizer_item_name(0xFF) == "Unknown Item");
 }
