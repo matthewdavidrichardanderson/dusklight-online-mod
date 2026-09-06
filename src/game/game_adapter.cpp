@@ -2989,7 +2989,13 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         return;
     }
 
-    if (syncFlagsEnabled) update_local_faron_cage_sequence_state();
+    if (syncFlagsEnabled) {
+        update_local_faron_cage_sequence_state();
+        // As in AIO, the broadcast fence elapses during cutscenes/loading.
+        // Only its clock runs here; story application and reloads below
+        // still require stage readiness and their participant safety checks.
+        if (faronDayBroadcastHoldTicks_ > 0) --faronDayBroadcastHoldTicks_;
+    }
     const char* stage = dComIfGp_getStartStageName();
     const bool hasStage = stage != nullptr && stage[0] != '\0';
     if (syncFlagsEnabled && hasStage && stage_ready() && !opening_or_title_active()) {
@@ -3931,8 +3937,6 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
 }
 
 void GameAdapter::flush_story_events() {
-    if (faronDayBroadcastHoldTicks_ > 0) --faronDayBroadcastHoldTicks_;
-
     bool appliedDeferredRemote = false;
     const bool cageSequenceActive = localFaronCageSequenceActive_ ||
                                     has_active_faron_cage_sequence_peer();
