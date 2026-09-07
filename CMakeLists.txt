@@ -27,7 +27,7 @@ endif ()
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "d67871181d6aba26c04366b095de6754b352154b")
+    set(DUSKLIGHT_VERSION "83f50329d84c89722f5fa65e084a157d8cb4b9a1")
 endif ()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
@@ -271,6 +271,7 @@ target_link_libraries(dusklight_online PRIVATE
 )
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LineInterpolationImports.cmake")
     # MSVC otherwise records the absolute build-machine PDB path in mod.dll's
     # PE debug directory. Keep distributed .dusk packages free of usernames
     # and local workspace paths while retaining a useful PDB basename.
