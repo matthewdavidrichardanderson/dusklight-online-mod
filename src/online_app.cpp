@@ -1043,7 +1043,7 @@ void OnlineApp::open_sync_window() {
     refresh_manual_peer_choices();
     static UiTabDesc tab;
     tab = UI_TAB_DESC_INIT;
-    tab.title = "Sync players";
+    tab.title = "Manual sync";
     tab.build = &OnlineApp::build_sync_tab;
     tab.user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
@@ -1370,7 +1370,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     svc_ui->pane_add_section(mod_ctx, left, "Session");
     add_button(left, "Player options", &OnlineApp::player_options_pressed, &app);
     add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
-    add_button(left, "Sync players", &OnlineApp::sync_menu_pressed, &app,
+    add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
                &OnlineApp::sync_menu_unavailable);
     svc_ui->pane_add_rml(mod_ctx, left,
                          "<div class=\"section-heading\">Session actions</div>",
