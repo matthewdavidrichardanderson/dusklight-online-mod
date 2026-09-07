@@ -3,6 +3,8 @@
 #include <mods/api.h>
 class J3DModel;
 namespace dusklight_online::game::appearance {
+// Outside a lobby, leave texture selection to the game and cosmetic mods.
+void set_lobby_active(bool active);
 void set_local(Color color, Color outfit);
 Color local_outfit_color();
 Color local_color();

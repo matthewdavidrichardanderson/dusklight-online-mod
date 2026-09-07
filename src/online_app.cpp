@@ -681,8 +681,15 @@ void OnlineApp::update() {
         }
         if (protocolFatal) break;
     }
-    if (protocolFatal) return;
     const net::Status currentStatus = transport_.status();
+    // A direct host owns a lobby before any guests arrive. Joiners must
+    // receive welcome; a connected socket alone is not lobby membership.
+    game::appearance::set_lobby_active(currentStatus.enabled &&
+        (currentStatus.mode == net::Mode::DirectHost
+            ? (currentStatus.state == net::State::Listening ||
+               currentStatus.state == net::State::Connected)
+            : currentStatus.welcomed));
+    if (protocolFatal) return;
     const bool syncFlagsEnabled = currentStatus.enabled ? currentStatus.settings.syncFlags :
         bool_value(config_.syncFlags, true);
     if (router_ != nullptr) {
@@ -730,6 +737,7 @@ void OnlineApp::update() {
 
 void OnlineApp::shutdown() {
     transport_.disconnect();
+    game::appearance::set_lobby_active(false);
     if (router_ != nullptr) {
         router_->clear();
     }
@@ -1296,6 +1304,7 @@ void OnlineApp::join_relay() {
 void OnlineApp::disconnect() {
     if (requestedDisconnectStatus_.empty()) requestedDisconnectStatus_ = "Disconnected";
     transport_.disconnect();
+    game::appearance::set_lobby_active(false);
     if (router_ != nullptr) {
         router_->clear();
     }

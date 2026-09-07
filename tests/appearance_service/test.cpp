@@ -20,6 +20,9 @@ int main(){
  std::vector<uint8_t> raw(32,0x80), other=raw; const auto original=raw;
  auto a=model(raw,"al_upbody"),b=model(other,"al_upbody"),wolf=model(raw,"wl_body");
  apply(&a,default_color,&a,nullptr);
+ check(saved.empty(),"offline default does not mask cosmetic mods");
+ set_lobby_active(true);
+ apply(&a,default_color,&a,nullptr);
  check(saved.size()==1 && saved.begin()->second.pixels==raw && saved.begin()->second.format==14,"default preserves exact native bytes");
  auto previous=saved.begin()->first;
  apply(&a,default_color,&a,nullptr);check(serial==previous,"unchanged draw does not upload");
@@ -40,6 +43,9 @@ int main(){
  // during asynchronous outfit loading: none may dereference that model.
  daAlink_c link;link.mpLinkModel=&a;
  daAlink_c* linkArg=&link;void* args[]={&linkArg};
+ draw_pre(nullptr,args,nullptr,nullptr);
+ check(saved.empty(),"offline draw leaves native texture selection intact");
+ set_lobby_active(true);
  set_local(0x123456,0x654321);draw_pre(nullptr,args,nullptr,nullptr);
  check(saved.size()==1,"local draw registers outfit");
  const auto outfitHandle=serial;
@@ -47,6 +53,16 @@ int main(){
  check(serial==outfitHandle && local_color()==0xff0000,"marker-only change does not upload outfit");
  set_local(0xff0000,default_color);draw_pre(nullptr,args,nullptr,nullptr);
  check(saved.rbegin()->second.pixels==original && local_color()==0xff0000,"outfit reset preserves marker choice");
+ apply(&b,0x123456,&b,nullptr);
+ set_lobby_active(false);
+ check(saved.empty(),"leaving lobby releases local and remote overrides immediately");
+ draw_pre(nullptr,args,nullptr,nullptr);
+ apply(&b,0x123456,&b,nullptr);
+ check(saved.empty(),"offline draws cannot recreate overrides");
+ check(local_color()==0xff0000 && local_outfit_color()==default_color,"leaving preserves saved choices");
+ set_lobby_active(true);
+ draw_pre(nullptr,args,nullptr,nullptr);
+ check(saved.size()==1,"rejoining restores selected outfit override");
  link.mClothesChangeWaitTimer=3;
  change_pre(nullptr,args,nullptr,nullptr);
  check(saved.empty(),"model-change hook releases before archive free");

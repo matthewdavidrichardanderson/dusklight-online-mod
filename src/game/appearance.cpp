@@ -12,6 +12,7 @@ namespace dusklight_online::game::appearance {
 namespace {
 Color local = default_color;
 Color localOutfit = default_color;
+bool lobbyActive = false;
 struct PeerColors { Color player; Color outfit; };
 std::map<std::string, PeerColors, std::less<>> peers;
 struct Replacement {
@@ -29,6 +30,7 @@ DEFINE_HOOK(&daAlink_c::draw, LocalDraw);
 DEFINE_HOOK(&daAlink_c::loadModelDVD, LocalModelChange);
 DEFINE_HOOK(&fpcBs_Delete, ProcessDelete);
 HookAction draw_pre(ModContext*, void* args, void*, void*) {
+    if (!lobbyActive) return HOOK_CONTINUE;
     auto* link = mods::arg<daAlink_c*>(args, 0);
     // Models can already be freed during the outfit-load wait.
     if (link->mClothesChangeWaitTimer != 0 || link->checkWolf()) release(link);
@@ -44,6 +46,10 @@ HookAction delete_pre(ModContext*, void* args, void*, void*) {
     release(mods::arg<base_process_class*>(args, 0));
     return HOOK_CONTINUE;
 }
+}
+void set_lobby_active(bool active) {
+    lobbyActive = active;
+    if (!active) while (!owners.empty()) release(owners.begin()->first);
 }
 void set_local(Color c, Color outfit) { local = c; localOutfit = outfit; }
 Color local_outfit_color() { return localOutfit; }
@@ -68,6 +74,7 @@ void release(const void* owner) {
     owners.erase(it);
 }
 void apply(const void* owner, Color color, J3DModel* body, J3DModel* head, J3DModel* bridge) {
+    if (!lobbyActive) return;
     auto& registrations = owners[owner];
     std::set<const void*> live;
     for (auto* model : {body,head,bridge}) {
@@ -131,7 +138,7 @@ void shutdown() {
     mods::hook::uninstall<LocalDraw>();
     mods::hook::uninstall<LocalModelChange>();
     mods::hook::uninstall<ProcessDelete>();
-    while (!owners.empty()) release(owners.begin()->first);
+    set_lobby_active(false);
     reset_peers();
 }
 }
