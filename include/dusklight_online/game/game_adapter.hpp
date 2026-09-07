@@ -71,6 +71,8 @@ public:
     void notify_local_poe_pickup(int previous, int value);
     void notify_local_item_grant(const ItemGiveInfo& info);
 
+    void set_player_color(uint32_t color, uint32_t outfit);
+    void publish_player_color();
     void reset_session();
     [[nodiscard]] const std::string& last_error() const;
     [[nodiscard]] std::string manual_sync_status_text() const;
@@ -81,7 +83,6 @@ public:
 private:
     net::Transport& transport_;
     std::map<std::string, std::string> peerNames_;
-    std::map<std::string, uint8_t> peerColorSlots_;
     std::map<std::string, nlohmann::json> peerPresence_;
     std::map<std::string, nlohmann::json> peerProgressionStates_;
     std::map<std::string, uint32_t> peerProgressionAges_;
@@ -119,7 +120,6 @@ private:
     bool hooksInstalled_ = false;
     SaveObserverHandle saveObserver_ = 0;
     ItemGiveHandle itemGiveObserver_ = 0;
-    uint8_t localColorSlot_ = 0;
     bool sharedOoccooAuthoritative_ = false;
     bool sharedOoccooBoundToSave_ = false;
     nlohmann::json sharedOoccooState_ = {{"exists", false}};
@@ -236,8 +236,6 @@ private:
     void remember_memory_item(int stage, int flag);
     void reapply_observed_memory_items_for_current_stage();
     ApplyResult reject(std::string reason);
-    void assign_peer_color(std::string_view peerId);
-    void apply_owner_color(std::string_view ownerPeerId, std::string_view localPeerId);
     void consume_welcome_membership(const nlohmann::json& message);
     bool request_manual_sync_impl(std::string_view peerId, bool flagsOnly,
                                   std::string_view cueKey, std::string* error,

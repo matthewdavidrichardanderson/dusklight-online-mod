@@ -11,6 +11,8 @@
 #include "mods/svc/save.h"
 #include "mods/svc/config.h"
 #include "mods/svc/ui.h"
+#include "mods/svc/texture.h"
+#include "dusklight_online/game/appearance.hpp"
 
 #include <memory>
 #include <string>
@@ -23,6 +25,7 @@ IMPORT_SERVICE(SaveService, svc_save);
 IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
+IMPORT_SERVICE(TextureService, svc_texture);
 // ItemService's observer API has been stable since minor 0. Import that
 // prefix explicitly so this mod remains loadable on both the old combined
 // multiplayer host and current hosts with the expanded resolution API.
@@ -83,6 +86,12 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
         return mods::set_error(error, postHookResult,
                                "Online game-execute hooks are unavailable");
     }
+    if (dusklight_online::game::appearance::initialize(error) != MOD_OK) {
+        mods::hook::uninstall<OnlineGameExecuteHook>();
+        sApp->shutdown();
+        sApp.reset();
+        return MOD_ERROR;
+    }
     svc_log->info(mod_ctx, "Dusklight Online initialization started");
     return MOD_OK;
 }
@@ -94,6 +103,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
+    dusklight_online::game::appearance::shutdown();
     mods::hook::uninstall<OnlineGameExecuteHook>();
     if (sApp != nullptr) {
         sApp->shutdown();

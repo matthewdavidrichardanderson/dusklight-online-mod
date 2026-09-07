@@ -1,3 +1,4 @@
+#include "dusklight_online/game/appearance.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
 
 #include <algorithm>
@@ -110,26 +111,18 @@ bool sPlayerListEnabled = false;
 std::string sRoom;
 std::string sLocalStatus;
 std::string sLocalName;
-uint8_t sLocalColorSlot = 0;
 std::map<std::string, PeerPoseSnapshot> sPoses;
 std::map<std::string, std::string> sNames;
-std::map<std::string, uint8_t> sColorSlots;
 std::unique_ptr<NameLabelFontAtlas> sFontAtlas;
 ProgressionPromptView sProgressionPrompt;
 std::vector<Notification> sNotifications;
 
-PlayerColor color_for_slot(uint8_t slot) {
-    static constexpr PlayerColor kColors[8] = {
-        {255, 255, 255, 255}, {94, 211, 255, 255}, {255, 214, 92, 255},
-        {101, 232, 132, 255}, {255, 133, 203, 255}, {255, 169, 82, 255},
-        {184, 160, 255, 255}, {90, 232, 209, 255},
-    };
-    return kColors[std::min<uint8_t>(slot, 7)];
+PlayerColor display_color(uint32_t value) {
+    if (value == appearance::default_color) value = 0xffffff;
+    return {uint8_t(value >> 16), uint8_t(value >> 8), uint8_t(value), 255};
 }
-
 PlayerColor color_for_peer(const std::string& peerId) {
-    const auto it = sColorSlots.find(peerId);
-    return color_for_slot(it == sColorSlots.end() ? 7 : it->second);
+    return display_color(appearance::peer_color(peerId));
 }
 
 bool host_projection_is_mirrored() {
@@ -168,6 +161,11 @@ std::vector<MinimapMarker> collect_minimap_markers() {
         if (!pose.valid || pose.ageTicks > 30 || pose.stage != localStage) continue;
         const PlayerColor color = color_for_peer(peerId);
         markers.push_back({pose.room, pose.x, pose.y, pose.z, pose.angleY, color});
+    }
+    if (auto* link = dComIfGp_getLinkPlayer()) {
+        markers.push_back({fopAcM_GetRoomNo(link), link->current.pos.x, link->current.pos.y,
+                           link->current.pos.z, link->shape_angle.y,
+                           display_color(appearance::local_color())});
     }
     return markers;
 }
@@ -687,7 +685,11 @@ void draw_name_labels() {
     if (labels.empty()) return;
     setup_label_gx(*atlas);
     for (const Label& label : labels) {
-        const PlayerColor value = color_for_peer(label.peerId);
+        PlayerColor value = color_for_peer(label.peerId);
+        // Blend text slightly toward white; outfit and map colours stay exact.
+        value.r += (255 - value.r + 2) / 5;
+        value.g += (255 - value.g + 2) / 5;
+        value.b += (255 - value.b + 2) / 5;
         draw_world_text(*atlas, label.pos,
                         JUtility::TColor(value.r, value.g, value.b, value.a),
                         label.text.c_str());
@@ -754,10 +756,9 @@ void uninstall_visual_hooks() {
 void update_visual_overlays(
     bool connected, bool gameplayReady, bool nameLabelsEnabled, bool remoteModelEnabled,
     bool playerListEnabled, std::string_view room, std::string_view localStatus,
-    std::string_view localName, uint8_t localColorSlot,
+    std::string_view localName,
     const std::map<std::string, PeerPoseSnapshot>& poses,
     const std::map<std::string, std::string>& names,
-    const std::map<std::string, uint8_t>& colorSlots,
     const ProgressionPromptView& progressionPrompt) {
     sConnected = connected;
     sGameplayReady = gameplayReady;
@@ -767,10 +768,8 @@ void update_visual_overlays(
     sRoom = room;
     sLocalStatus = localStatus;
     sLocalName = localName;
-    sLocalColorSlot = localColorSlot;
     sPoses = poses;
     sNames = names;
-    sColorSlots = colorSlots;
     sProgressionPrompt = progressionPrompt;
 }
 
@@ -789,10 +788,10 @@ void push_online_notification(std::string text, float durationSeconds, bool warn
 }
 
 void push_online_player_notification(std::string playerName, std::string text,
-                                     uint8_t colorSlot, float durationSeconds) {
+                                     uint32_t color, float durationSeconds) {
     if (playerName.empty() || text.empty()) return;
     sNotifications.push_back({std::move(playerName), std::move(text),
-                              color_for_slot(colorSlot), 0.0f, durationSeconds});
+                              display_color(color), 0.0f, durationSeconds});
     if (sNotifications.size() > 5) sNotifications.erase(sNotifications.begin());
 }
 
@@ -802,11 +801,9 @@ void reset_visual_overlays() {
     sPlayerListEnabled = false;
     sPoses.clear();
     sNames.clear();
-    sColorSlots.clear();
     sRoom.clear();
     sLocalStatus.clear();
     sLocalName.clear();
-    sLocalColorSlot = 0;
     sProgressionPrompt = {};
     sNotifications.clear();
 }

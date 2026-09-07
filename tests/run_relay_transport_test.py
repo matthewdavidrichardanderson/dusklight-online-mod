@@ -11,9 +11,19 @@ from pathlib import Path
 
 
 def reserve_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    # The relay binds TCP and UDP to the same port. Windows may reserve a
+    # TCP-assigned ephemeral port for UDP, so check both before launching.
+    for _ in range(100):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp, \
+             socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            udp.bind(("127.0.0.1", 0))
+            port = int(udp.getsockname()[1])
+            try:
+                tcp.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("could not reserve a TCP/UDP test port")
 
 
 def main() -> int:

@@ -1,3 +1,4 @@
+#include "dusklight_online/game/appearance.hpp"
 #include "dusklight_online/game/game_adapter.hpp"
 #include "dusklight_online/game/pickup_sync.hpp"
 #include "dusklight_online/game/poe_sync.hpp"
@@ -2821,8 +2822,8 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                            remoteModelEnabled, playerListEnabled, status.room,
                            (status.mode == net::Mode::DirectHost || status.isOwner) ?
                                "hosting" : "connected",
-                           status.name, localColorSlot_,
-                           peerPoses_, transport_.peers(), peerColorSlots_, promptView);
+                           status.name,
+                           peerPoses_, transport_.peers(), promptView);
     dusk::multiplayer::set_remote_actor_options(
                                                 dusk::multiplayer::kRemoteMidnaStreamingEnabled &&
                                                     displayMidnaEnabled,
@@ -3059,14 +3060,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
 
     if (++presenceTicks_ >= 30) {
         presenceTicks_ = 0;
-        if (hasStage && stage_ready()) {
-            transport_.send({
-                {"type", "presence"},
-                {"stage", stage},
-                {"room", static_cast<int>(dComIfGp_roomControl_getStayNo())},
-                {"layer", static_cast<int>(dComIfGp_getStartStageLayer())},
-            });
-        }
+        publish_player_color();
         transport_.send({{"type", "ping"}});
     }
 }
@@ -3139,14 +3133,26 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                 if (syncFlagsEnabled_ && !enabled) clear_disabled_sync_flags_state();
                 if (!syncFlagsEnabled_ && enabled) localObservedState_ = nlohmann::json();
                 syncFlagsEnabled_ = enabled;
-            } else if (type == "owner_changed" &&
-                       message.ingress.mode == net::Mode::Relay) {
-                apply_owner_color(
-                    message.payload.value("owner_client_id", std::string()),
-                    message.ingress.clientId);
             }
             return ApplyResult::Applied;
         case MessageDomain::Presence:
+            if (type == "presence") {
+                const auto field = message.payload.find("player_color");
+                if (field != message.payload.end()) {
+                    if (!field->is_string()) return reject("invalid player colour");
+                    const auto color = appearance::parse_color(field->get_ref<const std::string&>());
+                    if (!color) return reject("invalid player colour");
+                    // Older presence packets supplied a single colour for both.
+                    auto outfit = color;
+                    if (const auto field = message.payload.find("outfit_color");
+                        field != message.payload.end()) {
+                        if (!field->is_string()) return reject("invalid outfit colour");
+                        outfit = appearance::parse_color(field->get_ref<const std::string&>());
+                        if (!outfit) return reject("invalid outfit colour");
+                    }
+                    appearance::set_peer(message.peerId, *color, *outfit);
+                }
+            }
             if (type == "progression_state") {
                 peerProgressionStates_[message.peerId] = message.payload;
                 peerProgressionAges_[message.peerId] = 0;
@@ -3262,10 +3268,9 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
         itemToApply != dItemNo_HEART_e && itemToApply != dItemNo_NONE_e) {
         const auto name = peerNames_.find(message.peerId);
         const std::string peerName = name != peerNames_.end() ? name->second : message.peerId;
-        const auto color = peerColorSlots_.find(message.peerId);
         const std::string notice = " found " + std::string(randomizer_item_name(itemToApply));
         push_online_player_notification(
-            peerName, notice, color != peerColorSlots_.end() ? color->second : 0);
+            peerName, notice, appearance::peer_color(message.peerId));
     }
 
     std::ostringstream log;
@@ -3418,83 +3423,45 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
     return ApplyResult::Applied;
 }
 
-void GameAdapter::assign_peer_color(std::string_view peerId) {
-    const std::string id(peerId);
-    if (id.empty() || peerColorSlots_.contains(id)) return;
-    for (uint8_t slot = 0; slot < 8; ++slot) {
-        if (slot == localColorSlot_) continue;
-        const bool used = std::any_of(peerColorSlots_.begin(), peerColorSlots_.end(),
-            [slot](const auto& entry) { return entry.second == slot; });
-        if (!used) {
-            peerColorSlots_[id] = slot;
-            return;
-        }
-    }
-    peerColorSlots_[id] = 7;
+void GameAdapter::set_player_color(uint32_t color, uint32_t outfit) {
+    if (appearance::local_color() == color && appearance::local_outfit_color() == outfit) return;
+    appearance::set_local(color, outfit);
+    publish_player_color();
 }
 
-void GameAdapter::apply_owner_color(std::string_view ownerPeerId,
-                                    std::string_view localPeerId) {
-    if (ownerPeerId.empty() || localPeerId.empty()) return;
-
-    const bool localIsOwner = ownerPeerId == localPeerId;
-    uint8_t previousOwnerSlot = localColorSlot_;
-    std::map<std::string, uint8_t>::iterator owner = peerColorSlots_.end();
-    if (!localIsOwner) {
-        assign_peer_color(ownerPeerId);
-        owner = peerColorSlots_.find(std::string(ownerPeerId));
-        if (owner == peerColorSlots_.end()) return;
-        previousOwnerSlot = owner->second;
+void GameAdapter::publish_player_color() {
+    if (!transport_.status().enabled) return;
+    nlohmann::json message = {{"type", "presence"},
+                             {"player_color", appearance::color_string(appearance::local_color())},
+                             {"outfit_color", appearance::color_string(appearance::local_outfit_color())}};
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage && stage[0]) {
+        message["stage"] = stage;
+        message["room"] = static_cast<int>(dComIfGp_roomControl_getStayNo());
+        message["layer"] = static_cast<int>(dComIfGp_getStartStageLayer());
     }
-    if (previousOwnerSlot == 0) return;
-
-    // White (slot 0) identifies the current host. Swap its previous holder
-    // into the promoted player's old slot so every connected player keeps a
-    // unique colour, including when the former host later rejoins.
-    if (localColorSlot_ == 0) {
-        localColorSlot_ = previousOwnerSlot;
-    } else {
-        const auto previousWhite = std::find_if(
-            peerColorSlots_.begin(), peerColorSlots_.end(),
-            [&](const auto& entry) {
-                return entry.second == 0 && (localIsOwner || entry.first != owner->first);
-            });
-        if (previousWhite != peerColorSlots_.end()) {
-            previousWhite->second = previousOwnerSlot;
-        }
-    }
-
-    if (localIsOwner) {
-        localColorSlot_ = 0;
-    } else {
-        owner->second = 0;
-    }
+    transport_.send(message);
 }
 
 void GameAdapter::consume_welcome_membership(const nlohmann::json& message) {
-    peerColorSlots_.clear();
+    appearance::reset_peers();
     peerNames_.clear();
-    uint8_t nextSlot = 0;
     const std::string directHost = message.value("direct_peer_name", std::string());
     if (!directHost.empty()) {
         peerNames_["direct"] = directHost;
-        peerColorSlots_["direct"] = nextSlot++;
     }
     for (const auto& peer : message.value("peers", nlohmann::json::array())) {
         if (!peer.is_object()) continue;
         const std::string id = peer.value("client_id", std::string());
         if (id.empty()) continue;
         peerNames_[id] = peer.value("name", id);
-        if (!peerColorSlots_.contains(id)) {
-            peerColorSlots_[id] = std::min<uint8_t>(nextSlot++, 7);
-        }
     }
-    localColorSlot_ = std::min<uint8_t>(nextSlot, 7);
+    publish_player_color();
 }
 
 void GameAdapter::peer_joined(std::string_view peerId, std::string_view name) {
     peerNames_[std::string(peerId)] = std::string(name);
-    assign_peer_color(peerId);
+    publish_player_color();
     push_online_notification((name.empty() ? std::string(peerId) : std::string(name)) +
                              " joined the lobby.");
 }
@@ -3505,7 +3472,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
     push_online_notification((nameIt != peerNames_.end() ? nameIt->second : key) +
                              " left the lobby.");
     peerNames_.erase(key);
-    peerColorSlots_.erase(key);
+    appearance::forget_peer(key);
     peerPresence_.erase(key);
     peerProgressionStates_.erase(key);
     peerProgressionAges_.erase(key);
@@ -3573,8 +3540,7 @@ void GameAdapter::reset_session() {
     dusk::multiplayer::reset_remote_actor_bridge();
     reset_bomb_sync_state();
     peerNames_.clear();
-    peerColorSlots_.clear();
-    localColorSlot_ = 0;
+    appearance::reset_peers();
     peerPresence_.clear();
     peerProgressionStates_.clear();
     peerProgressionAges_.clear();

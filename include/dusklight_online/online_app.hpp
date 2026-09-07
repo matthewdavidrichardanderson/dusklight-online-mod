@@ -35,6 +35,8 @@ public:
 private:
     struct Config {
         ConfigVarHandle playerName = 0;
+        ConfigVarHandle playerColor = 0;
+        ConfigVarHandle outfitColor = 0;
         ConfigVarHandle directRoom = 0;
         ConfigVarHandle bindHost = 0;
         ConfigVarHandle publicHost = 0;
@@ -58,6 +60,7 @@ private:
     std::unique_ptr<game::ProtocolRouter> router_;
     UiWindowHandle window_ = 0;
     UiWindowHandle settingsWindow_ = 0;
+    UiWindowHandle playerOptionsWindow_ = 0;
     UiWindowHandle syncWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
     UiStyleHandle overlayStyle_ = 0;
@@ -108,6 +111,7 @@ private:
     std::string dashboard_rml() const;
     void open_window();
     void open_settings_window();
+    void open_player_options_window();
     void open_sync_window();
     void host_direct();
     void join_direct();
@@ -128,6 +132,10 @@ public:
     static ModResult update_panel(ModContext*, void*, ModError*);
     static ModResult build_session_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                        UiElementHandle, void*, ModError*);
+    static ModResult build_player_options_tab(ModContext*, UiWindowHandle, UiElementHandle,
+                                              UiElementHandle, void*, ModError*);
+    static void player_options_window_closed(ModContext*, UiWindowHandle, void*);
+    static void player_options_pressed(ModContext*, void*);
     static ModResult build_settings_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                         UiElementHandle, void*, ModError*);
     static ModResult build_sync_tab(ModContext*, UiWindowHandle, UiElementHandle,
@@ -140,6 +148,7 @@ public:
     static void window_closed(ModContext*, UiWindowHandle, void*);
     static void settings_window_closed(ModContext*, UiWindowHandle, void*);
     static void sync_window_closed(ModContext*, UiWindowHandle, void*);
+    static void reset_player_options(ModContext*, void*);
     static void open_pressed(ModContext*, void*);
     static void settings_pressed(ModContext*, void*);
     static void sync_menu_pressed(ModContext*, void*);

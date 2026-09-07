@@ -99,9 +99,19 @@ def udp_packet(
 
 
 def reserve_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    # The relay binds TCP and UDP to the same port. Windows may reserve a
+    # TCP-assigned ephemeral port for UDP, so check both before launching.
+    for _ in range(100):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp, \
+             socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            udp.bind(("127.0.0.1", 0))
+            port = int(udp.getsockname()[1])
+            try:
+                tcp.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("could not reserve a TCP/UDP test port")
 
 
 class RelayClient:
@@ -382,6 +392,29 @@ class RelayTests(unittest.TestCase):
         welcome = client.expect_type("welcome")
         self.created_rooms.add(room)
         return client, welcome
+
+    def test_player_colour_presence(self) -> None:
+        first, welcome = self.join("ColourA", "colour-presence")
+        second, _ = self.join("ColourB", "colour-presence")
+        first.expect_type("peer_joined")
+        second.send({"type": "presence", "stage": "D_MN05"})
+        first.expect_type("presence")
+        for colour, outfit in (("BC5350", "204060"), ("BC5350", ""), ("", "204060"), ("", "")):
+            first.send({"type": "presence", "stage": "F_SP108",
+                        "player_color": colour, "outfit_color": outfit, "client_id": "spoof"})
+            received = second.expect_type("presence")
+            self.assertEqual(received["player_color"], colour)
+            self.assertEqual(received["outfit_color"], outfit)
+            self.assertEqual(received["client_id"], welcome["client_id"])
+        third, joined = self.join("ColourC", "colour-presence")
+        first.expect_type("peer_joined")
+        second.expect_type("peer_joined")
+        # Online republishes on membership changes; no relay-side profile cache.
+        first.send({"type": "presence", "player_color": "3E8AC4", "outfit_color": "508040",
+                    "target_client_id": joined["client_id"]})
+        received = third.expect_type("presence")
+        self.assertEqual(received["player_color"], "3E8AC4")
+        self.assertEqual(received["outfit_color"], "508040")
 
     def test_three_client_room_and_disconnect(self) -> None:
         first, first_welcome = self.join("First", "three-clients")

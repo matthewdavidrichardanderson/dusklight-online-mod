@@ -1,3 +1,4 @@
+#include "dusklight_online/game/appearance.hpp"
 #include "dusklight_online/online_app.hpp"
 
 #include "dusk/multiplayer/invite_code.hpp"
@@ -557,6 +558,10 @@ void OnlineApp::consume_progression_prompt_input() {
 }
 
 void OnlineApp::update() {
+    if (game_) game_->set_player_color(game::appearance::parse_color(
+        string_value(config_.playerColor)).value_or(game::appearance::default_color),
+        game::appearance::parse_color(string_value(config_.outfitColor))
+            .value_or(game::appearance::default_color));
     if (reopenWindowPending_ && window_ == 0) {
         reopenWindowPending_ = false;
         open_window();
@@ -724,6 +729,10 @@ void OnlineApp::shutdown() {
         game_->reset_session();
         game_->shutdown_hooks();
     }
+    if (playerOptionsWindow_ != 0) {
+        svc_ui->window_close(mod_ctx, playerOptionsWindow_);
+        playerOptionsWindow_ = 0;
+    }
     if (settingsWindow_ != 0) {
         svc_ui->window_close(mod_ctx, settingsWindow_);
         settingsWindow_ = 0;
@@ -764,6 +773,8 @@ ModResult OnlineApp::register_config(ModError* error) {
     struct StringVar { const char* name; const char* value; ConfigVarHandle* handle; };
     const std::array strings = {
         StringVar{"player-name", "Player", &config_.playerName},
+        StringVar{"player-color", "", &config_.playerColor},
+        StringVar{"outfit-color", "inherit", &config_.outfitColor},
         StringVar{"direct-room", "Lobby", &config_.directRoom},
         StringVar{"bind-host", "0.0.0.0", &config_.bindHost},
         StringVar{"public-host", "127.0.0.1", &config_.publicHost},
@@ -778,6 +789,23 @@ ModResult OnlineApp::register_config(ModError* error) {
             return MOD_ERROR;
         }
     }
+    // One-time migration preserves the old combined colour. Empty is an
+    // explicit original-outfit choice and must never inherit again.
+    if (string_value(config_.outfitColor) == "inherit") {
+        const auto previous = game::appearance::parse_color(string_value(config_.playerColor))
+                                  .value_or(game::appearance::default_color);
+        const auto value = game::appearance::color_string(previous);
+        if (svc_config->set_string(mod_ctx, config_.outfitColor, value.c_str()) != MOD_OK)
+            return MOD_ERROR;
+    }
+    // The migration sentinel is not a UI default. Re-register before any
+    // controls bind; the service preserves the effective value on unregister.
+    if (svc_config->unregister_var(mod_ctx, config_.outfitColor) != MOD_OK)
+        return MOD_ERROR;
+    config_.outfitColor = 0;
+    if (add_config("outfit-color", CONFIG_VAR_STRING, "", 0, false,
+                   config_.outfitColor, error) != MOD_OK)
+        return MOD_ERROR;
     if (add_config("port", CONFIG_VAR_INT, nullptr, 34197, false, config_.port, error) != MOD_OK) {
         return MOD_ERROR;
     }
@@ -982,7 +1010,7 @@ void OnlineApp::open_settings_window() {
     if (settingsWindow_ != 0) return;
     static UiTabDesc tab;
     tab = UI_TAB_DESC_INIT;
-    tab.title = "Settings";
+    tab.title = "Session options";
     tab.build = &OnlineApp::build_settings_tab;
     tab.user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
@@ -992,6 +1020,22 @@ void OnlineApp::open_settings_window() {
     desc.on_closed = &OnlineApp::settings_window_closed;
     desc.user_data = this;
     svc_ui->window_push(mod_ctx, &desc, &settingsWindow_);
+}
+
+void OnlineApp::open_player_options_window() {
+    if (playerOptionsWindow_ != 0) return;
+    static UiTabDesc tab;
+    tab = UI_TAB_DESC_INIT;
+    tab.title = "Player options";
+    tab.build = &OnlineApp::build_player_options_tab;
+    tab.user_data = this;
+    UiWindowDesc desc = UI_WINDOW_DESC_INIT;
+    desc.tabs = &tab;
+    desc.tab_count = 1;
+    desc.rcss = kOnlineWindowRcss;
+    desc.on_closed = &OnlineApp::player_options_window_closed;
+    desc.user_data = this;
+    svc_ui->window_push(mod_ctx, &desc, &playerOptionsWindow_);
 }
 
 void OnlineApp::open_sync_window() {
@@ -1324,7 +1368,8 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     app.windowRenderedStatus_ = status;
 
     svc_ui->pane_add_section(mod_ctx, left, "Session");
-    add_button(left, "Settings", &OnlineApp::settings_pressed, &app);
+    add_button(left, "Player options", &OnlineApp::player_options_pressed, &app);
+    add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
     add_button(left, "Sync players", &OnlineApp::sync_menu_pressed, &app,
                &OnlineApp::sync_menu_unavailable);
     svc_ui->pane_add_rml(mod_ctx, left,
@@ -1363,6 +1408,31 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     return MOD_OK;
 }
 
+ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiElementHandle left,
+                                              UiElementHandle, void* data, ModError*) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Player options");
+    add_button(left, "Reset to defaults", &OnlineApp::reset_player_options, &app);
+    static constexpr const char* presets[] = {
+        "508040", "3E8AC4", "BC5350", "9A72BD", "D99A45", "D27DA7", "E6DEC6", "555B65"
+    };
+    UiControlDesc colour = UI_CONTROL_DESC_INIT;
+    colour.kind = UI_CONTROL_COLOR;
+    colour.label = "Outfit colour";
+    colour.binding = UI_BINDING_CONFIG_VAR;
+    colour.config_var = app.config_.outfitColor;
+    colour.color_presets = presets;
+    colour.color_preset_count = std::size(presets);
+    colour.help_rml = "Choose Link's tunic and Zora armour colour.";
+    svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
+    colour.label = "Player colour";
+    colour.config_var = app.config_.playerColor;
+    colour.help_rml = "Choose your nametag and minimap marker colour.";
+    svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
+    return MOD_OK;
+}
+
 ModResult OnlineApp::build_settings_tab(ModContext*, UiWindowHandle, UiElementHandle left,
                                         UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
@@ -1393,7 +1463,7 @@ ModResult OnlineApp::build_settings_tab(ModContext*, UiWindowHandle, UiElementHa
         left, UI_CONTROL_TOGGLE, "Player list overlay", app.config_.playerList,
         0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
         "<p>Keep the connected-player list visible during gameplay.</p>");
-    svc_ui->pane_add_section(mod_ctx, right, "Settings");
+    svc_ui->pane_add_section(mod_ctx, right, "Session options");
     svc_ui->pane_add_text(mod_ctx, right,
                           "Select an option to see its description.", nullptr);
     return MOD_OK;
@@ -1510,6 +1580,15 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     return MOD_OK;
 }
 
+void OnlineApp::player_options_window_closed(ModContext*, UiWindowHandle, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.playerOptionsWindow_ = 0;
+}
+
+void OnlineApp::player_options_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->open_player_options_window();
+}
+
 ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     if (app.windowStatus_ != 0) {
@@ -1556,6 +1635,12 @@ void OnlineApp::sync_window_closed(ModContext*, UiWindowHandle, void* data) {
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
+}
+
+void OnlineApp::reset_player_options(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    svc_config->set_string(mod_ctx, app.config_.outfitColor, "");
+    svc_config->set_string(mod_ctx, app.config_.playerColor, "");
 }
 
 void OnlineApp::open_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }

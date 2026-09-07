@@ -27,36 +27,41 @@ namespace {
 }
 
 uint16_t reserve_test_port() {
-    const auto socketHandle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    const auto closeSocket = [](auto handle) {
 #if defined(_WIN32)
-    if (socketHandle == INVALID_SOCKET) {
+        closesocket(handle);
 #else
-    if (socketHandle < 0) {
+        close(handle);
 #endif
-        fail("could not create test socket");
-    }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = 0;
-    if (bind(socketHandle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        fail("could not reserve test port");
-    }
+    };
+    // UDP and TCP exclusions can differ on Windows. Reserve both protocols.
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const auto udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        const auto tcp = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 #if defined(_WIN32)
-    int length = sizeof(address);
+        if (udp == INVALID_SOCKET || tcp == INVALID_SOCKET) {
 #else
-    socklen_t length = sizeof(address);
+        if (udp < 0 || tcp < 0) {
 #endif
-    if (getsockname(socketHandle, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
-        fail("could not read test port");
-    }
-    const uint16_t port = ntohs(address.sin_port);
+            closeSocket(udp); closeSocket(tcp);
+            fail("could not create test sockets");
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 #if defined(_WIN32)
-    closesocket(socketHandle);
+        int length = sizeof(address);
 #else
-    close(socketHandle);
+        socklen_t length = sizeof(address);
 #endif
-    return port;
+        const bool available =
+            bind(udp, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0 &&
+            getsockname(udp, reinterpret_cast<sockaddr*>(&address), &length) == 0 &&
+            bind(tcp, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+        closeSocket(udp); closeSocket(tcp);
+        if (available) return ntohs(address.sin_port);
+    }
+    fail("could not reserve a TCP/UDP test port");
 }
 
 bool drain_for_type(Transport& transport, const std::string& type,
@@ -177,6 +182,28 @@ int main() {
     while (host.has_events()) host.pop_event();
     while (alice.has_events()) alice.pop_event();
     while (bob.has_events()) bob.pop_event();
+
+    // Appearance is reliable presence metadata, including the empty default.
+    for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},
+                                      std::pair{"C06030", ""}, std::pair{"", "204060"},
+                                      std::pair{"", ""}}) {
+        alice.send({{"type", "presence"}, {"player_color", color}, {"outfit_color", outfit}, {"client_id", "spoof"}});
+        pump(host, alice, bob, 20);
+        nlohmann::json appearance;
+        if (!drain_for_type(bob, "presence", &appearance) ||
+            appearance.value("outfit_color", "missing") != outfit ||
+            appearance.value("player_color", "missing") != color ||
+            appearance.value("client_id", "") == "spoof") fail("direct appearance forwarding");
+        if (!drain_for_type(host, "presence", &appearance) ||
+            appearance.value("outfit_color", "missing") != outfit ||
+            appearance.value("player_color", "missing") != color) fail("host appearance receipt");
+        host.send({{"type", "presence"}, {"player_color", color}, {"outfit_color", outfit}});
+        pump(host, alice, bob, 20);
+        if (!drain_for_type(alice, "presence", &appearance) ||
+            appearance.value("outfit_color", "missing") != outfit ||
+            appearance.value("player_color", "missing") != color) fail("host appearance publication");
+        while (bob.has_events()) bob.pop_event();
+    }
 
     // Bob's first pose registers his observed UDP endpoint with the direct
     // host. Alice's following pose must then be decoded and re-encoded by the

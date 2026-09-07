@@ -7649,6 +7649,10 @@ void daRemoteLink_c::stopRemoteActiveSounds() {
 }
 
 int daRemoteLink_c::Draw() {
+    const auto appearancePeer = dusklight_online::game::appearance::peer_for_actor(this);
+    dusklight_online::game::appearance::apply(this,
+        dusklight_online::game::appearance::peer_outfit_color(appearancePeer),
+        mpBodyModel, mpHeadModel, mpTransformBridgeModel);
     if (isRemoteLinkSceneUnsafe()) {
         return TRUE;
     }
@@ -7846,6 +7850,7 @@ void daRemoteLink_c::drawRemoteTransformEffectModel() {
 }
 
 int daRemoteLink_c::Delete() {
+    dusklight_online::game::appearance::release(this);
     DuskLog.info(
         "RemoteLink: deleting body={} bodyData={} headData={} handData={} faceData={} "
         "swordData={} sheathData={} shieldData={} heldData={} itemActorData={} arcHeap={}",

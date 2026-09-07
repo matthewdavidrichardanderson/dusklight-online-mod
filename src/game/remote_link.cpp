@@ -1,4 +1,5 @@
 #include "f_pc/f_pc_profile.h"
+#include "dusklight_online/game/appearance.hpp"
 
 // The selected SDK has the required handle pool and starter machinery but
 // does not expose the no-cull entry point used by Remote Link. Access the

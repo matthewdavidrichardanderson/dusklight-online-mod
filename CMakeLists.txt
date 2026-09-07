@@ -103,7 +103,7 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "C18ABA4FEEC025E0A267B52708641C70BF1CBAC926C20700D5FACF156C6C1877")
+    "2603d033e08b9405fcd68baa02819eb1e83dc397a1d3c16adb25555801e46ccc")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
     "1586BB1BA1110B05DE7B26B41B6EB78D850EB40BB0F7B4737D51B344C222ED04")
@@ -226,6 +226,8 @@ set(ONLINE_CORE_SOURCES
 )
 
 set(ONLINE_GAME_SOURCES
+    src/game/player_color.cpp
+    src/game/appearance.cpp
     src/game/audio_bridge.cpp
     src/game/bomb_bridge.cpp
     src/game/collectible_visual_bridge.cpp
@@ -329,6 +331,11 @@ endif ()
 option(DUSKLIGHT_ONLINE_BUILD_TESTS "Build standalone online core tests" ON)
 if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     enable_testing()
+    add_executable(dusklight_online_player_color_test tests/player_color_test.cpp src/game/player_color.cpp)
+    target_compile_features(dusklight_online_player_color_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_player_color_test PRIVATE include)
+    add_test(NAME dusklight_online_player_color COMMAND dusklight_online_player_color_test)
+
     add_executable(dusklight_online_bottle_sync_test tests/bottle_sync_test.cpp)
     target_compile_features(dusklight_online_bottle_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_bottle_sync_test PRIVATE include)
@@ -343,6 +350,15 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_compile_features(dusklight_online_poe_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_poe_sync_test PRIVATE include)
     add_test(NAME dusklight_online_poe_sync COMMAND dusklight_online_poe_sync_test)
+    # Compile the actual appearance implementation against an isolated fake
+    # engine/service to exercise resource ownership without launching Dusk.
+    add_executable(dusklight_online_appearance_service_test
+        tests/appearance_service/test.cpp src/game/player_color.cpp)
+    target_compile_features(dusklight_online_appearance_service_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_appearance_service_test PRIVATE
+        tests/appearance_service include src/game)
+    add_test(NAME dusklight_online_appearance_service
+        COMMAND dusklight_online_appearance_service_test)
     add_executable(dusklight_online_particle_depth_test tests/particle_depth_test.cpp)
     target_compile_features(dusklight_online_particle_depth_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_particle_depth_test PRIVATE include)
