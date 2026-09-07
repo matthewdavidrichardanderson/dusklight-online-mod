@@ -122,7 +122,13 @@ PlayerColor display_color(uint32_t value) {
     return {uint8_t(value >> 16), uint8_t(value >> 8), uint8_t(value), 255};
 }
 PlayerColor color_for_peer(const std::string& peerId) {
-    return display_color(appearance::peer_color(peerId));
+    PlayerColor value = display_color(appearance::peer_color(peerId));
+    // Apply the same modest brightness lift to nametags and remote map markers.
+    // Outfit textures and the native local cursor are unaffected.
+    value.r += (255 - value.r + 2) / 5;
+    value.g += (255 - value.g + 2) / 5;
+    value.b += (255 - value.b + 2) / 5;
+    return value;
 }
 
 bool host_projection_is_mirrored() {
@@ -159,9 +165,7 @@ std::vector<MinimapMarker> collect_minimap_markers() {
     }
     for (const auto& [peerId, pose] : sPoses) {
         if (!pose.valid || pose.ageTicks > 30 || pose.stage != localStage) continue;
-        const auto chosen = appearance::peer_color(peerId);
-        const PlayerColor color = display_color(
-            chosen == appearance::default_color ? 0xffffff : chosen);
+        const PlayerColor color = color_for_peer(peerId);
         markers.push_back({pose.room, pose.x, pose.y, pose.z, pose.angleY, color});
     }
     // Leave the native yellow local cursor untouched.
@@ -683,11 +687,7 @@ void draw_name_labels() {
     if (labels.empty()) return;
     setup_label_gx(*atlas);
     for (const Label& label : labels) {
-        PlayerColor value = color_for_peer(label.peerId);
-        // Blend text slightly toward white; outfit and map colours stay exact.
-        value.r += (255 - value.r + 2) / 5;
-        value.g += (255 - value.g + 2) / 5;
-        value.b += (255 - value.b + 2) / 5;
+        const PlayerColor value = color_for_peer(label.peerId);
         draw_world_text(*atlas, label.pos,
                         JUtility::TColor(value.r, value.g, value.b, value.a),
                         label.text.c_str());
