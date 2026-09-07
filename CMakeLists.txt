@@ -92,7 +92,15 @@ function(dusklight_remote_link_require_sha256 relative_path expected_sha256)
     if (NOT EXISTS "${source_path}")
         message(FATAL_ERROR "Pinned Remote Link source file is missing: ${relative_path}")
     endif ()
-    file(SHA256 "${source_path}" actual_sha256)
+    if (relative_path MATCHES "\\.(cpp|h|hpp)$")
+        # Git normalizes checkout line endings. Pin source content, not the
+        # platform-specific LF/CRLF representation; keep binary assets exact.
+        file(READ "${source_path}" source_text)
+        string(REPLACE "\r\n" "\n" source_text "${source_text}")
+        string(SHA256 actual_sha256 "${source_text}")
+    else ()
+        file(SHA256 "${source_path}" actual_sha256)
+    endif ()
     string(TOLOWER "${expected_sha256}" expected_sha256_lower)
     if (NOT actual_sha256 STREQUAL expected_sha256_lower)
         message(FATAL_ERROR
@@ -103,7 +111,7 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "2603d033e08b9405fcd68baa02819eb1e83dc397a1d3c16adb25555801e46ccc")
+    "0f7485b4c09db91df2c48876e91a8a0ab12e6dd1d537c3aada5242870a0b1c2d")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
     "1586BB1BA1110B05DE7B26B41B6EB78D850EB40BB0F7B4737D51B344C222ED04")
