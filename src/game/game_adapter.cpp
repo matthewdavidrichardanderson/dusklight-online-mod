@@ -3919,6 +3919,13 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
                 ordonReloadTransitionActive_ = true;
                 ordonReloadSawStageLoad_ = false;
             }
+            // Day 3 must close old-day progression triggers even while a
+            // cutscene delays the room reload. Keep the reload queued, but
+            // retain the existing deferred application for Day 1 -> 2.
+            if (flag == 0x4510) {
+                dComIfGs_onEventBit(flag);
+                return ApplyResult::Applied;
+            }
             return ApplyResult::Retained;
         }
     }
@@ -4062,7 +4069,9 @@ void GameAdapter::flush_story_events() {
         if (++ordonReloadSafeTicks_ < 3) {
             return;
         }
-        for (const uint16_t flag : pendingOrdonEventBits_) dComIfGs_onEventBit(flag);
+        for (const uint16_t flag : pendingOrdonEventBits_) {
+            if (!dComIfGs_isEventBit(flag)) dComIfGs_onEventBit(flag);
+        }
         pendingOrdonEventBits_.clear();
         ordonReloadSafeTicks_ = 0;
         ordonReloadWaitTicks_ = 0;
