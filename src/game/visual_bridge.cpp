@@ -159,14 +159,12 @@ std::vector<MinimapMarker> collect_minimap_markers() {
     }
     for (const auto& [peerId, pose] : sPoses) {
         if (!pose.valid || pose.ageTicks > 30 || pose.stage != localStage) continue;
-        const PlayerColor color = color_for_peer(peerId);
+        const auto chosen = appearance::peer_color(peerId);
+        const PlayerColor color = display_color(
+            chosen == appearance::default_color ? 0xffffff : chosen);
         markers.push_back({pose.room, pose.x, pose.y, pose.z, pose.angleY, color});
     }
-    if (auto* link = dComIfGp_getLinkPlayer()) {
-        markers.push_back({fopAcM_GetRoomNo(link), link->current.pos.x, link->current.pos.y,
-                           link->current.pos.z, link->shape_angle.y,
-                           display_color(appearance::local_color())});
-    }
+    // Leave the native yellow local cursor untouched.
     return markers;
 }
 

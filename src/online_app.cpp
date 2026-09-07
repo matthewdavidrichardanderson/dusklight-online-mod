@@ -1428,7 +1428,7 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
     colour.label = "Player colour";
     colour.config_var = app.config_.playerColor;
-    colour.help_rml = "Choose your nametag and minimap marker colour.";
+    colour.help_rml = "Choose your nametag colour and the minimap colour other players see.";
     svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
     return MOD_OK;
 }
