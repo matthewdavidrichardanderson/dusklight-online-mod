@@ -557,7 +557,15 @@ void OnlineApp::consume_progression_prompt_input() {
     }
 }
 
+void OnlineApp::match_player_colour() {
+    if (!bool_value(config_.matchOutfitColor, true)) return;
+    const auto outfit = string_value(config_.outfitColor);
+    if (string_value(config_.playerColor) != outfit)
+        svc_config->set_string(mod_ctx, config_.playerColor, outfit.c_str());
+}
+
 void OnlineApp::update() {
+    match_player_colour();
     if (game_) game_->set_player_color(game::appearance::parse_color(
         string_value(config_.playerColor)).value_or(game::appearance::default_color),
         game::appearance::parse_color(string_value(config_.outfitColor))
@@ -811,6 +819,7 @@ ModResult OnlineApp::register_config(ModError* error) {
     }
     struct BoolVar { const char* name; bool value; ConfigVarHandle* handle; };
     const std::array booleans = {
+        BoolVar{"match-outfit-color", true, &config_.matchOutfitColor},
         BoolVar{"relay-local", false, &config_.relayLocal},
         BoolVar{"remote-model", true, &config_.dummyModel},
         BoolVar{"name-labels", true, &config_.nameLabels},
@@ -1413,7 +1422,7 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     auto& app = *static_cast<OnlineApp*>(data);
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
     svc_ui->pane_add_section(mod_ctx, left, "Player options");
-    add_button(left, "Reset to defaults", &OnlineApp::reset_player_options, &app);
+    app.match_player_colour();
     static constexpr const char* presets[] = {
         "508040", "3E8AC4", "BC5350", "9A72BD", "D99A45", "D27DA7", "E6DEC6", "555B65"
     };
@@ -1428,8 +1437,18 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
     colour.label = "Player colour";
     colour.config_var = app.config_.playerColor;
+    colour.is_disabled = &OnlineApp::player_colour_locked;
+    colour.user_data = &app;
     colour.help_rml = "Choose your nametag colour and the minimap colour other players see.";
     svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
+    UiControlDesc match = UI_CONTROL_DESC_INIT;
+    match.kind = UI_CONTROL_TOGGLE;
+    match.label = "Match outfit colour";
+    match.binding = UI_BINDING_CONFIG_VAR;
+    match.config_var = app.config_.matchOutfitColor;
+    match.help_rml = "Use your outfit colour for your player colour.";
+    svc_ui->pane_add_control(mod_ctx, left, &match, nullptr);
+    add_button(left, "Reset to defaults", &OnlineApp::reset_player_options, &app);
     return MOD_OK;
 }
 
@@ -1637,10 +1656,16 @@ void OnlineApp::sync_window_closed(ModContext*, UiWindowHandle, void* data) {
     app.manualSyncWarpButton_ = 0;
 }
 
+bool OnlineApp::player_colour_locked(ModContext*, void* data) {
+    return static_cast<OnlineApp*>(data)->bool_value(
+        static_cast<OnlineApp*>(data)->config_.matchOutfitColor, true);
+}
+
 void OnlineApp::reset_player_options(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     svc_config->set_string(mod_ctx, app.config_.outfitColor, "");
     svc_config->set_string(mod_ctx, app.config_.playerColor, "");
+    svc_config->set_bool(mod_ctx, app.config_.matchOutfitColor, true);
 }
 
 void OnlineApp::open_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }

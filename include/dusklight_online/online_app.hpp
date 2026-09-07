@@ -37,6 +37,7 @@ private:
         ConfigVarHandle playerName = 0;
         ConfigVarHandle playerColor = 0;
         ConfigVarHandle outfitColor = 0;
+        ConfigVarHandle matchOutfitColor = 0;
         ConfigVarHandle directRoom = 0;
         ConfigVarHandle bindHost = 0;
         ConfigVarHandle publicHost = 0;
@@ -149,6 +150,8 @@ public:
     static void settings_window_closed(ModContext*, UiWindowHandle, void*);
     static void sync_window_closed(ModContext*, UiWindowHandle, void*);
     static void reset_player_options(ModContext*, void*);
+    static bool player_colour_locked(ModContext*, void*);
+    void match_player_colour();
     static void open_pressed(ModContext*, void*);
     static void settings_pressed(ModContext*, void*);
     static void sync_menu_pressed(ModContext*, void*);
