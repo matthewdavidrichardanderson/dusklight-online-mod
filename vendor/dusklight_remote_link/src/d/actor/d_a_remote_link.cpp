@@ -32,6 +32,7 @@
 #include "d/actor/d_a_midna.h"
 #include "d/actor/d_a_nbomb.h"
 #include "d/d_bomb.h"
+#include "d/d_bg_s_gnd_chk.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item_data.h"
 #include "d/d_particle.h"
@@ -4082,6 +4083,25 @@ int daRemoteLink_c::Execute() {
         mPvpMidnaBindActive = false;
         stopRemoteActiveSounds();
         return TRUE;
+    }
+
+    // Refresh lighting inputs on simulation ticks, never retain a collision
+    // polygon across frames or query the scene during teardown.
+    tevStr.room_no = fopAcM_GetRoomNo(this);
+    tevStr.YukaCol = 0xFF;
+    if (mHasRemotePose && mRemotePresentationVisible) {
+        dBgS_LinkGndChk ground;
+        cXyz probe = current.pos;
+        probe.y += 50.0f;
+        ground.SetPos(&probe);
+        ground.SetActorPid(fopAcM_GetID(this));
+        if (dComIfG_Bgsp().GroundCross(&ground) != -G_CM3D_F_INF) {
+            tevStr.YukaCol = dComIfG_Bgsp().GetPolyColor(ground);
+            const int groundRoom = dComIfG_Bgsp().GetRoomId(ground);
+            if (groundRoom >= 0 && groundRoom < 64) {
+                tevStr.room_no = groundRoom;
+            }
+        }
     }
 
     if (!mRemotePresentationVisible) {
