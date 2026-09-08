@@ -30,31 +30,45 @@ if (NOT DUSKLIGHT_VERSION)
     set(DUSKLIGHT_VERSION "83f50329d84c89722f5fa65e084a157d8cb4b9a1")
 endif ()
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
-add_subdirectory("${DUSKLIGHT_DIR}/sdk" dusklight-sdk EXCLUDE_FROM_ALL)
+if (PROJECT_IS_TOP_LEVEL)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
+    add_subdirectory("${DUSKLIGHT_DIR}/sdk" dusklight-sdk EXCLUDE_FROM_ALL)
+else ()
+    # Bundled builds must use the same game headers and SDK as their host.
+    set(DUSKLIGHT_DIR "${CMAKE_SOURCE_DIR}")
+endif ()
 
 include(FetchContent)
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.12.0
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.12.0
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+endif ()
 
-set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    zstd
-    GIT_REPOSITORY https://github.com/facebook/zstd.git
-    GIT_TAG v1.5.7
-    GIT_SHALLOW TRUE
-    SOURCE_SUBDIR build/cmake
-)
-FetchContent_MakeAvailable(zstd)
+if (NOT TARGET libzstd_static AND NOT TARGET zstd::libzstd)
+    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        zstd
+        GIT_REPOSITORY https://github.com/facebook/zstd.git
+        GIT_TAG v1.5.7
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR build/cmake
+    )
+    FetchContent_MakeAvailable(zstd)
+endif ()
+if (TARGET libzstd_static)
+    set(ONLINE_ZSTD_TARGET libzstd_static)
+else ()
+    set(ONLINE_ZSTD_TARGET zstd::libzstd)
+endif ()
 
 # The native world-label renderer uses a private ImGui font atlas. No host
 # ImGui internals are imported.
@@ -257,6 +271,7 @@ add_mod(dusklight_online
         src/online_app.cpp
         ${ONLINE_CORE_SOURCES}
         ${ONLINE_GAME_SOURCES}
+    BUNDLE
     MOD_JSON mod.json
     RES_DIR "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}"
 )
@@ -275,13 +290,15 @@ target_include_directories(dusklight_online PRIVATE
 target_compile_definitions(dusklight_online PRIVATE fpcNm_REMOTE_LINK_e=0x7FFE)
 target_link_libraries(dusklight_online PRIVATE
     nlohmann_json::nlohmann_json
-    libzstd_static
+    ${ONLINE_ZSTD_TARGET}
     dusklight_online_imgui
     ${CMAKE_DL_LIBS}
 )
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LineInterpolationImports.cmake")
+    if (PROJECT_IS_TOP_LEVEL)
+        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LineInterpolationImports.cmake")
+    endif ()
     # MSVC otherwise records the absolute build-machine PDB path in mod.dll's
     # PE debug directory. Keep distributed .dusk packages free of usernames
     # and local workspace paths while retaining a useful PDB basename.
@@ -290,7 +307,7 @@ endif ()
 
 # The relay is intentionally a standalone/headless operator process. It uses
 # the same invite-code source as the mod so endpoint codes cannot drift.
-option(DUSKLIGHT_ONLINE_BUILD_RELAY "Build the desktop relay operator tools" ON)
+option(DUSKLIGHT_ONLINE_BUILD_RELAY "Build the desktop relay operator tools" ${PROJECT_IS_TOP_LEVEL})
 include("${CMAKE_CURRENT_SOURCE_DIR}/tools/multiplayer_relay/version.cmake")
 if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(dusklight_online_relay
@@ -336,7 +353,7 @@ if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQ
     endif ()
 endif ()
 
-option(DUSKLIGHT_ONLINE_BUILD_TESTS "Build standalone online core tests" ON)
+option(DUSKLIGHT_ONLINE_BUILD_TESTS "Build standalone online core tests" ${PROJECT_IS_TOP_LEVEL})
 if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     enable_testing()
     add_executable(dusklight_online_player_color_test tests/player_color_test.cpp src/game/player_color.cpp)
@@ -388,7 +405,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_transport_test PRIVATE include src)
     target_link_libraries(dusklight_online_transport_test PRIVATE
         nlohmann_json::nlohmann_json
-        libzstd_static
+        ${ONLINE_ZSTD_TARGET}
     )
     if (WIN32)
         target_link_libraries(dusklight_online_transport_test PRIVATE ws2_32)
@@ -403,7 +420,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_udp_codec_test PRIVATE include src)
     target_link_libraries(dusklight_online_udp_codec_test PRIVATE
         nlohmann_json::nlohmann_json
-        libzstd_static
+        ${ONLINE_ZSTD_TARGET}
     )
     add_test(NAME dusklight_online_udp_codec COMMAND dusklight_online_udp_codec_test)
 
@@ -451,7 +468,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_relay_transport_client_test PRIVATE include src)
     target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE
         nlohmann_json::nlohmann_json
-        libzstd_static
+        ${ONLINE_ZSTD_TARGET}
     )
     if (WIN32)
         target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE ws2_32)

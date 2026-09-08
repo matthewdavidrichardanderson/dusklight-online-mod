@@ -17,11 +17,20 @@ DEFINE_HOOK_SYMBOL(
     bool(Z2LinkSoundStarter*, JAISoundID, JAISoundHandle*, const JGeometry::TVec3<f32>*, u32,
          f32, f32, f32, f32, f32, u32),
     LinkStarterSoundHook);
+// MSVC cannot constant-initialize this multiple-inheritance member pointer.
+// Other platforms resolve the exact overload through its typed declaration.
+#if defined(_WIN32)
 DEFINE_HOOK_SYMBOL(
     "?startSound@Z2SoundStarter@@UEAA_NVJAISoundID@@PEAVJAISoundHandle@@PEBU?$TVec3@M@JGeometry@@IMMMMMI@Z",
     bool(Z2SoundStarter*, JAISoundID, JAISoundHandle*, const JGeometry::TVec3<f32>*, u32,
          f32, f32, f32, f32, f32, u32),
     BaseStarterSoundHook);
+#else
+using BaseStartSound = bool (Z2SoundStarter::*)(
+    JAISoundID, JAISoundHandle*, const JGeometry::TVec3<f32>*, u32,
+    f32, f32, f32, f32, f32, u32);
+DEFINE_HOOK(static_cast<BaseStartSound>(&Z2SoundStarter::startSound), BaseStarterSoundHook);
+#endif
 DEFINE_HOOK_SYMBOL(
     "Z2CreatureLink::startLinkSoundLevel",
     JAISoundHandle*(Z2CreatureLink*, JAISoundID, u32, s8),

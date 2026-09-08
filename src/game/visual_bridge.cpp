@@ -41,9 +41,9 @@ namespace dusklight_online::game {
 
 DEFINE_HOOK(&dDlst_list_c::drawOpaDrawList, OpaqueDrawListHook);
 DEFINE_HOOK_SYMBOL("dMeterMap_c::draw", void(dMeterMap_c*), MeterMapDrawHook);
-DEFINE_HOOK_SYMBOL("?PostDraw@ImGuiConsole@dusk@@QEAAXXZ", void(void*),
+DEFINE_HOOK_SYMBOL("dusk::ImGuiConsole::PostDraw", void(void*),
                    HostImGuiPostDrawHook);
-DEFINE_HOOK_SYMBOL("?GetCurrentContext@ImGui@@YAPEAUImGuiContext@@XZ",
+DEFINE_HOOK_SYMBOL("ImGui::GetCurrentContext",
                    ImGuiContext*(), HostImGuiGetCurrentContextSymbol);
 
 namespace {
