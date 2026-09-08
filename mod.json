@@ -3,5 +3,57 @@
   "name": "Dusklight Online",
   "version": "0.1.0",
   "author": "mdra5000",
-  "description": "Dusklight Online Multiplayer"
+  "description": "Dusklight Online Multiplayer",
+  "abi": 1,
+  "imports": [
+    {
+      "service_id": "dev.twilitrealm.dusklight.config",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.hook",
+      "major": 1,
+      "min_minor": 1,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.item",
+      "major": 2,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.log",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.resource",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.save",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.texture",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.ui",
+      "major": 2,
+      "min_minor": 2,
+      "optional": false
+    }
+  ],
+  "exports": []
 }
