@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
-project(dusklight_online LANGUAGES CXX)
+project(dusklight_online LANGUAGES C CXX)
+find_package(Threads REQUIRED)
+link_libraries(Threads::Threads)
 
 # Distribution builds must not expose the local Windows account or workspace
 # through compiler diagnostics, __FILE__ strings, CodeView records, or linked
@@ -241,7 +243,16 @@ set(ONLINE_INVITE_SOURCES
     src/net/invite_code.cpp
 )
 
+set(ONLINE_CONNECTION_SOURCES
+    src/net/reliable_udp.cpp
+    src/net/datagram_scheduler.cpp
+    src/net/udp_connection.cpp
+    vendor/kcp/ikcp.c
+)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/vendor/kcp")
+
 set(ONLINE_CORE_SOURCES
+    ${ONLINE_CONNECTION_SOURCES}
     ${ONLINE_INVITE_SOURCES}
     src/net/transport.cpp
     src/net/udp_codec.cpp
@@ -312,22 +323,23 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/tools/multiplayer_relay/version.cmake")
 if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(dusklight_online_relay
         tools/multiplayer_relay/relay.cpp
+        ${ONLINE_CONNECTION_SOURCES}
         ${ONLINE_INVITE_SOURCES}
     )
     target_compile_features(dusklight_online_relay PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_relay PRIVATE include src)
-    target_link_libraries(dusklight_online_relay PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(dusklight_online_relay PRIVATE nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
     target_compile_definitions(dusklight_online_relay PRIVATE
         DUSKLIGHT_RELAY_VERSION="${DUSKLIGHT_ONLINE_RELAY_VERSION}")
 
     if (WIN32)
-        target_link_libraries(dusklight_online_relay PRIVATE ws2_32)
+        target_link_libraries(dusklight_online_relay PRIVATE ws2_32 winmm)
         if (MSVC)
-            # The relay is distributed as a single operator executable. Avoid
-            # requiring a matching VC redistributable and do not expose the
-            # build machine's absolute PDB path in the PE debug directory.
+            # This combined build shares the mod's Zstandard/CRT configuration.
+            # Use tools/multiplayer_relay for the standalone static-CRT
+            # distribution. Keep the absolute PDB path out of this binary too.
             set_property(TARGET dusklight_online_relay PROPERTY
-                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
             target_link_options(dusklight_online_relay PRIVATE
                 "/PDBALTPATH:dusklight_online_relay.pdb")
         endif ()
@@ -471,14 +483,40 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${ONLINE_ZSTD_TARGET}
     )
     if (WIN32)
-        target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE ws2_32)
+        target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE ws2_32 winmm)
     endif ()
+
+    add_executable(dusklight_online_pose_ack_history_test tests/pose_ack_history_test.cpp)
+    target_compile_features(dusklight_online_pose_ack_history_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_pose_ack_history_test PRIVATE include)
+    add_test(NAME dusklight_online_pose_ack_history COMMAND dusklight_online_pose_ack_history_test)
 
     add_executable(dusklight_online_pose_playback_test tests/pose_playback_test.cpp)
     target_compile_features(dusklight_online_pose_playback_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_pose_playback_test PRIVATE include)
     add_test(NAME dusklight_online_pose_playback COMMAND dusklight_online_pose_playback_test)
 
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    add_library(dusklight_online_udp_test_client SHARED
+        tests/udp_test_client.cpp ${ONLINE_CONNECTION_SOURCES})
+    target_compile_features(dusklight_online_udp_test_client PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_udp_test_client PRIVATE include)
+    target_link_libraries(dusklight_online_udp_test_client PRIVATE nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
+    if(WIN32)
+        target_link_libraries(dusklight_online_udp_test_client PRIVATE ws2_32)
+    endif()
+    add_executable(dusklight_online_reliability_test
+        tests/reliable_udp/reliability_test.cpp ${ONLINE_CONNECTION_SOURCES})
+    target_compile_features(dusklight_online_reliability_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_reliability_test PRIVATE include)
+    if(WIN32)
+        target_link_libraries(dusklight_online_reliability_test PRIVATE ws2_32)
+    endif()
+    add_executable(dusklight_online_reliable_json_test tests/reliable_json_test.cpp)
+    target_compile_features(dusklight_online_reliable_json_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_reliable_json_test PRIVATE include)
+    target_link_libraries(dusklight_online_reliable_json_test PRIVATE nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
+    add_test(NAME dusklight_online_reliable_json COMMAND dusklight_online_reliable_json_test "${CMAKE_CURRENT_SOURCE_DIR}/tests/reliable_udp/full_progression_upper.json")
     # Keep assertion-based tests effective in Release too, and prevent Windows
     # assertion/abort dialogs from blocking unattended verification.
     get_property(online_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
@@ -486,22 +524,24 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         if (test_target MATCHES "_test$")
             if (MSVC)
                 target_compile_options(${test_target} PRIVATE /UNDEBUG
-                    "/FI${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runtime.hpp")
+                    "$<$<COMPILE_LANGUAGE:CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runtime.hpp>")
             else ()
                 target_compile_options(${test_target} PRIVATE -UNDEBUG)
             endif ()
         endif ()
     endforeach ()
 
-    find_package(Python3 COMPONENTS Interpreter QUIET)
+    add_test(NAME dusklight_online_reliability COMMAND dusklight_online_reliability_test)
+    set_tests_properties(dusklight_online_reliability PROPERTIES TIMEOUT 30)
     if (Python3_Interpreter_FOUND AND TARGET dusklight_online_relay)
         add_test(
             NAME dusklight_online_relay_integration
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/multiplayer_relay/test_relay.py"
                 --relay $<TARGET_FILE:dusklight_online_relay>
+                --udp-library $<TARGET_FILE:dusklight_online_udp_test_client>
         )
-        set_tests_properties(dusklight_online_relay_integration PROPERTIES TIMEOUT 30)
+        set_tests_properties(dusklight_online_relay_integration PROPERTIES TIMEOUT 60)
         add_test(NAME dusklight_online_relay_version
                  COMMAND $<TARGET_FILE:dusklight_online_relay> --version)
         set_tests_properties(dusklight_online_relay_version PROPERTIES
@@ -514,6 +554,6 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 $<TARGET_FILE:dusklight_online_relay>
                 $<TARGET_FILE:dusklight_online_relay_transport_client_test>
         )
-        set_tests_properties(dusklight_online_relay_transport PROPERTIES TIMEOUT 20)
+        set_tests_properties(dusklight_online_relay_transport PROPERTIES TIMEOUT 60)
     endif ()
 endif ()

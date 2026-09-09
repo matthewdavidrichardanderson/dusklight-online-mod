@@ -1,4 +1,7 @@
+#include "dusklight_online/net/reliable_json.hpp"
 #include "dusk/multiplayer/invite_code.hpp"
+#include "dusklight_online/net/udp_connection.hpp"
+#include <thread>
 #include "nlohmann/json.hpp"
 
 #if _WIN32
@@ -7,6 +10,7 @@
     #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <mmsystem.h>
     using socket_t = SOCKET;
     static constexpr int kSendFlags = 0;
 #else
@@ -55,6 +59,7 @@
 namespace {
 
 using json = nlohmann::json;
+using dusklight_online::net::UdpConnection;
 
 constexpr int kProtocolVersion = 2;
 constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
@@ -384,10 +389,9 @@ public:
 
     ~Relay() {
         for (auto& entry : mClients) {
-            close_socket(entry.second.sock);
+            mConnections.disconnect(entry.second.sock);
         }
-        close_socket(mListenSock);
-        close_socket(mUdpSock);
+        mConnections.close();
 #if _WIN32
         if (mWinsockStarted) {
             WSACleanup();
@@ -397,6 +401,13 @@ public:
 
     bool run() {
 #if _WIN32
+        // Windows otherwise rounds the 1 ms relay and 5 ms carrier sleeps to
+        // coarse timer ticks. Batched poses then supersede each other before
+        // the game consumes them. Scope the finer cadence to the running server.
+        struct TimerResolution {
+            bool active = timeBeginPeriod(1) == TIMERR_NOERROR;
+            ~TimerResolution() { if (active) timeEndPeriod(1); }
+        } timerResolution;
         WSADATA wsaData{};
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
             std::cerr << "WSAStartup failed\n";
@@ -405,50 +416,12 @@ public:
         mWinsockStarted = true;
 #endif
 
-        mListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (mListenSock == INVALID_SOCKET) {
-            std::cerr << "socket failed\n";
+        if (!mConnections.open(mOptions.host, static_cast<uint16_t>(mOptions.port),
+                               FD_SETSIZE - 2, true)) {
+            std::cerr << "UDP listen failed\n";
             return false;
         }
-        if (!suppress_sigpipe(mListenSock)) {
-            std::cerr << "failed to suppress SIGPIPE\n";
-            return false;
-        }
-
-        int reuse = 1;
-        setsockopt(mListenSock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
-                   sizeof(reuse));
-
-        if (!set_nonblocking(mListenSock)) {
-            std::cerr << "failed to set listen socket nonblocking\n";
-            return false;
-        }
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(mOptions.port));
-        if (inet_pton(AF_INET, mOptions.host.c_str(), &addr.sin_addr) != 1) {
-            std::cerr << "invalid host: " << mOptions.host << "\n";
-            return false;
-        }
-
-        if (bind(mListenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
-            listen(mListenSock, SOMAXCONN) != 0)
-        {
-            std::cerr << "bind/listen failed\n";
-            return false;
-        }
-
-        mUdpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (mUdpSock == INVALID_SOCKET || !set_nonblocking(mUdpSock) ||
-            bind(mUdpSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
-        {
-            std::cerr << "UDP bind failed\n";
-            return false;
-        }
-
-        std::cout << "TP relay listening on TCP+UDP " << mOptions.host << ":"
-                  << mOptions.port << "\n";
+        std::cout << "TP relay listening on UDP " << mOptions.host << ":" << mOptions.port << "\n";
         while (true) {
             tick();
         }
@@ -456,44 +429,9 @@ public:
 
 private:
     void tick() {
-        fd_set readfds;
-        fd_set writefds;
-        FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
-        FD_SET(mListenSock, &readfds);
-        FD_SET(mUdpSock, &readfds);
-        socket_t maxSock = std::max(mListenSock, mUdpSock);
-
-        for (const auto& entry : mClients) {
-            const Client& client = entry.second;
-            if (!client.closeAfterFlush && !client.disconnectRequested) {
-                FD_SET(client.sock, &readfds);
-            }
-            if (!client.txQueue.empty() && !client.disconnectRequested) {
-                FD_SET(client.sock, &writefds);
-            }
-            if (entry.second.sock > maxSock) {
-                maxSock = entry.second.sock;
-            }
-        }
-
-        timeval timeout{0, 100000};
-#if _WIN32
-        const int result = select(0, &readfds, &writefds, nullptr, &timeout);
-#else
-        const int result = select(maxSock + 1, &readfds, &writefds, nullptr, &timeout);
-#endif
-        if (result < 0) {
-            return;
-        }
-
-        if (result > 0 && FD_ISSET(mListenSock, &readfds)) {
-            accept_client();
-        }
-        if (result > 0 && FD_ISSET(mUdpSock, &readfds)) {
-            receive_udp_datagrams();
-        }
-
+        mConnections.poll();
+        accept_client();
+        receive_udp_datagrams();
         std::vector<std::string> disconnected;
         for (auto& entry : mClients) {
             Client& client = entry.second;
@@ -501,19 +439,17 @@ private:
                 disconnected.push_back(client.id);
                 continue;
             }
-            if (result > 0 && FD_ISSET(client.sock, &readfds) &&
-                !read_from_client(client))
+            if (!client.closeAfterFlush && !read_from_client(client))
             {
                 disconnected.push_back(client.id);
                 continue;
             }
-            if (result > 0 && FD_ISSET(client.sock, &writefds) &&
-                !flush_client(client))
+            if (!flush_client(client))
             {
                 disconnected.push_back(client.id);
                 continue;
             }
-            if (client.closeAfterFlush && client.txQueue.empty()) {
+            if (client.closeAfterFlush && client.txQueue.empty() && mConnections.drained(client.sock)) {
                 disconnected.push_back(client.id);
             }
         }
@@ -535,6 +471,7 @@ private:
         for (const std::string& clientId : disconnected) {
             remove_client(clientId);
         }
+        mConnections.wait_for_activity(5);
         if (mOptions.verbose || relay_packet_trace_enabled()) {
             std::cout.flush();
         }
@@ -542,46 +479,19 @@ private:
 
     void accept_client() {
         while (true) {
+            UdpConnection::Address endpoint;
+            auto accepted = mConnections.accept(endpoint);
+            if (accepted == UdpConnection::invalid) return;
             sockaddr_in peerAddr{};
-#if _WIN32
-            int peerLen = sizeof(peerAddr);
-#else
-            socklen_t peerLen = sizeof(peerAddr);
-#endif
-            socket_t accepted = accept(mListenSock, reinterpret_cast<sockaddr*>(&peerAddr), &peerLen);
-            if (accepted == INVALID_SOCKET) {
-                return;
-            }
-            if (!suppress_sigpipe(accepted)) {
-                close_socket(accepted);
-                log("connection rejected: sigpipe_setup_failed");
-                continue;
-            }
-
-#if !_WIN32
-            if (accepted >= FD_SETSIZE) {
-                close_socket(accepted);
-                log("connection rejected: descriptor_out_of_range");
-                continue;
-            }
-#endif
+            peerAddr.sin_family = AF_INET;
+            peerAddr.sin_addr.s_addr = endpoint.ipv4;
+            peerAddr.sin_port = htons(endpoint.port);
             if (mClients.size() >= static_cast<size_t>(FD_SETSIZE - 2)) {
-                close_socket(accepted);
-                log("connection rejected: server_full");
+                mConnections.disconnect(accepted);
                 continue;
             }
-
-            if (!set_nonblocking(accepted)) {
-                char peerHost[INET_ADDRSTRLEN] = {};
-                inet_ntop(AF_INET, &peerAddr.sin_addr, peerHost, sizeof(peerHost));
-                log("connection rejected: nonblocking_failed peer=" +
-                    std::string(peerHost) + ":" + std::to_string(ntohs(peerAddr.sin_port)));
-                close_socket(accepted);
-                continue;
-            }
-
             Client client;
-            client.sock = accepted;
+            client.sock = static_cast<socket_t>(accepted);
             client.id = make_id("client");
             client.udpToken = make_id("udp");
             char peerHost[INET_ADDRSTRLEN] = {};
@@ -598,7 +508,7 @@ private:
         std::array<char, 4096> buffer{};
         size_t readThisTick = 0;
         while (true) {
-            const int read = recv(client.sock, buffer.data(), static_cast<int>(buffer.size()), 0);
+            const int read = mConnections.receive(client.sock, buffer.data(), buffer.size());
             if (read > 0) {
                 readThisTick += static_cast<size_t>(read);
                 client.rxBuffer.append(buffer.data(), static_cast<size_t>(read));
@@ -617,7 +527,10 @@ private:
                     }
 
                     try {
-                        route_message(client, json::parse(line));
+                        route_message(client, dusklight_online::net::decode_reliable_json(line));
+                    } catch (const dusklight_online::net::ReliableJsonError&) {
+                        reject_and_close(client, "invalid_compressed_json");
+                        return true;
                     } catch (const json::exception&) {
                         send_error(client, "invalid_json");
                     }
@@ -639,7 +552,7 @@ private:
             if (read == 0) {
                 return false;
             }
-            if (would_block()) {
+            if (read == -1) {
                 return true;
             }
             return false;
@@ -959,26 +872,19 @@ private:
         if (!client.udpAddrKnown) {
             return;
         }
-        sendto(mUdpSock, reinterpret_cast<const char*>(bytes), static_cast<int>(size), 0,
-               reinterpret_cast<const sockaddr*>(&client.udpAddr), sizeof(client.udpAddr));
+        mConnections.send_realtime({client.udpAddr.sin_addr.s_addr, ntohs(client.udpAddr.sin_port)}, {bytes, size});
     }
 
     void receive_udp_datagrams() {
         std::array<uint8_t, kMaxUdpDatagramBytes> packet{};
         for (size_t receivedThisTick = 0; receivedThisTick < 512; ++receivedThisTick) {
+            UdpConnection::Address endpoint;
+            const int received = mConnections.receive_realtime(endpoint, packet);
+            if (received < 0) return;
             sockaddr_in from{};
-#if _WIN32
-            int fromLength = sizeof(from);
-#else
-            socklen_t fromLength = sizeof(from);
-#endif
-            const int received =
-                recvfrom(mUdpSock, reinterpret_cast<char*>(packet.data()),
-                         static_cast<int>(packet.size()), 0,
-                         reinterpret_cast<sockaddr*>(&from), &fromLength);
-            if (received < 0) {
-                return;
-            }
+            from.sin_family = AF_INET;
+            from.sin_addr.s_addr = endpoint.ipv4;
+            from.sin_port = htons(endpoint.port);
             if (static_cast<size_t>(received) < sizeof(UdpRelayHeader)) {
                 continue;
             }
@@ -1005,6 +911,7 @@ private:
                 const std::string token(reinterpret_cast<const char*>(payload),
                                         header.payloadSize);
                 if (token == sender.udpToken) {
+                    mConnections.bind_realtime(sender.sock, {from.sin_addr.s_addr, ntohs(from.sin_port)});
                     const bool wasKnown = sender.udpAddrKnown;
                     const bool endpointChanged =
                         !wasKnown || !same_udp_endpoint(sender.udpAddr, from);
@@ -1139,7 +1046,7 @@ private:
         Client departed;
         departed.id = clientId;
         departed.roomId = roomId;
-        close_socket(clientIt->second.sock);
+        mConnections.disconnect(clientIt->second.sock);
         mClients.erase(clientIt);
 
         if (!roomId.empty()) {
@@ -1173,7 +1080,7 @@ private:
     }
 
     bool send_json(Client& client, const json& message) {
-        std::string bytes = message.dump();
+        std::string bytes = dusklight_online::net::encode_reliable_json(message);
         bytes.push_back('\n');
         trace_packet_tx(client.id, message, bytes.size());
         if (bytes.size() > kMaxQueuedBytes ||
@@ -1191,27 +1098,12 @@ private:
 
     bool flush_client(Client& client) {
         while (!client.txQueue.empty()) {
-            const std::string& bytes = client.txQueue.front();
-            const char* cursor = bytes.data() + client.txOffset;
-            const size_t remainingBytes = bytes.size() - client.txOffset;
-            const int sendBytes = static_cast<int>(
-                std::min(remainingBytes, static_cast<size_t>(std::numeric_limits<int>::max())));
-            const int sent = send(client.sock, cursor, sendBytes, kSendFlags);
-            if (sent > 0) {
-                client.txOffset += static_cast<size_t>(sent);
-                client.txQueuedBytes -= static_cast<size_t>(sent);
-                if (client.txOffset == bytes.size()) {
-                    client.txQueue.pop_front();
-                    client.txOffset = 0;
-                }
-                continue;
-            }
-            if (would_block()) {
-                return true;
-            }
-            return false;
+            const auto& bytes = client.txQueue.front();
+            if (!mConnections.send(client.sock, bytes.data(), bytes.size())) return false;
+            client.txQueuedBytes -= bytes.size();
+            client.txQueue.pop_front();
         }
-        return true;
+        return mConnections.alive(client.sock);
     }
 
     void send_error(Client& client, const std::string& error) {
@@ -1227,47 +1119,6 @@ private:
         if (client.txQueue.empty()) {
             client.disconnectRequested = true;
         }
-    }
-
-    static bool set_nonblocking(socket_t sock) {
-#if _WIN32
-        u_long nonblocking = 1;
-        return ioctlsocket(sock, FIONBIO, &nonblocking) == 0;
-#else
-        const int flags = fcntl(sock, F_GETFL, 0);
-        return flags >= 0 && fcntl(sock, F_SETFL, flags | O_NONBLOCK) == 0;
-#endif
-    }
-
-    static bool suppress_sigpipe(socket_t sock) {
-#if defined(__APPLE__)
-        int enabled = 1;
-        return setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0;
-#else
-        (void)sock;
-        return true;
-#endif
-    }
-
-    static void close_socket(socket_t& sock) {
-        if (sock == INVALID_SOCKET) {
-            return;
-        }
-#if _WIN32
-        closesocket(sock);
-#else
-        close(sock);
-#endif
-        sock = INVALID_SOCKET;
-    }
-
-    static bool would_block() {
-#if _WIN32
-        const int err = WSAGetLastError();
-        return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS;
-#else
-        return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS;
-#endif
     }
 
     static std::string make_id(std::string_view prefix) {
@@ -1298,8 +1149,7 @@ private:
     }
 
     Options mOptions;
-    socket_t mListenSock = INVALID_SOCKET;
-    socket_t mUdpSock = INVALID_SOCKET;
+    UdpConnection mConnections;
     std::map<std::string, Client> mClients;
     std::map<std::string, Room> mRooms;
 #if _WIN32

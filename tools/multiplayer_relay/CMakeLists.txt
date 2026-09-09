@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
 include("${CMAKE_CURRENT_LIST_DIR}/version.cmake")
-project(dusklight_online_relay VERSION ${DUSKLIGHT_ONLINE_RELAY_VERSION} LANGUAGES CXX)
+project(dusklight_online_relay VERSION ${DUSKLIGHT_ONLINE_RELAY_VERSION} LANGUAGES C CXX)
+find_package(Threads REQUIRED)
 
 include(FetchContent)
 
@@ -42,13 +43,39 @@ elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     )
 endif ()
 
+if (MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif ()
+if (NOT TARGET libzstd_static AND NOT TARGET zstd::libzstd)
+    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        zstd
+        GIT_REPOSITORY https://github.com/facebook/zstd.git
+        GIT_TAG v1.5.7
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR build/cmake
+    )
+    FetchContent_MakeAvailable(zstd)
+endif ()
+if (TARGET libzstd_static)
+    set(ONLINE_ZSTD_TARGET libzstd_static)
+else ()
+    set(ONLINE_ZSTD_TARGET zstd::libzstd)
+endif ()
+
+
 function(configure_relay_target target pdb_name)
     target_compile_features(${target} PRIVATE cxx_std_20)
     target_include_directories(${target} PRIVATE
         "${DUSKLIGHT_ONLINE_ROOT}/include"
         "${DUSKLIGHT_ONLINE_ROOT}/src"
+        "${DUSKLIGHT_ONLINE_ROOT}/vendor/kcp"
     )
-    target_link_libraries(${target} PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(${target} PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
     target_compile_definitions(${target} PRIVATE
         DUSKLIGHT_RELAY_VERSION="${PROJECT_VERSION}")
     if (MSVC)
@@ -68,11 +95,16 @@ set(DUSKLIGHT_RELAY_COMMON_SOURCES
 
 add_executable(dusklight_online_relay
     relay.cpp
+    "${DUSKLIGHT_ONLINE_ROOT}/src/net/reliable_udp.cpp"
+    "${DUSKLIGHT_ONLINE_ROOT}/src/net/datagram_scheduler.cpp"
+    "${DUSKLIGHT_ONLINE_ROOT}/src/net/udp_connection.cpp"
+    "${DUSKLIGHT_ONLINE_ROOT}/vendor/kcp/ikcp.c"
     ${DUSKLIGHT_RELAY_COMMON_SOURCES}
 )
 configure_relay_target(dusklight_online_relay dusklight_online_relay.pdb)
+target_link_libraries(dusklight_online_relay PRIVATE ${ONLINE_ZSTD_TARGET})
 if (WIN32)
-    target_link_libraries(dusklight_online_relay PRIVATE ws2_32)
+    target_link_libraries(dusklight_online_relay PRIVATE ws2_32 winmm)
 endif ()
 
 if (WIN32 AND DUSKLIGHT_RELAY_BUILD_LAUNCHER)
@@ -97,29 +129,42 @@ if (DUSKLIGHT_RELAY_BUILD_TESTS)
     add_test(NAME dusklight_relay_invite_code COMMAND dusklight_relay_invite_code_test)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_library(dusklight_online_udp_test_client SHARED
+        "${DUSKLIGHT_ONLINE_ROOT}/tests/udp_test_client.cpp"
+        "${DUSKLIGHT_ONLINE_ROOT}/src/net/reliable_udp.cpp"
+        "${DUSKLIGHT_ONLINE_ROOT}/src/net/datagram_scheduler.cpp"
+        "${DUSKLIGHT_ONLINE_ROOT}/src/net/udp_connection.cpp"
+        "${DUSKLIGHT_ONLINE_ROOT}/vendor/kcp/ikcp.c")
+    configure_relay_target(dusklight_online_udp_test_client udp_test_client.pdb)
+    target_link_libraries(dusklight_online_udp_test_client PRIVATE ${ONLINE_ZSTD_TARGET})
+    if(WIN32)
+        target_link_libraries(dusklight_online_udp_test_client PRIVATE ws2_32)
+    endif()
     add_test(
         NAME dusklight_relay_integration
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_relay.py"
                 --relay $<TARGET_FILE:dusklight_online_relay>
+                --udp-library $<TARGET_FILE:dusklight_online_udp_test_client>
     )
-    set_tests_properties(dusklight_relay_integration PROPERTIES TIMEOUT 30)
+    set_tests_properties(dusklight_relay_integration PROPERTIES TIMEOUT 60)
     add_test(NAME dusklight_relay_version
              COMMAND $<TARGET_FILE:dusklight_online_relay> --version)
     set_tests_properties(dusklight_relay_version PROPERTIES
         PASS_REGULAR_EXPRESSION "dusklight_online_relay ${PROJECT_VERSION}")
 endif ()
 
-install(TARGETS dusklight_online_relay RUNTIME DESTINATION .)
+install(TARGETS dusklight_online_relay RUNTIME DESTINATION . COMPONENT Relay)
 if (TARGET dusklight_online_relay_launcher)
-    install(TARGETS dusklight_online_relay_launcher RUNTIME DESTINATION .)
+    install(TARGETS dusklight_online_relay_launcher RUNTIME DESTINATION . COMPONENT Relay)
 endif ()
 install(FILES
     README.md
     "${DUSKLIGHT_ONLINE_ROOT}/LICENSE.md"
     THIRD_PARTY_NOTICES.md
-    DESTINATION .
+    DESTINATION . COMPONENT Relay
 )
-install(FILES PROTOCOL.md DEPLOYMENT.md SYNCING.md DESTINATION docs)
+install(FILES PROTOCOL.md DEPLOYMENT.md SYNCING.md DESTINATION docs COMPONENT Relay)
+install(FILES "${DUSKLIGHT_ONLINE_ROOT}/vendor/kcp/LICENSE" DESTINATION licenses RENAME KCP.txt COMPONENT Relay)
 
 set(CPACK_GENERATOR ZIP)
 set(CPACK_PACKAGE_NAME "dusklight-online-relay")
@@ -130,4 +175,5 @@ set(CPACK_PACKAGE_FILE_NAME
 set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/package")
 set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
 set(CPACK_RESOURCE_FILE_LICENSE "${DUSKLIGHT_ONLINE_ROOT}/LICENSE.md")
+set(CPACK_INSTALL_CMAKE_PROJECTS "${CMAKE_BINARY_DIR};${PROJECT_NAME};Relay;/")
 include(CPack)

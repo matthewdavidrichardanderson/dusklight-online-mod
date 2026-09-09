@@ -2,8 +2,8 @@
 
 ## Network requirements
 
-The relay listens on one numbered port for both TCP and UDP. Allow inbound
-traffic for both protocols in the operating-system and server firewalls. The
+The relay listens on one UDP port. Allow inbound UDP traffic in the
+operating-system and server firewalls. TCP is no longer used by the relay. The
 default port is `34197`.
 
 Minimum practical private-server size is one CPU core and 1 GB RAM. Bandwidth
@@ -45,5 +45,5 @@ damage game saves because the relay never stores save data.
 
 Bind locally to `0.0.0.0` and advertise the VPN provider's public address and
 forwarded port. If either public value changes, restart the relay and distribute
-the new relay code. Existing TCP and UDP sessions cannot survive an endpoint
+the new relay code. Existing UDP sessions cannot survive an endpoint
 change.

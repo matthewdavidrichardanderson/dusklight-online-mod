@@ -14,6 +14,9 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
+from udp_test_client import ReliableSocket
 
 
 GAMEPLAY_ROUTE_TYPES = (
@@ -99,24 +102,14 @@ def udp_packet(
 
 
 def reserve_port() -> int:
-    # The relay binds TCP and UDP to the same port. Windows may reserve a
-    # TCP-assigned ephemeral port for UDP, so check both before launching.
-    for _ in range(100):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp, \
-             socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
-            udp.bind(("127.0.0.1", 0))
-            port = int(udp.getsockname()[1])
-            try:
-                tcp.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            return port
-    raise RuntimeError("could not reserve a TCP/UDP test port")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 class RelayClient:
     def __init__(self, port: int) -> None:
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        self.sock = ReliableSocket(port, timeout=2.0)
         self.sock.settimeout(2.0)
         self.buffer = bytearray()
         self.port = port
@@ -148,7 +141,7 @@ class RelayClient:
             self.buffer.extend(chunk)
         line, _, rest = self.buffer.partition(b"\n")
         self.buffer = bytearray(rest)
-        return json.loads(line)
+        return json.loads(ReliableSocket.decode(line))
 
     def expect_type(self, message_type: str, timeout: float = 2.0) -> dict[str, Any]:
         message = self.receive(timeout)
@@ -205,7 +198,7 @@ class RelayProcess:
                 output = self.process.stdout.read() if self.process.stdout else ""
                 raise RuntimeError(f"relay exited during startup:\n{output}")
             try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=0.05):
+                with ReliableSocket(self.port, timeout=2.0):
                     return
             except OSError:
                 time.sleep(0.02)
@@ -279,6 +272,11 @@ class RelayTests(unittest.TestCase):
         client = RelayClient(self.relay.port)
         self.clients.append(client)
         return client
+
+    def test_malformed_compressed_frame_is_rejected(self):
+        client = self.client()
+        client.sock.sendall(b"Z1gg\n")
+        client.expect_error("invalid_compressed_json")
 
     def test_relay_operator_receives_endpoint_code(self) -> None:
         self.assertTrue(self.relay.relay_code_line.startswith("Relay code: TP1-"))
@@ -572,7 +570,9 @@ class RelayTests(unittest.TestCase):
             client.receive(1.0)
 
     def test_input_line_limit_returns_error_then_closes(self) -> None:
-        client = self.client()
+        # Authenticate first so the deliberately short hello deadline does not
+        # race a paced half-megabyte transfer. Hello timeout is tested separately.
+        client, _ = self.join("Oversize", "oversize-line")
         client.send_bytes(b"x" * (512 * 1024 + 1) + b"\n")
         client.expect_error("message_too_large", 2.0)
         with self.assertRaises(ConnectionError):
@@ -723,10 +723,12 @@ class RelayTests(unittest.TestCase):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--relay", required=True, type=Path)
+    parser.add_argument("--udp-library", required=True, type=Path)
     args, remaining = parser.parse_known_args()
     if not args.relay.is_file():
         parser.error(f"relay executable does not exist: {args.relay}")
 
+    ReliableSocket.configure(args.udp_library.resolve())
     RelayTests.executable = args.relay.resolve()
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(RelayTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)

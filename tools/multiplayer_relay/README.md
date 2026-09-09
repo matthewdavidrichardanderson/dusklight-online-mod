@@ -1,11 +1,16 @@
 # Dusklight Online Relay
 
 The relay is maintained and released with Dusklight Online. It groups clients
-into password-protected lobbies and routes reliable gameplay messages over TCP
-plus latency-sensitive visual traffic over authenticated UDP.
+into password-protected lobbies and routes reliable gameplay messages through KCP over UDP, alongside independent
+latency-sensitive visual datagrams on the same UDP port.
 
 The server does not require Dusklight, the game, the mod SDK, or a game
 installation at runtime. It does not persist saves or gameplay state.
+
+Relay 2.1.1 updates reliable-UDP recovery without changing the 2.1.0 wire
+format. Existing 2.1.0 UDP clients/relays can connect; update both ends for
+the recovery improvement in both directions. TCP-era relays remain incompatible.
+
 
 ## Download and run on Windows
 
@@ -25,7 +30,7 @@ The command-line equivalent is:
     --verbose
 ```
 
-Open the selected port for both TCP and UDP. `--host` is the local bind address;
+Open the selected port for UDP. `--host` is the local bind address;
 `--public-host` is the endpoint encoded into the relay code and does not need to
 be a local interface.
 
@@ -78,7 +83,7 @@ cmake --build .\build --config RelWithDebInfo --target dusklight_online_relay
 ## Verification
 
 The relay-only test suite checks invite codes, three-client lobby behavior,
-framing, validation, authenticated TCP/UDP routing, owner transfer, settings,
+framing, validation, authenticated reliable/realtime UDP routing, owner transfer, settings,
 reliable acknowledgements, supported gameplay messages, and version reporting.
 
 Per-packet tracing is disabled by default because pose traffic is extremely
@@ -86,7 +91,11 @@ verbose. Set `DUSK_MP_RELAY_PACKET_TRACE=1` when a packet-size trace is needed.
 
 ## Compatibility and upgrades
 
-Clients and relays currently use protocol version 2. Relay capabilities are
+This transport migration requires updating the relay and every client together.
+Older TCP-based clients/relays cannot communicate with these builds. The relay
+code, port number, lobby controls and gameplay JSON remain unchanged.
+
+The application JSON protocol remains version 2. Relay capabilities are
 negotiated independently so unsupported visual features can fall back safely.
 Replace and restart the relay whenever an Online release adds a packet type or
 server capability. Existing lobbies end when the process exits because they are
@@ -97,10 +106,13 @@ and [protocol maintenance checklist](SYNCING.md).
 
 ## Security
 
-Lobby passwords are sent over plain TCP. Use throwaway passwords and deploy on a
+Lobby passwords are sent without transport encryption. Use throwaway passwords and deploy on a
 trusted private network or behind an encrypted tunnel. Do not reuse account
 passwords.
 
 Project code is released under the repository's CC0 license. The packaged relay
 also includes [third-party notices](THIRD_PARTY_NOTICES.md) for its MIT-licensed
-JSON dependency.
+JSON and KCP dependencies.
+
+Relay 2.1.0 supports bounded lossless compression of reliable JSON. Deploy it
+with the matching Online build; 2.0.0 cannot decode the compressed lines.

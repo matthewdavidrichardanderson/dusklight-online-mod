@@ -1,4 +1,7 @@
+#include "dusklight_online/net/reliable_json.hpp"
+#include "dusklight_online/net/pose_ack_history.hpp"
 #include "dusklight_online/net/transport.hpp"
+#include "dusklight_online/net/udp_connection.hpp"
 #include "dusk/multiplayer/multiplayer.hpp"
 
 #if defined(_WIN32)
@@ -45,8 +48,8 @@ namespace {
 using json = nlohmann::json;
 
 constexpr size_t kMaxDirectPeers = 7;
-constexpr size_t kTcpRxBufferMaxBytes = 2 * 1024 * 1024;
-constexpr size_t kTcpTxBufferMaxBytes = 256 * 1024;
+constexpr size_t kReliableRxBufferMaxBytes = 2 * 1024 * 1024;
+constexpr size_t kReliableTxBufferMaxBytes = 256 * 1024;
 constexpr size_t kMaxMaterializedEvents = 1024;
 constexpr size_t kUdpTxPacerMaxQueuedDatagrams = 512;
 constexpr size_t kUdpTxPacerBaseDestinationBytesPerSecond = 512 * 1024;
@@ -58,59 +61,6 @@ std::mutex sNetworkStackMutex;
 size_t sNetworkStackOwners = 0;
 #endif
 
-void close_socket(socket_t& socket) {
-    if (socket == kInvalidSocket) {
-        return;
-    }
-#if defined(_WIN32)
-    closesocket(socket);
-#else
-    close(socket);
-#endif
-    socket = kInvalidSocket;
-}
-
-bool would_block() {
-#if defined(_WIN32)
-    const int error = WSAGetLastError();
-    return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
-#else
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS;
-#endif
-}
-
-bool set_nonblocking(socket_t socket) {
-#if defined(_WIN32)
-    u_long enabled = 1;
-    return ioctlsocket(socket, FIONBIO, &enabled) == 0;
-#else
-    const int flags = fcntl(socket, F_GETFL, 0);
-    return flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
-#endif
-}
-
-bool suppress_sigpipe(socket_t socket) {
-#if defined(__APPLE__)
-    int enabled = 1;
-    return setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0;
-#else
-    (void)socket;
-    return true;
-#endif
-}
-
-int socket_error(socket_t socket) {
-    int error = 0;
-#if defined(_WIN32)
-    int length = sizeof(error);
-    getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length);
-#else
-    socklen_t length = sizeof(error);
-    getsockopt(socket, SOL_SOCKET, SO_ERROR, &error, &length);
-#endif
-    return error;
-}
-
 bool fill_ipv4(sockaddr_in& address, const std::string& host, uint16_t port) {
     address = {};
     address.sin_family = AF_INET;
@@ -121,7 +71,7 @@ bool fill_ipv4(sockaddr_in& address, const std::string& host, uint16_t port) {
 
     addrinfo hints{};
     hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_socktype = SOCK_DGRAM;
     addrinfo* result = nullptr;
     if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
         return false;
@@ -249,8 +199,9 @@ struct Transport::Impl {
     Status status;
     VisualSendStats lastVisualSend;
     socket_t socket = kInvalidSocket;
-    socket_t listenSocket = kInvalidSocket;
-    socket_t udpSocket = kInvalidSocket;
+    UdpConnection connections;
+    bool listening = false;
+    bool udpOpen = false;
     sockaddr_in udpRemoteAddress{};
     std::string rx;
     std::string tx;
@@ -279,6 +230,7 @@ struct Transport::Impl {
     Transport::PoseDeltaExpandCallback poseDeltaExpand = nullptr;
     Transport::PoseDeltaPrepareCallback poseDeltaPrepare = nullptr;
     std::map<std::string, uint32_t> poseAckSequences;
+    std::map<std::string, PoseAckHistory> poseAckHistories;
     std::map<std::string, uint32_t> poseAckResetFloors;
     std::mutex udpTxMutex;
     std::condition_variable udpTxCv;
@@ -412,12 +364,10 @@ struct Transport::Impl {
 
     bool send_udp_datagram_now(const sockaddr_in& address,
                                const udp::Datagram& datagram) {
-        if (udpSocket == kInvalidSocket || datagram.bytes.empty()) {
+        if (!udpOpen || datagram.bytes.empty()) {
             return false;
         }
-        const int size = static_cast<int>(datagram.bytes.size());
-        return sendto(udpSocket, reinterpret_cast<const char*>(datagram.bytes.data()), size, 0,
-                      reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == size;
+        return connections.send_realtime({address.sin_addr.s_addr, ntohs(address.sin_port)}, datagram.bytes);
     }
 
     void udp_tx_thread_main() {
@@ -456,18 +406,12 @@ struct Transport::Impl {
             }
 
             const auto gap = udp_tx_gap(paced.datagram, destinationRate);
-            if (!send_udp_datagram_now(paced.address, paced.datagram)) {
-                if (would_block()) {
-                    std::lock_guard<std::mutex> lock(udpTxMutex);
-                    if (!udpTxStop) udpTxQueue.push_front(std::move(paced));
-                    udpTxNextSendByDestination[destinationKey] =
-                        std::chrono::steady_clock::now() + gap * 2;
-                }
-            } else {
-                std::lock_guard<std::mutex> lock(udpTxMutex);
-                udpTxNextSendByDestination[destinationKey] =
-                    std::chrono::steady_clock::now() + gap;
-            }
+            // Realtime carrier backpressure drops this datagram. Reliability
+            // retries are owned by KCP, never by this visual producer.
+            send_udp_datagram_now(paced.address, paced.datagram);
+            std::lock_guard<std::mutex> lock(udpTxMutex);
+            udpTxNextSendByDestination[destinationKey] =
+                std::chrono::steady_clock::now() + gap;
         }
     }
 
@@ -556,15 +500,15 @@ struct Transport::Impl {
         return true;
     }
 
+    void close_reliable(socket_t& id) {
+        if (id != kInvalidSocket) connections.disconnect(id);
+        id = kInvalidSocket;
+    }
     void close_all() {
         stop_udp_tx_pacer();
-        close_socket(socket);
-        close_socket(listenSocket);
-        close_socket(udpSocket);
-        for (auto& [id, peer] : directPeers) {
-            (void)id;
-            close_socket(peer.socket);
-        }
+        connections.close();
+        socket = kInvalidSocket;
+        listening = udpOpen = false;
         directPeers.clear();
     }
 
@@ -579,6 +523,7 @@ struct Transport::Impl {
         peerStages.clear();
         peerPoseStages.clear();
         poseAckSequences.clear();
+        poseAckHistories.clear();
         poseAckResetFloors.clear();
         status.clientId.clear();
         status.ownerClientId.clear();
@@ -628,29 +573,17 @@ struct Transport::Impl {
     }
 
     bool flush(socket_t target, std::string& buffer) {
-        if (target == kInvalidSocket) {
-            return false;
-        }
-        while (!buffer.empty()) {
-            const int count = static_cast<int>(std::min<size_t>(
-                buffer.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
-            const int sent = ::send(target, buffer.data(), count, kSendFlags);
-            if (sent > 0) {
-                buffer.erase(0, static_cast<size_t>(sent));
-                continue;
-            }
-            if (would_block()) {
-                return true;
-            }
-            return false;
-        }
+        if (target == kInvalidSocket) return false;
+        if (buffer.empty()) return true;
+        if (!connections.send(target, buffer.data(), buffer.size())) return false;
+        buffer.clear();
         return true;
     }
 
     bool queue(socket_t target, std::string& buffer, const json& message) {
-        std::string line = message.dump();
+        std::string line = encode_reliable_json(message);
         line.push_back('\n');
-        if (buffer.size() + line.size() > kTcpTxBufferMaxBytes) {
+        if (buffer.size() + line.size() > kReliableTxBufferMaxBytes) {
             return false;
         }
         buffer.append(line);
@@ -662,7 +595,7 @@ struct Transport::Impl {
         // Match final's central send_json_to_peer failure contract: a peer
         // that cannot accept a bounded reliable frame is no longer usable.
         // Map erasure remains deferred to the owning pump iteration.
-        close_socket(peer.socket);
+        close_reliable(peer.socket);
         return false;
     }
 
@@ -671,9 +604,10 @@ struct Transport::Impl {
         if (it == directPeers.end()) {
             return;
         }
-        close_socket(it->second.socket);
+        close_reliable(it->second.socket);
         directPeers.erase(it);
         peerNames.erase(peerId);
+        forget_pose_ack_history(peerId);
         peerStages.erase(peerId);
         peerPoseStages.erase(peerId);
         status.welcomed = std::any_of(directPeers.begin(), directPeers.end(),
@@ -697,7 +631,7 @@ struct Transport::Impl {
         for (const std::string& id : failed) {
             // Defer map erasure to pump_direct_peers(). This function can be
             // reached while that map is being iterated.
-            close_socket(directPeers.at(id).socket);
+            close_reliable(directPeers.at(id).socket);
         }
     }
 
@@ -717,7 +651,7 @@ struct Transport::Impl {
         for (const std::string& id : failed) {
             // See remove_peer(): socket invalidation is safe during an
             // iteration; map erasure is performed by the next pump.
-            close_socket(directPeers.at(id).socket);
+            close_reliable(directPeers.at(id).socket);
         }
         return sentAny || directPeers.empty();
     }
@@ -810,42 +744,19 @@ struct Transport::Impl {
     }
 
     bool begin_connect() {
-        // A retry is a new generation. Anything not drained from an older
-        // failed generation is stale and must never replay into it.
         events.clear();
         ++connectionEpoch;
-        // UDP is an optional visual fast path. A machine that cannot open or
-        // resolve it must still be able to join over reliable TCP.
-        close_socket(socket);
-        socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (socket == kInvalidSocket) {
-            status.error = "socket failed";
+        stop_udp_tx_pacer();
+        connections.close();
+        socket = kInvalidSocket;
+        udpOpen = false;
+        if (!connections.open("0.0.0.0", 0, 1, false)) {
+            fail("UDP connection open failed", false);
             return false;
         }
-        if (!suppress_sigpipe(socket)) {
-            fail("socket SIGPIPE setup failed", false);
-            return false;
-        }
-        if (!set_nonblocking(socket)) {
-            fail("nonblocking failed", false);
-            return false;
-        }
-        sockaddr_in address{};
-        if (!fill_ipv4(address, status.host, status.port)) {
-            fail("invalid host", false);
-            return false;
-        }
-        // Establish the reliable socket/address first. A later TCP failure
-        // cannot strand a datagram pacer which was opened for no connection.
-        (void)setup_client_udp();
-        const int result = connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address));
-        if (result == 0) {
-            status.state = State::Connected;
-            send_hello();
-            return true;
-        }
-        if (!would_block()) {
-            fail("connect failed");
+        socket = static_cast<socket_t>(connections.connect(status.host, status.port));
+        if (socket == kInvalidSocket || !setup_client_udp()) {
+            fail("UDP connect failed");
             return false;
         }
         status.state = State::Connecting;
@@ -855,62 +766,22 @@ struct Transport::Impl {
     bool begin_host() {
         events.clear();
         ++connectionEpoch;
-        close_socket(listenSocket);
-        listenSocket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (listenSocket == kInvalidSocket) {
-            status.error = "socket failed";
+        stop_udp_tx_pacer();
+        if (!connections.open(status.bindHost, status.port, kMaxDirectPeers, true)) {
+            fail("UDP listen failed", false);
             return false;
         }
-        if (!suppress_sigpipe(listenSocket)) {
-            fail("listen SIGPIPE setup failed", false);
-            return false;
-        }
-        int reuse = 1;
-        setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR,
-                   reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-        if (!set_nonblocking(listenSocket)) {
-            fail("listen nonblocking failed", false);
-            return false;
-        }
-        sockaddr_in address{};
-        if (!fill_ipv4(address, status.bindHost, status.port)) {
-            fail("invalid bind host", false);
-            return false;
-        }
-        if (bind(listenSocket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
-            listen(listenSocket, SOMAXCONN) != 0) {
-            fail("listen failed", false);
-            return false;
-        }
+        listening = true;
         status.state = State::Listening;
         status.error.clear();
-        // TCP owns the session; UDP failure only disables pose/object
-        // datagrams.
-        (void)open_udp(status.bindHost, status.port);
-        return true;
+        return open_udp(status.bindHost, status.port);
     }
 
-    bool open_udp(const std::string& bindHost, uint16_t bindPort) {
+    bool open_udp(const std::string&, uint16_t) {
         stop_udp_tx_pacer();
-        close_socket(udpSocket);
         udpRemoteAddressKnown = false;
         udpDecoder.reset();
-        udpSocket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (udpSocket == kInvalidSocket || !set_nonblocking(udpSocket)) {
-            close_socket(udpSocket);
-            return false;
-        }
-        int bufferBytes = 1024 * 1024;
-        setsockopt(udpSocket, SOL_SOCKET, SO_RCVBUF,
-                   reinterpret_cast<const char*>(&bufferBytes), sizeof(bufferBytes));
-        setsockopt(udpSocket, SOL_SOCKET, SO_SNDBUF,
-                   reinterpret_cast<const char*>(&bufferBytes), sizeof(bufferBytes));
-        sockaddr_in address{};
-        if (!fill_ipv4(address, bindHost, bindPort) ||
-            bind(udpSocket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-            close_socket(udpSocket);
-            return false;
-        }
+        udpOpen = true;
         start_udp_tx_pacer();
         return true;
     }
@@ -921,7 +792,7 @@ struct Transport::Impl {
         }
         if (!fill_ipv4(udpRemoteAddress, status.host, status.port)) {
             stop_udp_tx_pacer();
-            close_socket(udpSocket);
+            udpOpen = false;
             return false;
         }
         udpRemoteAddressKnown = true;
@@ -938,6 +809,14 @@ struct Transport::Impl {
             return status.clientId;
         }
         return "direct";
+    }
+
+    void forget_pose_ack_history(const std::string& peerId) {
+        const auto receiver = peerId + '\x1f';
+        const auto sender = '\x1f' + peerId + '\x1f';
+        std::erase_if(poseAckHistories, [&](const auto& entry) {
+            return entry.first.starts_with(receiver) || entry.first.find(sender) != std::string::npos;
+        });
     }
 
     static std::string pose_ack_key(std::string_view receiverId,
@@ -957,17 +836,15 @@ struct Transport::Impl {
     uint32_t relay_common_ack_sequence(std::string_view senderId,
                                        udp::PacketType type) const {
         if (!status.snapshotDeltasReady || peerNames.empty()) return 0;
-        uint32_t common = std::numeric_limits<uint32_t>::max();
-        bool hasRecipient = false;
+        std::vector<const PoseAckHistory*> histories;
         for (const auto& [peerId, name] : peerNames) {
             (void)name;
             if (peerId == senderId) continue;
-            hasRecipient = true;
-            const uint32_t ack = pose_ack_sequence(peerId, senderId, type);
-            if (ack == 0) return 0;
-            common = std::min(common, ack);
+            const auto found = poseAckHistories.find(pose_ack_key(peerId, senderId, type));
+            if (found == poseAckHistories.end()) return 0;
+            histories.push_back(&found->second);
         }
-        return hasRecipient ? common : 0;
+        return common_pose_ack(histories);
     }
 
     bool stages_match(const json& message, const std::string& peerId,
@@ -1195,6 +1072,7 @@ struct Transport::Impl {
                 poseAckResetFloors[key] = std::max(poseAckResetFloors[key],
                                                    decoded.ack.sequence);
                 ackedSequence = 0;
+                poseAckHistories.erase(key);
                 return;
             }
             const auto resetFloor = poseAckResetFloors.find(key);
@@ -1204,6 +1082,7 @@ struct Transport::Impl {
             }
             if (decoded.ack.sequence <= ackedSequence) return;
             ackedSequence = decoded.ack.sequence;
+            remember_pose_ack(poseAckHistories[key], decoded.ack.sequence);
             Event event;
             event.kind = EventKind::UdpAck;
             event.peerId = decoded.senderId;
@@ -1216,23 +1095,16 @@ struct Transport::Impl {
     }
 
     void pump_udp() {
-        if (udpSocket == kInvalidSocket) {
-            return;
-        }
+        if (!udpOpen) return;
         std::array<uint8_t, 58 + udp::kChunkPayloadBytes> packet{};
         while (true) {
+            UdpConnection::Address address;
+            const int count = connections.receive_realtime(address, packet);
+            if (count < 0) return;
             sockaddr_in from{};
-#if defined(_WIN32)
-            int fromLength = sizeof(from);
-#else
-            socklen_t fromLength = sizeof(from);
-#endif
-            const int count = recvfrom(udpSocket, reinterpret_cast<char*>(packet.data()),
-                                       static_cast<int>(packet.size()), 0,
-                                       reinterpret_cast<sockaddr*>(&from), &fromLength);
-            if (count < 0) {
-                return;
-            }
+            from.sin_family = AF_INET;
+            from.sin_addr.s_addr = address.ipv4;
+            from.sin_port = htons(address.port);
             if (status.mode == Mode::Relay &&
                 (!udpRemoteAddressKnown || !same_endpoint(from, udpRemoteAddress))) {
                 continue;
@@ -1255,8 +1127,9 @@ struct Transport::Impl {
                     continue;
                 }
                 // Valid partial chunks are sufficient to learn the endpoint,
-                // but only after the sender was admitted by its TCP identity.
+                // but only after the sender was admitted by its admitted session identity.
                 peer->second.udpAddress = from;
+                connections.bind_realtime(peer->second.socket, {from.sin_addr.s_addr, ntohs(from.sin_port)});
                 peer->second.udpAddressKnown = true;
             } else if (admittedSender == local_udp_sender_id()) {
                 continue;
@@ -1269,57 +1142,21 @@ struct Transport::Impl {
     }
 
     void update_connecting() {
-        fd_set writes;
-        fd_set errors;
-        FD_ZERO(&writes);
-        FD_ZERO(&errors);
-        FD_SET(socket, &writes);
-        FD_SET(socket, &errors);
-        timeval timeout{0, 0};
-#if defined(_WIN32)
-        const int result = select(0, nullptr, &writes, &errors, &timeout);
-#else
-        const int result = select(socket + 1, nullptr, &writes, &errors, &timeout);
-#endif
-        if (result < 0 || FD_ISSET(socket, &errors) || socket_error(socket) != 0) {
-            fail("connect poll failed");
-            return;
-        }
-        if (!FD_ISSET(socket, &writes)) {
-            return;
-        }
+        if (!connections.alive(socket)) { fail("UDP connect failed"); return; }
+        if (!connections.connected(socket)) return;
         status.state = State::Connected;
         status.error.clear();
         send_hello();
     }
 
     void accept_peers() {
-        while (listenSocket != kInvalidSocket) {
-            sockaddr_in address{};
-#if defined(_WIN32)
-            int length = sizeof(address);
-#else
-            socklen_t length = sizeof(address);
-#endif
-            socket_t accepted =
-                accept(listenSocket, reinterpret_cast<sockaddr*>(&address), &length);
-            if (accepted == kInvalidSocket) {
-                if (!would_block()) {
-                    fail("accept failed");
-                }
-                return;
-            }
-            if (directPeers.size() >= kMaxDirectPeers) {
-                close_socket(accepted);
-                continue;
-            }
-            if (!suppress_sigpipe(accepted) || !set_nonblocking(accepted)) {
-                close_socket(accepted);
-                fail("accepted socket setup failed");
-                return;
-            }
+        while (listening) {
+            UdpConnection::Address address;
+            auto accepted = connections.accept(address);
+            if (accepted == UdpConnection::invalid) return;
+            if (directPeers.size() >= kMaxDirectPeers) { connections.disconnect(accepted); continue; }
             Peer peer;
-            peer.socket = accepted;
+            peer.socket = static_cast<socket_t>(accepted);
             peer.id = "direct" + std::to_string(nextDirectPeerId++);
             directPeers.emplace(peer.id, std::move(peer));
             status.state = State::Connected;
@@ -1379,7 +1216,7 @@ struct Transport::Impl {
             auto targetIt = directPeers.find(target);
             if (targetIt != directPeers.end() && targetIt->second.welcomed) {
                 if (!queue_peer(targetIt->second, routed)) {
-                    close_socket(targetIt->second.socket);
+                    close_reliable(targetIt->second.socket);
                 }
             } else {
                 emit(EventKind::Error, target, "target peer unavailable", routed);
@@ -1463,6 +1300,7 @@ struct Transport::Impl {
         } else if (type == "peer_left") {
             const std::string id = message.value("client_id", "");
             peerNames.erase(id);
+            forget_pose_ack_history(id);
             peerStages.erase(id);
             peerPoseStages.erase(id);
             status.semanticVisualsReady =
@@ -1536,10 +1374,10 @@ struct Transport::Impl {
     bool receive(socket_t source, std::string& buffer, Handler&& handler) {
         std::array<char, 4096> bytes{};
         while (true) {
-            const int count = recv(source, bytes.data(), static_cast<int>(bytes.size()), 0);
+            const int count = connections.receive(source, bytes.data(), bytes.size());
             if (count > 0) {
                 buffer.append(bytes.data(), static_cast<size_t>(count));
-                if (buffer.size() > kTcpRxBufferMaxBytes) {
+                if (buffer.size() > kReliableRxBufferMaxBytes) {
                     return false;
                 }
                 size_t newline = std::string::npos;
@@ -1550,7 +1388,10 @@ struct Transport::Impl {
                         continue;
                     }
                     try {
-                        handler(json::parse(line));
+                        handler(decode_reliable_json(line));
+                    } catch (const ReliableJsonError&) {
+                        emit(EventKind::Error, {}, "invalid compressed JSON");
+                        return false;
                     } catch (const json::exception&) {
                         emit(EventKind::Error, {}, "invalid JSON");
                     }
@@ -1564,7 +1405,7 @@ struct Transport::Impl {
             if (count == 0) {
                 return false;
             }
-            return would_block();
+            return count == -1;
         }
     }
 
@@ -1608,6 +1449,7 @@ struct Transport::Impl {
         if (!status.enabled) {
             return;
         }
+        connections.poll();
         for (auto it = peerStages.begin(); it != peerStages.end();) {
             if (++it->second.ageTicks > 180) {
                 it = peerStages.erase(it);

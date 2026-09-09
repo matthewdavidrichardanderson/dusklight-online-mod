@@ -28,41 +28,36 @@ namespace {
 }
 
 uint16_t reserve_test_port() {
-    const auto closeSocket = [](auto handle) {
+    const auto socketHandle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 #if defined(_WIN32)
-        closesocket(handle);
+    if (socketHandle == INVALID_SOCKET) {
 #else
-        close(handle);
+    if (socketHandle < 0) {
 #endif
-    };
-    // UDP and TCP exclusions can differ on Windows. Reserve both protocols.
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        const auto udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        const auto tcp = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-#if defined(_WIN32)
-        if (udp == INVALID_SOCKET || tcp == INVALID_SOCKET) {
-#else
-        if (udp < 0 || tcp < 0) {
-#endif
-            closeSocket(udp); closeSocket(tcp);
-            fail("could not create test sockets");
-        }
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-#if defined(_WIN32)
-        int length = sizeof(address);
-#else
-        socklen_t length = sizeof(address);
-#endif
-        const bool available =
-            bind(udp, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0 &&
-            getsockname(udp, reinterpret_cast<sockaddr*>(&address), &length) == 0 &&
-            bind(tcp, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
-        closeSocket(udp); closeSocket(tcp);
-        if (available) return ntohs(address.sin_port);
+        fail("could not create test socket");
     }
-    fail("could not reserve a TCP/UDP test port");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (bind(socketHandle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        fail("could not reserve test port");
+    }
+#if defined(_WIN32)
+    int length = sizeof(address);
+#else
+    socklen_t length = sizeof(address);
+#endif
+    if (getsockname(socketHandle, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+        fail("could not read test port");
+    }
+    const uint16_t port = ntohs(address.sin_port);
+#if defined(_WIN32)
+    closesocket(socketHandle);
+#else
+    close(socketHandle);
+#endif
+    return port;
 }
 
 bool drain_for_type(Transport& transport, const std::string& type,

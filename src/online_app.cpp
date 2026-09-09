@@ -1,5 +1,6 @@
 #include "dusklight_online/game/appearance.hpp"
 #include "dusklight_online/online_app.hpp"
+#include "dusklight_online/logging.hpp"
 
 #include "dusk/multiplayer/invite_code.hpp"
 #include "dusklight_online/game/game_adapter.hpp"
@@ -14,6 +15,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <map>
 #include <cstring>
 #include <sstream>
 #include <utility>
@@ -565,6 +568,43 @@ void OnlineApp::match_player_colour() {
 }
 
 void OnlineApp::update() {
+    using TimingClock = std::chrono::steady_clock;
+    struct PoseTiming {
+        TimingClock::time_point start = TimingClock::now(), previous = start;
+        uint64_t updates = 0, poses = 0, skipped = 0, errors = 0;
+        double maxUpdateGap = 0;
+        std::map<std::string, uint32_t> sequences;
+    };
+    static PoseTiming timing;
+    const auto timingNow = TimingClock::now();
+    const auto timingStatus = transport_.status();
+    if (!timingStatus.welcomed) {
+        timing = {};
+    } else {
+        timing.maxUpdateGap = (std::max)(timing.maxUpdateGap,
+            std::chrono::duration<double, std::milli>(timingNow - timing.previous).count());
+        timing.previous = timingNow;
+        ++timing.updates;
+        if (timingNow - timing.start >= std::chrono::seconds(1)) {
+            bool foreground = true;
+#ifdef _WIN32
+            DWORD foregroundPid = 0;
+            GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
+            foreground = foregroundPid == GetCurrentProcessId();
+#endif
+            std::ostringstream line;
+            line << "UDP_TRANSPORT_TIMING mode=" << static_cast<int>(timingStatus.mode)
+                 << " interval_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(timingNow-timing.start).count()
+                 << " updates=" << timing.updates << " max_update_gap_ms=" << timing.maxUpdateGap
+                 << " poses=" << timing.poses << " skipped_sequences=" << timing.skipped
+                 << " errors=" << timing.errors << " foreground=" << foreground
+                 << " tx_sequence=" << transport_.last_visual_send_stats().sequence;
+            log_info(line.str());
+            timing.start = timingNow;
+            timing.updates = timing.poses = timing.skipped = timing.errors = 0;
+            timing.maxUpdateGap = 0;
+        }
+    }
     match_player_colour();
     if (game_) game_->set_player_color(game::appearance::parse_color(
         string_value(config_.playerColor)).value_or(game::appearance::default_color),
@@ -588,6 +628,18 @@ void OnlineApp::update() {
     bool protocolFatal = false;
     while (transport_.has_events()) {
         net::Event event = transport_.pop_event();
+        if (event.kind == net::EventKind::UdpMessage) {
+            ++timing.poses;
+            auto& previous = timing.sequences[event.peerId + ":" + std::to_string(static_cast<int>(event.udpType))];
+            if (previous && event.udpSequence > previous && event.udpSequence - previous > 1)
+                timing.skipped += event.udpSequence - previous - 1;
+            previous = event.udpSequence;
+        } else if (event.kind == net::EventKind::Error) {
+            if (++timing.errors == 1) log_info("UDP_TRANSPORT_TIMING first_error=" + event.detail);
+        } else if (event.kind == net::EventKind::PeerLeft) {
+            // Peer IDs are session-local; bound the diagnostic history on churn.
+            timing.sequences.clear();
+        }
         if (event.kind == net::EventKind::Message &&
             event.message.value("type", std::string()) == "owner_changed" &&
             event.ingress.mode == net::Mode::Relay) {

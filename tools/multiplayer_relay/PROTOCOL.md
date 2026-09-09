@@ -5,7 +5,7 @@ relay.
 
 ## Framing and limits
 
-- Reliable transport: plain TCP.
+- Reliable transport: KCP over UDP; no transport encryption.
 - Encoding: one UTF-8 JSON object per line.
 - Current wire version: `2`.
 - Maximum encoded input line: 512 KiB, excluding the newline.
@@ -17,8 +17,56 @@ relay.
 - Maximum password: 128 bytes.
 - A client must complete `hello` within 10 seconds.
 
-Plain TCP does not protect the room password. Internet deployment requires a
+The UDP transport does not encrypt the room password. Internet deployment requires a
 trusted private network or a later encrypted transport phase.
+
+## Transport framing and ownership
+
+The native connection adapter owns the UDP socket and maps validated endpoints
+onto logical peer IDs. KCP owns no socket, address resolution, traversal or
+connection establishment. Its output callback and input method are the boundary
+for another carrier, such as a future libjuice adapter; libjuice is not included
+or enabled by this change.
+
+The native adapter services protocol work in the background, with serialized
+access to its state. Loading or paused game updates therefore do not stop ACKs
+or keepalives. Completed messages are queued; game-state handling stays on the
+existing game-update hook. The worker is joined before socket/mod teardown.
+
+- `DUC1`: fixed 21-byte native session control (type byte, little-endian 64-bit
+  client nonce and server session generation). Open/challenge/confirm/ready
+  establish return routability; keepalive and close maintain the session.
+  This handshake is not cryptographic authentication. Existing lobby/password
+  checks still run in `hello` after establishment.
+- `DUR1`: reliable datagram, followed by a little-endian 64-bit generation,
+  16-bit ordered group and KCP bytes. Maximum datagram size is 1200 bytes.
+  Stale generations and unknown peers/groups are rejected before KCP input.
+- `DMPU`: existing visual framing. It is dispatched separately, never fed into
+  KCP. The existing token validator controls visual endpoint rebinding.
+
+Reliable application messages are length-prefixed inside the KCP byte stream
+(32-bit little-endian size), with a 2 MiB frame limit. Only complete frames are
+exposed to the JSON layer. The existing JSON line and room limits still apply.
+All current reliable messages use one ordered group so a save replacement does
+not overtake or get overtaken by related progression messages. The reliability
+API supports independent groups, but gameplay is not split across them yet.
+
+Both payload paths pass through one scheduler: 512 KiB/s per peer and 4 MiB/s
+aggregate, charged with 64 bytes of encapsulation allowance per datagram.
+Realtime and reliable queues alternate; each is bounded to 256 KiB and expires
+packets after 100 ms. Dropped reliable datagrams remain unacknowledged in KCP
+and are retransmitted. Recovery uses the bounded 32-segment window on links
+with stable measured RTT. When smoothed RTT exceeds the session baseline by
+more than max(50 ms, 25%), KCP congestion-window throttling and exponential
+retry backoff resume. Stable links use 1.5x retry backoff. Before RTT is known,
+a four-segment startup floor avoids serializing small events on overseas links.
+The shared rate/burst budgets and receiver flow control apply in either mode.
+Native handshake/keepalive control is fixed-size and independently rate-limited.
+Reliable send queues are bounded; 30 seconds without ACK progress reports failure
+rather than silently skipping events. Native sessions time out after 15 seconds
+without valid receive activity; handshakes time out after 10 seconds.
+
+The relay and clients must be upgraded together. No old TCP fallback exists.
 
 ## Relay code
 
@@ -30,7 +78,7 @@ host/join intent are supplied separately in `hello`.
 
 ## UDP visual channel
 
-The relay listens for UDP on the same numbered port as TCP. `welcome` includes
+Reliable and visual traffic share the configured UDP port. `welcome` includes
 a connection-specific `udp_token`. The client presents that token in a UDP
 registration packet; the relay then binds the authenticated `client_id` to the
 observed source IP and port. Visual, remote-object, and acknowledgement
@@ -138,3 +186,17 @@ Every value must be boolean. The relay forces `pvp` off when
 `remote_collision` is off. Non-owner updates return `owner_only`. Current
 settings are included in every `welcome`, so late joiners use the room's
 settings rather than their local defaults.
+
+
+### Reliable line compression (relay 2.1.0)
+
+Lines of JSON at least 1 KiB may be encoded as `Z1` followed by lowercase hex
+of one Zstandard frame, then the existing newline delimiter. Compression is used
+only if the complete encoded line is smaller. Uncompressed JSON remains valid.
+Both encoded and expanded input are limited to 512 KiB; truncated, concatenated,
+invalid, and oversized frames are rejected. The decoded JSON enters the existing
+routing and ownership validation unchanged. Compression does not alter KCP
+ordering, acknowledgement, retransmission, or congestion control.
+
+Deploy this relay together with the matching Online build. Relay 2.0.0 cannot
+read compressed lines. Pose datagrams are unchanged.
