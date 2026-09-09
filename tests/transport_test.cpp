@@ -1,4 +1,5 @@
 #include "dusklight_online/net/transport.hpp"
+#include "dusklight_online/game/pose_playback.hpp"
 
 #if defined(_WIN32)
     #include <winsock2.h>
@@ -249,6 +250,33 @@ int main() {
     if (!drain_udp_for_sequence(bob, 3)) {
         fail("semantic UDP pose did not reach Bob");
     }
+
+    // Network processing may collect several snapshots before the game consumes
+    // its event queue. Preserve that history for the playback buffer.
+    for (uint32_t seq = 4; seq <= 9; ++seq) {
+        if (!host.send_visual({{"type", "pose"}, {"sequence", seq},
+                               {"state", {{"stage", "F_SP103"}, {"x", seq}}}},
+                              dusklight_online::net::udp::PacketType::SemanticPoseMsgpack))
+            fail("buffered pose send failed");
+        pump(host, alice, bob, 40);
+    }
+    dusklight_online::game::PosePlayback<uint32_t> playback;
+    unsigned count = 0;
+    while (bob.has_events()) {
+        auto event = bob.pop_event();
+        if (event.kind != EventKind::UdpMessage) continue;
+        if (event.udpSequence != 4 + count) fail("transport discarded a buffered pose");
+        playback.push(event.udpSequence, event.udpSequence);
+        ++count;
+    }
+    if (count != 6) fail("transport did not retain six playback snapshots");
+    uint32_t expected = 4;
+    for (unsigned tick = 0; tick < 12; ++tick) {
+        if (auto seq = playback.update()) {
+            if (*seq != expected++) fail("transport-to-playback sequence gap");
+        }
+    }
+    if (expected != 10) fail("transport-to-playback lost samples");
 
     dusklight_online::net::udp::RemoteObjectPacket object;
     object.sequence = 3;

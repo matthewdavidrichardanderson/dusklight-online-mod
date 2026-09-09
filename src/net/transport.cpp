@@ -306,13 +306,20 @@ struct Transport::Impl {
             status.settings, status.clientId,
         };
         if (event.kind == EventKind::UdpMessage) {
-            for (auto it = events.rbegin(); it != events.rend(); ++it) {
+            // Preserve short receive bursts for timed pose playback. Replacing
+            // every pending pose with the newest one discards valid samples
+            // whenever two datagrams arrive between game updates.
+            constexpr size_t maxPendingPosesPerPeer = 16;
+            size_t count = 0;
+            auto oldest = events.end();
+            for (auto it = events.begin(); it != events.end(); ++it) {
                 if (it->kind == event.kind && it->peerId == event.peerId &&
                     it->udpType == event.udpType) {
-                    if (event.udpSequence > it->udpSequence) *it = std::move(event);
-                    return true;
+                    if (oldest == events.end()) oldest = it;
+                    ++count;
                 }
             }
+            if (count >= maxPendingPosesPerPeer) events.erase(oldest);
         } else if (event.kind == EventKind::UdpAck) {
             for (auto it = events.rbegin(); it != events.rend(); ++it) {
                 if (it->kind == event.kind && it->peerId == event.peerId &&

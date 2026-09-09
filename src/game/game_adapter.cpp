@@ -11,6 +11,7 @@
 #include "dusklight_online/game/randomizer_item_names.hpp"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
 #include "dusklight_online/game/remote_pose.hpp"
+#include "dusklight_online/game/pose_prediction.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
 #include "dusklight_online/logging.hpp"
 
@@ -2835,18 +2836,51 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         (void)peerId;
         if (pose.valid && pose.ageTicks < std::numeric_limits<uint32_t>::max()) ++pose.ageTicks;
     }
+    const auto timingNow = std::chrono::steady_clock::now();
+    if (poseTimingUpdate_.time_since_epoch().count() != 0) {
+        poseTimingMaxUpdateMs_ = std::max(poseTimingMaxUpdateMs_,
+            std::chrono::duration<double, std::milli>(timingNow - poseTimingUpdate_).count());
+    }
+    poseTimingUpdate_ = timingNow;
     const bool visualReceiveActive = status.welcomed && remoteModelEnabled;
     if (!visualReceiveActive) {
         peerPoses_.clear();
+        posePlayback_.clear();
+        presentedPoses_.clear();
+    }
+    if (visualReceiveActive && !remoteGameplayReady) {
+        // Do not replay pre-load poses after the local scene becomes ready.
+        posePlayback_.clear();
+        presentedPoses_.clear();
     }
     if (visualReceiveActive && remoteGameplayReady) {
+        for (auto& [peerId, playback] : posePlayback_) {
+            const auto predictor = [](const auto& before, const auto& latest, int64_t ahead, auto& out) {
+                if (latest.procId != daAlink_c::PROC_MOVE &&
+                    latest.procId != daAlink_c::PROC_WOLF_MOVE) return false;
+                return predict_pose(before, latest, ahead, out);
+            };
+            if (auto next = playback.update(predictor)) {
+                if (++posePresentationSequence_ == 0) ++posePresentationSequence_;
+                next->presentationSequence = posePresentationSequence_;
+                presentedPoses_[peerId] = std::move(*next);
+                if (playback.predicted()) ++poseTiming_[peerId].predicted;
+            }
+        }
+        for (auto& [peerId, pose] : presentedPoses_) {
+            if (pose.ageTicks < std::numeric_limits<uint32_t>::max()) ++pose.ageTicks;
+            const auto latest = peerPoses_.find(peerId);
+            if (latest != peerPoses_.end()) {
+                pose.ageTicks = std::max(pose.ageTicks, latest->second.ageTicks);
+            }
+        }
         if (randomizerActive) {
             // Foolish Item plays this level sound locally when rando_item_get is
             // applied. Reject a streamed copy as well, including packets from
             // older peers that do not have the sender-side filter.
             const uint32_t foolishSound =
                 static_cast<uint32_t>(Z2SE_WL_V_LAND_DAMAGE);
-            for (auto& [peerId, pose] : peerPoses_) {
+            for (auto& [peerId, pose] : presentedPoses_) {
                 (void)peerId;
                 const auto isFoolishSound = [foolishSound](const auto& event) {
                     return event.soundId == foolishSound;
@@ -2855,12 +2889,44 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                 std::erase_if(pose.activeAudioEvents, isFoolishSound);
             }
         }
-        dusk::multiplayer::sync_remote_link_actor_dummies(peerPoses_);
-        // peerPoses_ retains the latest UDP snapshot between arrivals. Active
+        if (visual_wire_trace_enabled()) {
+            ++poseTimingTicks_;
+            for (auto& [peerId, timing] : poseTiming_) {
+                timing.burst = std::max(timing.burst, timing.pending);
+                timing.pending = 0;
+                const auto shown = presentedPoses_.find(peerId);
+                if (shown != presentedPoses_.end()) {
+                    const auto seq = shown->second.sequence;
+                    if (seq == timing.displayedSequence) ++timing.repeats;
+                    else if (timing.displayedSequence && seq > timing.displayedSequence + 1)
+                        timing.skipped += seq - timing.displayedSequence - 1;
+                    timing.displayedSequence = seq;
+                }
+                if (poseTimingTicks_ % 150 == 0) {
+                    std::ostringstream line;
+                    line << "POSE_TIMING peer=" << peerId
+                         << " rx=" << timing.packets << " rx_missing=" << timing.missing
+                         << " rx_max_gap_ms=" << timing.maxReceiveGapMs
+                         << " max_rx_per_tick=" << timing.burst
+                         << " playback_repeats=" << timing.repeats
+                         << " playback_skipped=" << timing.skipped
+                         << " queue=" << posePlayback_[peerId].size()
+                         << " buffer_ticks=" << posePlayback_[peerId].delay_ticks()
+                         << " predicted_ticks=" << timing.predicted
+                         << " update_max_gap_ms=" << poseTimingMaxUpdateMs_;
+                    dusklight_online::log_info(line.str());
+                    timing.packets = timing.missing = timing.repeats = timing.skipped = timing.burst = timing.predicted = 0;
+                    timing.maxReceiveGapMs = 0;
+                }
+            }
+            if (poseTimingTicks_ % 150 == 0) poseTimingMaxUpdateMs_ = 0;
+        }
+        dusk::multiplayer::sync_remote_link_actor_dummies(presentedPoses_);
+        // presentedPoses_ retains the displayed snapshot between playback steps. Active
         // level sounds are a per-snapshot refresh, so consuming them once lets
         // the actor's existing timeout stop a sound when packets cease instead
         // of refreshing a stale event forever on every game tick.
-        for (auto& [peerId, pose] : peerPoses_) {
+        for (auto& [peerId, pose] : presentedPoses_) {
             (void)peerId;
             pose.activeAudioEvents.clear();
         }
@@ -2927,12 +2993,9 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                             wireStats.preparedMsgpackBytes / wireStats.recipients;
                         const int preparedSizeBand = normalizedPreparedBytes <= 128 ? 0 :
                             (normalizedPreparedBytes >= 500 ? 2 : 1);
-                        const bool preparedBandChanged =
-                            preparedSizeBand != sVisualWireTrace.preparedSizeBand;
                         sVisualWireTrace.preparedSizeBand = preparedSizeBand;
                         if (sVisualWireTrace.samples <= 5 ||
-                            (sVisualWireTrace.samples % 300) == 0 ||
-                            preparedBandChanged || wireStats.snapshotFulls > 0) {
+                            (sVisualWireTrace.samples % 300) == 0) {
                             std::ostringstream line;
                             line << "VISUAL_WIRE_TX seq=" << nextSequence
                                  << " udp_type=" << static_cast<int>(activePoseType)
@@ -3383,6 +3446,32 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
             return reject(std::move(error));
         }
         maybe_queue_progression_pose_prompt(event.peerId, pose);
+        // Scene changes and teleports must never blend through old locations.
+        if (previous != nullptr) {
+            const float dx = pose.x - previous->x;
+            const float dy = pose.y - previous->y;
+            const float dz = pose.z - previous->z;
+            if (pose.stage != previous->stage || pose.room != previous->room ||
+                pose.layer != previous->layer || dx * dx + dy * dy + dz * dz > 600.0f * 600.0f) {
+                posePlayback_.erase(event.peerId);
+                presentedPoses_.erase(event.peerId);
+            }
+        }
+        if (visual_wire_trace_enabled()) {
+            auto& timing = poseTiming_[event.peerId];
+            const auto now = std::chrono::steady_clock::now();
+            if (timing.received.time_since_epoch().count() != 0) {
+                timing.maxReceiveGapMs = std::max(timing.maxReceiveGapMs,
+                    std::chrono::duration<double, std::milli>(now - timing.received).count());
+            }
+            if (timing.receivedSequence && pose.sequence > timing.receivedSequence + 1)
+                timing.missing += pose.sequence - timing.receivedSequence - 1;
+            timing.received = now;
+            timing.receivedSequence = pose.sequence;
+            ++timing.packets;
+            ++timing.pending;
+        }
+        posePlayback_[event.peerId].push(pose.sequence, pose);
         peerPoses_[event.peerId] = std::move(pose);
         return ApplyResult::Applied;
     }
@@ -3477,6 +3566,9 @@ void GameAdapter::peer_left(std::string_view peerId) {
     peerProgressionStates_.erase(key);
     peerProgressionAges_.erase(key);
     peerPoses_.erase(key);
+    posePlayback_.erase(key);
+    poseTiming_.erase(key);
+    presentedPoses_.erase(key);
     dusk::multiplayer::destroy_remote_link_dummy(key);
     dusk::multiplayer::erase_remote_actor_peer(key);
     clear_remote_pose_history(key);
@@ -3545,7 +3637,13 @@ void GameAdapter::reset_session() {
     peerProgressionStates_.clear();
     peerProgressionAges_.clear();
     peerPoses_.clear();
+    posePlayback_.clear();
+    presentedPoses_.clear();
     clear_remote_pose_history();
+    poseTiming_.clear();
+    poseTimingUpdate_ = {};
+    poseTimingTicks_ = 0;
+    poseTimingMaxUpdateMs_ = 0;
     latestAckSequence_.clear();
     pvpRemoteHitLastSequence_.clear();
     pvpLocalHitContactsThisUpdate_.clear();

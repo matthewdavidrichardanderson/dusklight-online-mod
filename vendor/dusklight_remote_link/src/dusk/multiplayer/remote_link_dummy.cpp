@@ -244,7 +244,7 @@ void interpolate_angle_array(const std::array<int16_t, N>& start,
 void reset_semantic_presentation(RemoteLinkActorDummy& dummy,
                                  const PeerPoseSnapshot& pose, const cXyz& targetPos) {
     dummy.semanticPresentationValid = true;
-    dummy.semanticSourceSequence = pose.sequence;
+    dummy.semanticSourceSequence = pose.presentationSequence ? pose.presentationSequence : pose.sequence;
     dummy.semanticTicksSinceSample = 0;
     dummy.semanticBlendDurationTicks = 1;
     dummy.semanticRoom = pose.room;
@@ -286,7 +286,7 @@ void update_semantic_presentation(RemoteLinkActorDummy& dummy,
         return;
     }
 
-    if (pose.sequence != dummy.semanticSourceSequence) {
+    if ((pose.presentationSequence ? pose.presentationSequence : pose.sequence) != dummy.semanticSourceSequence) {
         dummy.semanticStartPos = dummy.semanticPresentedPos;
         dummy.semanticTargetPos = targetPos;
         dummy.semanticStartYaw = dummy.semanticPresentedYaw;
@@ -306,7 +306,7 @@ void update_semantic_presentation(RemoteLinkActorDummy& dummy,
         dummy.semanticBlendDurationTicks =
             std::clamp(dummy.semanticTicksSinceSample + 1, uint32_t{1}, uint32_t{4});
         dummy.semanticTicksSinceSample = 0;
-        dummy.semanticSourceSequence = pose.sequence;
+        dummy.semanticSourceSequence = pose.presentationSequence ? pose.presentationSequence : pose.sequence;
         dummy.semanticRoom = pose.room;
     }
 
@@ -1424,7 +1424,7 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         actor->setRemotePose(presentedActorPos, presentedAngleY, static_cast<s8>(pose.room));
         const bool applyActionState =
             presentationMode != ReceiverPresentationMode::SemanticGameplay ||
-            dummy.semanticActionSequence != pose.sequence;
+            dummy.semanticActionSequence != (pose.presentationSequence ? pose.presentationSequence : pose.sequence);
         if (applyActionState) {
             actor->setRemoteActionState(pose.procId, pose.procVar0, pose.procVar1, pose.procVar2,
                                         pose.procVar3, pose.procVar5, pose.underFrame,
@@ -1460,7 +1460,7 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
                 static_cast<u16>(pose.faceBtk), static_cast<u16>(pose.faceBtkArc),
                 pose.faceBtkFrame);
             if (presentationMode == ReceiverPresentationMode::SemanticGameplay) {
-                dummy.semanticActionSequence = pose.sequence;
+                dummy.semanticActionSequence = pose.presentationSequence ? pose.presentationSequence : pose.sequence;
             }
         }
         // Animation resources/frames change only with a new received sample, but

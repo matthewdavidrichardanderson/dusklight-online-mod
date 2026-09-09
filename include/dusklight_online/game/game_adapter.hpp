@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dusklight_online/game/protocol_router.hpp"
+#include "dusklight_online/game/pose_playback.hpp"
 #include "dusk/multiplayer/multiplayer.hpp"
 
 #include <mods/api.h>
@@ -88,6 +89,19 @@ private:
     std::map<std::string, uint32_t> peerProgressionAges_;
     std::deque<RoutedMessage> deferredFaronInbound_;
     std::map<std::string, dusk::multiplayer::PeerPoseSnapshot> peerPoses_;
+    std::map<std::string, PosePlayback<dusk::multiplayer::PeerPoseSnapshot>> posePlayback_;
+    std::map<std::string, dusk::multiplayer::PeerPoseSnapshot> presentedPoses_;
+    struct PoseTiming {
+        std::chrono::steady_clock::time_point received{};
+        uint32_t receivedSequence = 0, displayedSequence = 0;
+        uint32_t packets = 0, missing = 0, repeats = 0, skipped = 0, burst = 0, pending = 0, predicted = 0;
+        double maxReceiveGapMs = 0;
+    };
+    std::map<std::string, PoseTiming> poseTiming_;
+    std::chrono::steady_clock::time_point poseTimingUpdate_{};
+    uint32_t poseTimingTicks_ = 0;
+    uint32_t posePresentationSequence_ = 0;
+    double poseTimingMaxUpdateMs_ = 0;
     std::map<std::string, uint32_t> latestAckSequence_;
     std::map<std::string, uint32_t> pvpRemoteHitLastSequence_;
     // Link exposes several sword attack objects during one swing. Remember

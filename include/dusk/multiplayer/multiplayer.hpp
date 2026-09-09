@@ -112,6 +112,8 @@ enum RemoteAudioSourceKind : uint8_t {
 
 struct PeerPoseSnapshot {
     bool valid = false;
+    // Receiver-only clock; never serialized or used for network acknowledgement.
+    uint32_t presentationSequence = 0;
     std::string peerId;
     uint32_t sequence = 0;
     uint32_t ageTicks = 0;

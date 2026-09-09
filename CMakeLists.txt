@@ -131,7 +131,7 @@ dusklight_remote_link_require_sha256(
     "1586BB1BA1110B05DE7B26B41B6EB78D850EB40BB0F7B4737D51B344C222ED04")
 dusklight_remote_link_require_sha256(
     "src/dusk/multiplayer/remote_link_dummy.cpp"
-    "64E700A5E302E2744B435241ED8737871F25F77FD01319AD1E42C0DE9FFBA723")
+    "908e4b8c11d11e55a6d572413ac47562eea6283a6f9966fce1170d795f3b6c1b")
 dusklight_remote_link_require_sha256(
     "include/dusk/multiplayer/remote_link_dummy.hpp"
     "0B5041A924C629747CDE888F126850B83A30C496AD1DFD633C22B0032E6BE28E")
@@ -473,6 +473,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     if (WIN32)
         target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE ws2_32)
     endif ()
+
+    add_executable(dusklight_online_pose_playback_test tests/pose_playback_test.cpp)
+    target_compile_features(dusklight_online_pose_playback_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_pose_playback_test PRIVATE include)
+    add_test(NAME dusklight_online_pose_playback COMMAND dusklight_online_pose_playback_test)
 
     # Keep assertion-based tests effective in Release too, and prevent Windows
     # assertion/abort dialogs from blocking unattended verification.
