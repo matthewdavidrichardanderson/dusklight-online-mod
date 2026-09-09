@@ -43,10 +43,12 @@ DEFINE_HOOK(&dDlst_list_c::drawOpaDrawList, OpaqueDrawListHook);
 DEFINE_HOOK_SYMBOL("dMeterMap_c::draw", void(dMeterMap_c*), MeterMapDrawHook);
 DEFINE_HOOK_SYMBOL("dusk::ImGuiConsole::PostDraw", void(void*),
                    HostImGuiPostDrawHook);
-DEFINE_HOOK_SYMBOL("ImGui::GetCurrentContext",
-                   ImGuiContext*(), HostImGuiGetCurrentContextSymbol);
+
 
 namespace {
+
+using GetHostContextFn = ImGuiContext* (*)();
+GetHostContextFn sGetHostContext = nullptr;
 
 std::string escape_toast_rml(std::string_view text) {
     std::string escaped;
@@ -709,9 +711,7 @@ void meter_map_draw_post(ModContext*, void* args, void*, void*) {
 }
 
 void host_imgui_post_draw_post(ModContext*, void*, void*, void*) {
-    using GetContextFn = ImGuiContext* (*)();
-    const auto getHostContext = reinterpret_cast<GetContextFn>(
-        HostImGuiGetCurrentContextSymbol::resolved_target());
+    const auto getHostContext = sGetHostContext;
     if (getHostContext == nullptr) return;
     ImGuiContext* const hostContext = getHostContext();
     if (hostContext == nullptr) return;
@@ -729,8 +729,15 @@ void host_imgui_post_draw_post(ModContext*, void*, void*, void*) {
 }  // namespace
 
 ModResult install_visual_hooks(ModError* error) {
-    if (HostImGuiGetCurrentContextSymbol::resolved_target() == nullptr ||
-        mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
+    // We call this accessor; we never intercept it. A hook declaration would
+    // unnecessarily require patchable entry padding in the host's ImGui library.
+    void* contextAddress = nullptr;
+    if (svc_hook->resolve(mod_ctx, "ImGui::GetCurrentContext", &contextAddress, nullptr) != MOD_OK ||
+        contextAddress == nullptr) {
+        return mods::set_error(error, MOD_UNAVAILABLE, "Host ImGui context accessor is unavailable");
+    }
+    sGetHostContext = reinterpret_cast<GetHostContextFn>(contextAddress);
+    if (mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
         mods::hook::add_post<HostImGuiPostDrawHook>(&host_imgui_post_draw_post) != MOD_OK ||
         mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK) {
         uninstall_visual_hooks();
@@ -743,6 +750,7 @@ void uninstall_visual_hooks() {
     mods::hook::uninstall<MeterMapDrawHook>();
     mods::hook::uninstall<HostImGuiPostDrawHook>();
     mods::hook::uninstall<OpaqueDrawListHook>();
+    sGetHostContext = nullptr;
     reset_visual_overlays();
     if (sFontAtlas != nullptr) {
         svc_resource->free(mod_ctx, &sFontAtlas->fontBuffer);
