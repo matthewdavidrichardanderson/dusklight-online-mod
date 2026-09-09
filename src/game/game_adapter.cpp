@@ -77,11 +77,6 @@ DEFINE_HOOK(&dSv_memBit_c::onItem, MemoryItemOnHook);
 DEFINE_HOOK(&dSv_memBit_c::onSwitch, MemorySwitchOnHook);
 DEFINE_HOOK(&dSv_memBit_c::offSwitch, MemorySwitchOffHook);
 DEFINE_HOOK(&dSv_memBit_c::onDungeonItem, MemoryDungeonItemOnHook);
-// The public PC game keeps this method out-of-line. The selected Mod SDK
-// header currently exposes the non-PC inline body, so resolve the actual game
-// symbol explicitly instead of taking the address of a DLL-local inline copy.
-DEFINE_HOOK_SYMBOL("dSv_memBit_c::onStageBossEnemy", void(dSv_memBit_c*),
-                   MemoryStageBossEnemyHook);
 DEFINE_HOOK(&dComIfGs_onVisitedRoom, VisitedRoomOnHook);
 DEFINE_HOOK(&dSv_player_get_item_c::onFirstBit, PlayerItemFirstOnHook);
 DEFINE_HOOK(&dSv_player_get_item_c::offFirstBit, PlayerItemFirstOffHook);
@@ -271,7 +266,6 @@ struct PendingMeterScalarMutation {
 };
 std::vector<PendingMeterScalarMutation> sPendingMeterLifeMutations;
 std::vector<PendingMeterScalarMutation> sPendingMeterRupeeMutations;
-uint32_t sStageBossEnemyDepth = 0;
 std::vector<int> sLightDropPreviousCounts;
 struct PendingBottleMutation {
     int previous = -1;
@@ -1395,23 +1389,14 @@ void memory_dungeon_item_on_post(ModContext*, void* args, void*, void*) {
     if (bits != &g_dComIfG_gameInfo.info.getMemory().getBit()) return;
     const int stage = current_stage_table();
     const int kind = mods::arg<int>(args, 1);
-    // onStageBossEnemy() sets both the boss-clear bit and Ooccoo-note bit. The
-    // note has its own state lane and must not leak as a second dungeon-item
-    // event from this nested implementation detail.
-    if (sStageBossEnemyDepth != 0 && kind != 3) return;
+    // Boss clear also sets OOCCOO_NOTE. Do not publish that side effect as
+    // a separate item: applying the boss-clear event already sets both bits.
+    // Check state here because onStageBossEnemy can be fully inlined by the host.
+    if (kind == dSv_memBit_c::OOCCOO_NOTE && bits->isStageBossEnemy()) return;
     if (valid_stage(stage) && kind >= 0 && kind <= 7) {
         sActiveAdapter->publish_local(
             {{"type", "dungeon_item_bit"}, {"stage", stage}, {"kind", kind}});
     }
-}
-
-HookAction memory_stage_boss_enemy_pre(ModContext*, void*, void*, void*) {
-    ++sStageBossEnemyDepth;
-    return HOOK_CONTINUE;
-}
-
-void memory_stage_boss_enemy_post(ModContext*, void*, void*, void*) {
-    if (sStageBossEnemyDepth != 0) --sStageBossEnemyDepth;
 }
 
 HookAction visited_room_on_pre(ModContext*, void*, void*, void*) {
@@ -1954,8 +1939,6 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_post<MemorySwitchOnHook>(&memory_switch_on_post) != MOD_OK ||
         mods::hook::add_pre<MemorySwitchOffHook>(&memory_switch_off_pre) != MOD_OK ||
         mods::hook::add_post<MemorySwitchOffHook>(&memory_switch_off_post) != MOD_OK ||
-        mods::hook::add_pre<MemoryStageBossEnemyHook>(&memory_stage_boss_enemy_pre) != MOD_OK ||
-        mods::hook::add_post<MemoryStageBossEnemyHook>(&memory_stage_boss_enemy_post) != MOD_OK ||
         mods::hook::add_post<MemoryDungeonItemOnHook>(&memory_dungeon_item_on_post) != MOD_OK ||
         mods::hook::add_pre<VisitedRoomOnHook>(&visited_room_on_pre) != MOD_OK ||
         mods::hook::add_post<VisitedRoomOnHook>(&visited_room_on_post) != MOD_OK ||
@@ -2056,7 +2039,6 @@ void GameAdapter::shutdown_hooks() {
     mods::hook::uninstall<PlayerItemFirstOnHook>();
     mods::hook::uninstall<VisitedRoomOnHook>();
     mods::hook::uninstall<MemoryDungeonItemOnHook>();
-    mods::hook::uninstall<MemoryStageBossEnemyHook>();
     mods::hook::uninstall<MemorySwitchOffHook>();
     mods::hook::uninstall<MemorySwitchOnHook>();
     mods::hook::uninstall<MemoryItemOnHook>();
@@ -2095,7 +2077,6 @@ void GameAdapter::shutdown_hooks() {
     sPendingMeterKeyMutations.clear();
     sPendingMeterLifeMutations.clear();
     sPendingMeterRupeeMutations.clear();
-    sStageBossEnemyDepth = 0;
     sLightDropPreviousCounts.clear();
     sEmptyBottleMutations.clear();
     sEmptyBottleItemMutations.clear();
