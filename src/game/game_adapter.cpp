@@ -473,6 +473,9 @@ bool apply_pvp_player_shield_block(int attackClass, float sourceX, float sourceZ
     player->playerStartCollisionSE(Z2SE_HIT_METAL_WEAPON, mapInfo);
 
     dCcD_GObjInf syntheticHit;
+    dCcD_GObjInf syntheticAttack;
+    syntheticAttack.SetAtMtrl(dCcD_MTRL_NONE);
+    syntheticHit.SetTgHit(&syntheticAttack);
     SyntheticDamageVectorScope vectorScope(player, &syntheticHit, &damageVector);
     return player->procGuardSlipInit(atSpl, &syntheticHit) != 0;
 }
