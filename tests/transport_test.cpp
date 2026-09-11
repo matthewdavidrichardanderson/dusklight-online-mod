@@ -1,5 +1,6 @@
 #include "dusklight_online/net/transport.hpp"
 #include "dusklight_online/game/pose_playback.hpp"
+#include "cave_map_packet.hpp"
 
 #if defined(_WIN32)
     #include <winsock2.h>
@@ -178,6 +179,27 @@ int main() {
     while (host.has_events()) host.pop_event();
     while (alice.has_events()) alice.pop_event();
     while (bob.has_events()) bob.pop_event();
+
+    // Cave reveals must retain all source fields and reach both the host and
+    // other joiners. Each sender produces one event per recipient, without echo.
+    const auto cave = cave_map_packet();
+    for (Transport* sender : {&host, &alice, &bob}) {
+        if (!sender->send(cave)) fail("direct cave reveal send");
+        pump(host, alice, bob, 200);
+        for (Transport* recipient : {&host, &alice, &bob}) {
+            int count = 0;
+            while (recipient->has_events()) {
+                auto event = recipient->pop_event();
+                if (!event.message.is_object() || event.message.value("type", "") != "switch_bit") continue;
+                if (event.message.value("client_id", "") != sender->status().clientId)
+                    fail("direct cave reveal sender identity");
+                event.message.erase("client_id");
+                if (event.message != cave) fail("direct cave reveal source data changed");
+                ++count;
+            }
+            if (count != (recipient == sender ? 0 : 1)) fail("direct cave reveal fanout/echo");
+        }
+    }
 
     // Appearance is reliable presence metadata, including the empty default.
     for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},

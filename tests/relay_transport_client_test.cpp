@@ -1,5 +1,6 @@
 #include <fstream>
 #include "dusklight_online/net/transport.hpp"
+#include "cave_map_packet.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -118,6 +119,24 @@ int main(int argc, char** argv) {
         return ownerDirect && joinerDirect;
     }, 10000)) fail("real relay signaling did not establish bidirectional ICE paths");
 
+    // Run in every carrier configuration, including forced relay, ICE direct,
+    // loss and asymmetric delay. The game needs these exact source fields.
+    const auto checkCaveDelivery = [&] {
+        const auto cave = cave_map_packet();
+        for (Transport* sender : {&owner, &joiner}) {
+            Transport& recipient = sender == &owner ? joiner : owner;
+            if (!sender->send(cave)) fail("cave reveal send");
+            nlohmann::json received;
+            if (!wait_until(owner, joiner, [&] {
+                return consume_type(recipient, "switch_bit", &received);
+            }) || received.value("client_id", "") != sender->status().clientId)
+                fail("cave reveal missing or wrong sender identity");
+            received.erase("client_id");
+            if (received != cave) fail("cave reveal source data changed");
+        }
+    };
+    checkCaveDelivery();
+
     if (ownerDirect && joinerDirect) {
         const auto start = std::chrono::steady_clock::now();
         if (!owner.send({{"type","pvp_hit"},{"damage",1},{"direct_latency_probe",true}})) fail("direct hit send");
@@ -141,13 +160,14 @@ int main(int argc, char** argv) {
             else unsetenv("DUSKLIGHT_TEST_FORCE_FALLBACK");
 #endif
         };
-        // Switch with a full sync AND a later hit in flight. Relay copies may
+        // Switch with a full sync AND a cave reveal in flight. Relay copies may
         // arrive after their direct duplicates; neither order nor exactly-once
         // application may depend on which carrier wins that race.
         for (bool initiallyFallback : {true,false}) {
             forceFallback(initiallyFallback); owner.tick(); joiner.tick();
             auto sync = fixture; sync["handover_test"] = 1;
-            if (!owner.send(sync) || !owner.send({{"type","pvp_hit"},{"handover_test",2},{"damage",1}}))
+            auto cave = cave_map_packet(); cave["handover_test"] = 2;
+            if (!owner.send(sync) || !owner.send(cave))
                 fail("handover enqueue");
             forceFallback(!initiallyFallback); owner.tick();
             if (!owner.send({{"type","pvp_hit"},{"handover_test",3},{"damage",1}})) fail("handover post hit");
@@ -161,12 +181,14 @@ int main(int argc, char** argv) {
                     if (value!=expected++) fail("handover lost, duplicated or reordered gameplay");
                     if (value==1) for(auto it=sync.begin();it!=sync.end();++it)
                         if(!event.message.contains(it.key()) || event.message[it.key()]!=it.value()) fail("handover sync corrupted");
+                    if (value==2) for(auto it=cave.begin();it!=cave.end();++it)
+                        if(!event.message.contains(it.key()) || event.message[it.key()]!=it.value()) fail("handover cave reveal corrupted");
                 }
                 return expected==4 && std::chrono::steady_clock::now()-started>std::chrono::seconds(3);
             },15000)) fail("handover timeout");
         }
         forceFallback(false); owner.tick(); joiner.tick();
-        std::cout << "in-flight sync/hits survived both carrier changes exactly once and in order\n";
+        std::cout << "in-flight sync/cave reveal/hit survived both carrier changes exactly once and in order\n";
     }
     fixture["target_client_id"] = joiner.status().clientId;
     {
@@ -352,6 +374,7 @@ int main(int argc, char** argv) {
             fail("restarted ICE did not deliver reliable payload by relay fallback");
         received.erase("client_id");
         if(received!=fixture) fail("fallback changed full sync payload");
+        checkCaveDelivery();
         environment("DUSKLIGHT_TEST_RELAY_ONLY","");
         environment("DUSKLIGHT_TEST_RESTART_ICE","");
         ownerDirect=joinerDirect=false;
@@ -363,6 +386,7 @@ int main(int argc, char** argv) {
             }
             return ownerDirect&&joinerDirect;
         },10000)) fail("production direct route did not recover after fallback");
+        checkCaveDelivery();
         std::cout << "production reliable ICE restart/fallback/recovery passed\n";
     }
 

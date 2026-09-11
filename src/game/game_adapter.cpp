@@ -4,6 +4,7 @@
 #include "dusklight_online/game/poe_sync.hpp"
 #include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/bottle_sync.hpp"
+#include "dusklight_online/game/cave_map_sync.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -1341,13 +1342,23 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", true}};
     if (void* process = exact_local_switch_actor_context(true); process != nullptr) {
         const int actor = fpcM_GetName(process);
-        const int room = fopAcM_GetHomeRoomNo(static_cast<const fopAc_ac_c*>(process));
+        const auto* source = static_cast<const fopAc_ac_c*>(process);
+        const int room = fopAcM_GetHomeRoomNo(source);
         const uint32_t params = fpcM_GetParam(process);
+        const char* stageName = dComIfGp_getStartStageName();
+        const int angleX = static_cast<uint16_t>(source->shape_angle.x);
+        const bool caveMap = is_cave_map_reveal(actor == fpcNm_SWC00_e,
+            stageName != nullptr ? stageName : "", stage, room, flag, params,
+            angleX, wasSet, bits->isSwitch(flag));
         if (is_group2_lifecycle_actor(actor) &&
             !is_sewers_progression_switch(stage, flag) &&
-            !is_eldin_gorge_bridge_completion(stage, flag, actor, room, params)) return;
+            !is_eldin_gorge_bridge_completion(stage, flag, actor, room, params) &&
+            !caveMap) return;
         message.update({{"source_actor", actor}, {"source_room", room},
                         {"source_params", params}});
+        if (caveMap) {
+            message.update({{"source_stage", stageName}, {"source_angle_x", angleX}});
+        }
     }
     sActiveAdapter->publish_local(std::move(message));
 }
@@ -3754,7 +3765,14 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
         const uint32_t sourceParams = message.value("source_params", 0U);
         const bool bridgeCompletion = message.contains("source_params") &&
             is_eldin_gorge_bridge_completion(stage, flag, sourceActor, sourceRoom, sourceParams);
-        if (!bridgeCompletion && !is_sewers_progression_switch(stage, flag))
+        // Validate against the sender's cave, not the recipient's current
+        // stage, so a reveal also survives travel or arrives while elsewhere.
+        // The sender already checked the false-to-true edge; applying it twice
+        // is harmless and must never turn a section back off.
+        const bool caveMap = is_cave_map_reveal(sourceActor == fpcNm_SWC00_e,
+            message.value("source_stage", std::string()), stage, sourceRoom, flag,
+            sourceParams, message.value("source_angle_x", -1), false, set);
+        if (!bridgeCompletion && !is_sewers_progression_switch(stage, flag) && !caveMap)
             return ApplyResult::IgnoredByPolicy;
     }
 

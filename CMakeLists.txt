@@ -398,6 +398,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_bomb_bag_sync_test PRIVATE include)
     add_test(NAME dusklight_online_bomb_bag_sync COMMAND dusklight_online_bomb_bag_sync_test)
 
+    add_executable(dusklight_online_cave_map_sync_test tests/cave_map_sync_test.cpp)
+    target_compile_features(dusklight_online_cave_map_sync_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_cave_map_sync_test PRIVATE include)
+    add_test(NAME dusklight_online_cave_map_sync COMMAND dusklight_online_cave_map_sync_test)
+
     add_executable(dusklight_online_poe_sync_test tests/poe_sync_test.cpp)
     target_compile_features(dusklight_online_poe_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_poe_sync_test PRIVATE include)
