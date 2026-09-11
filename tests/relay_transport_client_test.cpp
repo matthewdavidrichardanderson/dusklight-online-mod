@@ -1,3 +1,4 @@
+#include <fstream>
 #include "dusklight_online/net/transport.hpp"
 
 #include <chrono>
@@ -24,7 +25,7 @@ namespace {
 }
 
 bool wait_until(Transport& first, Transport& second, const auto& predicate,
-                int timeoutMilliseconds = 3000) {
+                int timeoutMilliseconds = 10000) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeoutMilliseconds);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -33,7 +34,7 @@ bool wait_until(Transport& first, Transport& second, const auto& predicate,
         if (predicate()) {
             return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::getenv("DUSKLIGHT_TEST_WAN") ? 33 : 1));
     }
     return false;
 }
@@ -60,7 +61,7 @@ int main(int argc, char** argv) {
     // Model a game process with a fine timer cadence; relay timing is separate.
     timeBeginPeriod(1);
 #endif
-    if (argc != 2) {
+    if (argc != 3) {
         fail("expected relay TCP port argument");
     }
     const int parsedPort = std::stoi(argv[1]);
@@ -107,8 +108,120 @@ int main(int argc, char** argv) {
         fail("relay owner/settings state was not normalized from welcome");
     }
 
-    while (owner.has_events()) owner.pop_event();
-    while (joiner.has_events()) joiner.pop_event();
+    bool ownerDirect = false, joinerDirect = false;
+    if (!std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") && !wait_until(owner, joiner, [&] {
+        for (auto* client : {&owner, &joiner}) while (client->has_events()) {
+            const auto event = client->pop_event();
+            if (event.kind == dusklight_online::net::EventKind::RouteChanged && event.detail == "direct")
+                (client == &owner ? ownerDirect : joinerDirect) = true;
+        }
+        return ownerDirect && joinerDirect;
+    }, 10000)) fail("real relay signaling did not establish bidirectional ICE paths");
+
+    if (ownerDirect && joinerDirect) {
+        const auto start = std::chrono::steady_clock::now();
+        if (!owner.send({{"type","pvp_hit"},{"damage",1},{"direct_latency_probe",true}})) fail("direct hit send");
+        nlohmann::json hit;
+        if (!wait_until(owner,joiner,[&]{return consume_type(joiner,"pvp_hit",&hit);})) fail("direct hit missing");
+        const auto ms = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+        if (std::getenv("DUSKLIGHT_TEST_WAN") && ms >= 200) fail("direct hit inherited delayed relay latency");
+        std::cout << "direct reliable hit ms=" << ms << " (relay-independent)\n";
+    }
+
+    // Run the actual upper-bound sync+warp/progression fixture through the
+    // production peer path, bracketed by authority settings in one send batch.
+    std::ifstream fixtureFile(argv[2]);
+    nlohmann::json fixture; fixtureFile >> fixture;
+    if (ownerDirect && joinerDirect) {
+        auto forceFallback = [](bool enabled) {
+#if defined(_WIN32)
+            _putenv_s("DUSKLIGHT_TEST_FORCE_FALLBACK",enabled ? "1" : "");
+#else
+            if (enabled) setenv("DUSKLIGHT_TEST_FORCE_FALLBACK","1",1);
+            else unsetenv("DUSKLIGHT_TEST_FORCE_FALLBACK");
+#endif
+        };
+        // Switch with a full sync AND a later hit in flight. Relay copies may
+        // arrive after their direct duplicates; neither order nor exactly-once
+        // application may depend on which carrier wins that race.
+        for (bool initiallyFallback : {true,false}) {
+            forceFallback(initiallyFallback); owner.tick(); joiner.tick();
+            auto sync = fixture; sync["handover_test"] = 1;
+            if (!owner.send(sync) || !owner.send({{"type","pvp_hit"},{"handover_test",2},{"damage",1}}))
+                fail("handover enqueue");
+            forceFallback(!initiallyFallback); owner.tick();
+            if (!owner.send({{"type","pvp_hit"},{"handover_test",3},{"damage",1}})) fail("handover post hit");
+            int expected=1;
+            const auto started=std::chrono::steady_clock::now();
+            if (!wait_until(owner,joiner,[&] {
+                while (joiner.has_events()) {
+                    auto event=joiner.pop_event();
+                    if (!event.message.is_object() || !event.message.contains("handover_test")) continue;
+                    const int value=event.message.at("handover_test");
+                    if (value!=expected++) fail("handover lost, duplicated or reordered gameplay");
+                    if (value==1) for(auto it=sync.begin();it!=sync.end();++it)
+                        if(!event.message.contains(it.key()) || event.message[it.key()]!=it.value()) fail("handover sync corrupted");
+                }
+                return expected==4 && std::chrono::steady_clock::now()-started>std::chrono::seconds(3);
+            },15000)) fail("handover timeout");
+        }
+        forceFallback(false); owner.tick(); joiner.tick();
+        std::cout << "in-flight sync/hits survived both carrier changes exactly once and in order\n";
+    }
+    fixture["target_client_id"] = joiner.status().clientId;
+    {
+        nlohmann::json boundary={{"type","save_snapshot"},{"boundary_test",true},{"padding",""}};
+        boundary["padding"]=std::string(512*1024-boundary.dump().size(),'x');
+        if (!owner.send(boundary)) fail("maximum-size gameplay payload rejected by routing envelope");
+        nlohmann::json received;
+        if (!wait_until(owner,joiner,[&]{return consume_type(joiner,"save_snapshot",&received);},15000))
+            fail("maximum-size gameplay payload timeout");
+        for(auto it=boundary.begin();it!=boundary.end();++it)
+            if(!received.contains(it.key()) || received[it.key()]!=it.value()) fail("maximum-size payload mismatch");
+    }
+    fixture["delivery_test"] = 1;
+    auto off = owner.status().settings; off.syncFlags = false;
+    auto on = off; on.syncFlags = true;
+    const auto deliveryStarted = std::chrono::steady_clock::now();
+    if (!owner.publish_room_settings(off) || !owner.send(fixture) ||
+        !owner.send({{"type","item_get"},{"item",7},{"delivery_test",2}}) ||
+        !owner.publish_room_settings(on) ||
+        !owner.send({{"type","pvp_hit"},{"damage",4},{"delivery_test",3}})) fail("ordered delivery send");
+    int expectedDelivery = 1;
+    if (!wait_until(owner,joiner,[&] {
+        while(joiner.has_events()) {
+            auto event=joiner.pop_event();
+            if(!event.message.is_object() || !event.message.contains("delivery_test")) continue;
+            const int marker=event.message["delivery_test"];
+            if(marker!=expectedDelivery++ || event.ingress.settings.syncFlags!=(marker==3))
+                fail("peer payload changed off/event/on order or duplicated delivery");
+            if(marker==1) {
+                auto received=event.message; received.erase("client_id");
+                if(received!=fixture) fail("full sync/progression payload changed");
+            }
+        }
+        return expectedDelivery==4;
+    },10000)) fail("full progression delivery timeout");
+    std::cout << "sync and following events ms=" << std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-deliveryStarted).count() << "\n";
+    std::cout << "full progression bytes=" << fixture.dump().size() << " exact; off/event/on ordering passed\n";
+
+    for (int i=0;i<6;++i) {
+        auto settings = owner.status().settings; settings.syncFlags = (i%2)==1;
+        if (!owner.publish_room_settings(settings) ||
+            !owner.send({{"type","pvp_hit"},{"damage",1},{"settings_stress",i}})) fail("settings stress send");
+    }
+    int stressExpected=0;
+    if (!wait_until(owner,joiner,[&] {
+        while(joiner.has_events()) {
+            auto event=joiner.pop_event();
+            if(!event.message.is_object() || !event.message.contains("settings_stress")) continue;
+            const int value=event.message["settings_stress"];
+            if(value!=stressExpected++ || event.ingress.settings.syncFlags!=((value%2)==1))
+                fail("rapid settings generations reordered gameplay");
+        }
+        return stressExpected==6;
+    },20000)) fail("settings stress timeout");
+    std::cout << "six consecutive settings generations preserved gameplay order\n";
 
     if (!owner.send_visual({{"type", "pose"}, {"sequence", 5},
                             {"state", {{"stage", "F_SP103"}, {"x", 12.25f}}}})) {
@@ -116,6 +229,7 @@ int main(int argc, char** argv) {
     }
     nlohmann::json udpPose;
     if (!wait_until(owner, joiner, [&] {
+            if (std::getenv("DUSKLIGHT_TEST_WAN")) owner.send_visual({{"type","pose"},{"sequence",5},{"state",{{"stage","F_SP103"},{"x",12.25f}}}});
             return consume_type(joiner, "pose", &udpPose);
         }) || udpPose.value("client_id", "") != owner.status().clientId ||
         udpPose.value("sequence", 0U) != 5) {
@@ -129,7 +243,7 @@ int main(int argc, char** argv) {
     for(int n=0;n<1050;++n) {random^=random<<13;random^=random>>17;random^=random<<5;padding.push_back(char(33+random%90));}
     using Clock=std::chrono::steady_clock;
     uint32_t base=100;
-    for (int phase : {0,2,4,8,16,25}) {
+    for (int phase : (std::getenv("DUSKLIGHT_TEST_WAN") ? std::vector<int>{} : std::vector<int>{0,2,4,8,16,25})) {
         auto begin=Clock::now()+std::chrono::milliseconds(100);
         struct Stats { int holds=0, skips=0, received=0, errors=0; uint32_t last=0; double maxGap=0; std::vector<double> age; } stats[2];
         auto run=[&](Transport& t,int side) {
@@ -186,6 +300,7 @@ int main(int argc, char** argv) {
     }
     bool receivedObject = false;
     if (!wait_until(owner, joiner, [&] {
+            if (std::getenv("DUSKLIGHT_TEST_WAN")) owner.send_remote_object(object);
             while (joiner.has_events()) {
                 auto event = joiner.pop_event();
                 receivedObject |= event.kind == dusklight_online::net::EventKind::UdpRemoteObject &&
@@ -220,6 +335,56 @@ int main(int argc, char** argv) {
         fail("targeted sync_request did not reach the owner");
     }
 
+    if (!std::getenv("DUSKLIGHT_TEST_WAN") && !std::getenv("DUSKLIGHT_TEST_RELAY_ONLY")) {
+        auto environment = [](const char* name, const char* value) {
+#if defined(_WIN32)
+            _putenv_s(name,value);
+#else
+            if (*value) setenv(name,value,1); else unsetenv(name);
+#endif
+        };
+        environment("DUSKLIGHT_TEST_RELAY_ONLY","1");
+        environment("DUSKLIGHT_TEST_RESTART_ICE","1");
+        owner.tick(); joiner.tick();
+        fixture["delivery_test"] = 4;
+        if (!owner.send(fixture)) fail("fallback sync send");
+        if (!wait_until(owner,joiner,[&] { return consume_type(joiner,"save_snapshot",&received); },10000))
+            fail("restarted ICE did not deliver reliable payload by relay fallback");
+        received.erase("client_id");
+        if(received!=fixture) fail("fallback changed full sync payload");
+        environment("DUSKLIGHT_TEST_RELAY_ONLY","");
+        environment("DUSKLIGHT_TEST_RESTART_ICE","");
+        ownerDirect=joinerDirect=false;
+        if(!wait_until(owner,joiner,[&] {
+            for(auto* client:{&owner,&joiner}) while(client->has_events()) {
+                auto event=client->pop_event();
+                if(event.kind==dusklight_online::net::EventKind::RouteChanged && event.detail=="direct")
+                    (client==&owner?ownerDirect:joinerDirect)=true;
+            }
+            return ownerDirect&&joinerDirect;
+        },10000)) fail("production direct route did not recover after fallback");
+        std::cout << "production reliable ICE restart/fallback/recovery passed\n";
+    }
+
+    // Let a third member join without servicing the sender's game tick. The
+    // authoritative dispatch must supply a body to this newly admitted peer.
+    Transport third;
+    auto thirdConfig = joinConfig; thirdConfig.name = "Third";
+    if(!third.start_relay(thirdConfig,&error)) fail("third member start");
+    if(!wait_until(joiner,third,[&] { return third.status().welcomed; })) fail("third member welcome");
+    if(!wait_until(owner,third,[&]{ joiner.tick(); return owner.peers().size()==2; })) fail("sender roster admission");
+    if(!owner.send({{"type","item_get"},{"item",8},{"membership_race",true}})) fail("membership race send");
+    bool secondGot=false,thirdGot=false;
+    if(!wait_until(owner,third,[&] {
+        joiner.tick();
+        secondGot |= consume_type(joiner,"item_get");
+        thirdGot |= consume_type(third,"item_get");
+        return secondGot&&thirdGot;
+    },10000)) fail("membership race lost authorized recipient");
+    third.disconnect();
+    if(!wait_until(owner,joiner,[&] { return owner.peers().size()==1; },20000)) fail("third departure");
+    std::cout << "concurrent membership admission and departure passed\n";
+
     auto changed = owner.status().settings;
     changed.remoteCollision = false;
     changed.pvp = true;
@@ -233,7 +398,7 @@ int main(int argc, char** argv) {
     }
 
     owner.disconnect();
-    if (!wait_until(owner, joiner, [&] { return joiner.status().isOwner; })) {
+    if (!wait_until(owner, joiner, [&] { return joiner.status().isOwner; },20000)) {
         fail("relay ownership did not transfer after owner disconnect");
     }
     bool sawOwnerChanged = false;

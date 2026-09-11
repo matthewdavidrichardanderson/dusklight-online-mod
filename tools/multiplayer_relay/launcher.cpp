@@ -317,7 +317,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         gPublicHost = add_control(window, L"EDIT", L"127.0.0.1",
                                  WS_BORDER | ES_AUTOHSCROLL, 175, 17, 430, 24,
                                  kPublicHostId);
-        add_control(window, L"STATIC", L"Forwarded port", 0,
+        add_control(window, L"STATIC", L"Forwarded UDP port", 0,
                     18, 58, 150, 22, 0);
         gPort = add_control(window, L"EDIT", L"34197",
                            WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
@@ -338,7 +338,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         add_control(window, L"BUTTON", L"Open Log Folder",
                     BS_PUSHBUTTON, 180, 210, 150, 30, kOpenLogsId);
         add_control(window, L"STATIC",
-                    L"Give the same relay code to lobby creators and joiners.",
+                    L"One UDP port handles the relay and hole punching. Share the code with everyone.",
                     0, 18, 255, 587, 35, 0);
 
         EnumChildWindows(window, [](HWND child, LPARAM fontValue) -> BOOL {

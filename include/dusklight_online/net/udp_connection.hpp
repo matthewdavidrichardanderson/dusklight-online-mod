@@ -1,5 +1,6 @@
 #pragma once
 #include "dusklight_online/net/reliable_udp.hpp"
+#include "dusklight_online/net/ice_agent.hpp"
 #include <string_view>
 #include <string>
 
@@ -13,7 +14,7 @@ public:
     struct Address { uint32_t ipv4 = 0; uint16_t port = 0; };
     UdpConnection();
     ~UdpConnection();
-    bool open(std::string_view host, uint16_t port, size_t capacity, bool server);
+    bool open(std::string_view host, uint16_t port, size_t capacity, bool server, bool stun = false);
     void close();
     Id connect(std::string_view host, uint16_t port);
     Id accept(Address& address);
@@ -34,6 +35,19 @@ public:
     // Relay idle wait: wake for received data without imposing a polling delay.
     // Does not service game callbacks or bypass the shared datagram budget.
     void wait_for_activity(uint32_t timeoutMs);
+    // Relay-admitted logical links. Both paths share one KCP session/budget.
+    bool mesh_open(std::string_view localId, Id relay, std::string_view stunHost, uint16_t stunPort);
+    Id mesh_admit(std::string_view peerId, bool reliable = false);
+    void mesh_remove(std::string_view peerId);
+    bool mesh_signal(std::string_view peerId, const IceAgent::Signal& signal);
+    bool mesh_pop_signal(std::string& peerId, IceAgent::Signal& signal);
+    bool mesh_send(std::string_view peerId, std::span<const uint8_t> bytes);
+    bool mesh_send_many(std::span<const std::string> peers, std::span<const uint8_t> bytes,
+        uint32_t* queuedDatagrams = nullptr, uint64_t* queuedBytes = nullptr);
+    int mesh_receive(std::string& peerId, std::span<uint8_t> bytes);
+    bool mesh_direct(std::string_view peerId) const;
+    // Explicit ICE retry retains the logical session and reliable queues.
+    bool mesh_retry(std::string_view peerId);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

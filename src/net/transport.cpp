@@ -1,3 +1,4 @@
+#include "dusklight_online/net/peer_delivery.hpp"
 #include "dusklight_online/net/reliable_json.hpp"
 #include "dusklight_online/net/pose_ack_history.hpp"
 #include "dusklight_online/net/transport.hpp"
@@ -207,6 +208,36 @@ struct Transport::Impl {
     std::string tx;
     std::map<std::string, Peer> directPeers;
     std::map<std::string, std::string> peerNames;
+    bool meshEnabled = false;
+    std::map<std::string, bool> meshPuppets;
+    std::map<std::string, bool> meshRoutes;
+    std::map<std::string, socket_t> meshLinks;
+    std::map<std::string, std::string> meshRx;
+    struct PendingGameplay { json value; size_t bytes; };
+    // Delivery identity survives carrier changes. KCP still handles packet
+    // recovery on each path; these bounded journals only bridge a path switch.
+    struct PeerDelivery {
+        uint64_t nextSend = 1, nextReceive = 1, ackPending = 0;
+        std::map<uint64_t, PendingGameplay> sent, received;
+    };
+    std::map<std::string, PeerDelivery> peerDelivery;
+    std::deque<PendingGameplay> deferredSends;
+    std::map<std::string,std::deque<PendingGameplay>> futureGameplay;
+    std::set<std::string> barrierExpected, barrierSeen, futureBarrierSeen;
+    uint64_t settingsGeneration = 0;
+    std::string announcedStage;
+    bool settingsRequested = false, settingsBarrier = false, barrierObserver = false, barrierReady = false;
+    std::chrono::steady_clock::time_point barrierStarted{};
+    size_t deliveryBytes = 0;
+    bool deliveryFailure = false;
+#if defined(DUSKLIGHT_TRANSPORT_TESTING)
+    bool testRestarted = false;
+#endif
+    static constexpr size_t deliveryLimit = 4 * 1024 * 1024;
+    bool retain_delivery(size_t bytes) {
+        if (deliveryBytes + bytes > deliveryLimit) { deliveryFailure = true; return false; }
+        deliveryBytes += bytes; return true;
+    }
     std::map<std::string, PeerPresence> peerStages;
     std::map<std::string, std::string> peerPoseStages;
     std::deque<Event> events;
@@ -520,6 +551,12 @@ struct Transport::Impl {
         tx.clear();
         events.clear();
         peerNames.clear();
+        meshEnabled = false; meshPuppets.clear();
+        meshRoutes.clear(); meshLinks.clear(); meshRx.clear();
+        peerDelivery.clear();
+        deferredSends.clear(); futureGameplay.clear(); barrierExpected.clear(); barrierSeen.clear(); futureBarrierSeen.clear();
+        deliveryBytes = 0; settingsGeneration = 0; announcedStage.clear(); deliveryFailure = false;
+        settingsRequested = settingsBarrier = barrierObserver = barrierReady = false;
         peerStages.clear();
         peerPoseStages.clear();
         poseAckSequences.clear();
@@ -581,7 +618,7 @@ struct Transport::Impl {
     }
 
     bool queue(socket_t target, std::string& buffer, const json& message) {
-        std::string line = encode_reliable_json(message);
+        std::string line = encode_reliable_json(message,meshEnabled ? reliablePeerFrameLimit : reliableJsonLimit);
         line.push_back('\n');
         if (buffer.size() + line.size() > kReliableTxBufferMaxBytes) {
             return false;
@@ -597,6 +634,16 @@ struct Transport::Impl {
         // Map erasure remains deferred to the owning pump iteration.
         close_reliable(peer.socket);
         return false;
+    }
+
+    void admit_mesh(const std::string& id) {
+        if (meshRoutes.contains(id)) return;
+        const auto link = connections.mesh_admit(id, true);
+        if (link == kInvalidSocket) { deliveryFailure = true; return; }
+        meshLinks[id] = link;
+        peerDelivery.try_emplace(id);
+        meshRoutes[id] = false;
+        emit(EventKind::RouteChanged, id, "relay");
     }
 
     void remove_peer(const std::string& peerId, const std::string& reason) {
@@ -800,6 +847,19 @@ struct Transport::Impl {
     }
 
     bool send_udp_datagram(const sockaddr_in& address, const udp::Datagram& datagram) {
+        if (meshEnabled) {
+            const auto info = udp::inspect_datagram(datagram.bytes);
+            if (info && info->type == udp::PacketType::PoseAck && datagram.bytes.size() == 58 + sizeof(udp::AckPacket)) {
+                udp::AckPacket ack{};
+                std::memcpy(&ack, datagram.bytes.data() + 58, sizeof(ack));
+                return connections.mesh_send(udp::acked_sender_id(ack), datagram.bytes);
+            }
+            if (info && info->type == udp::PacketType::RemoteObject) {
+                std::vector<std::string> recipients;
+                for (const auto& [id, name] : peerNames) recipients.push_back(id);
+                return connections.mesh_send_many(recipients, datagram.bytes);
+            }
+        }
         return send_udp_datagram_now(address, datagram);
     }
 
@@ -1097,6 +1157,21 @@ struct Transport::Impl {
     void pump_udp() {
         if (!udpOpen) return;
         std::array<uint8_t, 58 + udp::kChunkPayloadBytes> packet{};
+        if (meshEnabled) {
+            std::string peerId;
+            for (size_t n = 0; n < 512; ++n) {
+                const int size = connections.mesh_receive(peerId, packet);
+                if (size < 0) break;
+                if (!peerNames.contains(peerId)) continue;
+                const std::span<const uint8_t> wire(packet.data(), static_cast<size_t>(size));
+                const auto info = udp::inspect_datagram(wire);
+                if (!info || info->senderId != peerId || info->type == udp::PacketType::MidnaMsgpack ||
+                    info->type == udp::PacketType::RelayRegister) continue;
+                if (!wantPuppet && (info->type == udp::PacketType::PoseJson || info->type == udp::PacketType::PoseMsgpack ||
+                    info->type == udp::PacketType::SemanticPoseMsgpack)) continue;
+                handle_udp_result(udpDecoder.accept(wire), udpRemoteAddress);
+            }
+        }
         while (true) {
             UdpConnection::Address address;
             const int count = connections.receive_realtime(address, packet);
@@ -1235,6 +1310,235 @@ struct Transport::Impl {
         }
     }
 
+    bool defer_gameplay(const json& message) {
+        const size_t bytes = message.dump().size();
+        if (deferredSends.size() >= 4096 || !retain_delivery(bytes)) return false;
+        deferredSends.push_back({message,bytes}); return true;
+    }
+    bool delivery_direct(const std::string& name) const {
+#if defined(DUSKLIGHT_TRANSPORT_TESTING)
+        if (std::getenv("DUSKLIGHT_TEST_FORCE_FALLBACK")) return false;
+#endif
+        return connections.mesh_direct(name);
+    }
+    bool send_delivery(const std::vector<std::string>& recipients, const json& body) {
+        const size_t bytes = body.dump().size();
+        if (bytes > reliableJsonLimit + 128 || recipients.size() > 7 ||
+            bytes * recipients.size() > deliveryLimit - deliveryBytes) return false;
+        json fallback = json::array();
+        for (const auto& name : recipients) {
+            auto& state = peerDelivery.at(name);
+            if (state.sent.size() >= 4096 || state.nextSend == UINT64_MAX) return false;
+        }
+        for (const auto& name : recipients) {
+            auto& state = peerDelivery.at(name);
+            const uint64_t sequence = state.nextSend++;
+            if (!retain_delivery(bytes)) return false;
+            state.sent.emplace(sequence, PendingGameplay{body,bytes});
+            if (delivery_direct(name)) {
+                std::string unused;
+                if (!queue(meshLinks.at(name),unused,{{"sequence",sequence},{"body",body}})) return false;
+            } else fallback.push_back({{"id",name},{"sequence",sequence}});
+        }
+        // A relay broadcast uploads its body ONCE, even though recipients may
+        // have different sequence numbers because of earlier targeted syncs.
+        return fallback.empty() || queue(socket,tx,{{"type","peer_reliable"},
+            {"recipients",fallback},{"body",body}});
+    }
+    bool resend_delivery(const std::string& name, bool direct) {
+        for (const auto& [sequence,item] : peerDelivery.at(name).sent) {
+            if (direct) {
+                std::string unused;
+                if (!queue(meshLinks.at(name),unused,{{"sequence",sequence},{"body",item.value}})) return false;
+            } else if (!queue(socket,tx,{{"type","peer_reliable"},
+                {"recipients",json::array({{{"id",name},{"sequence",sequence}}})},{"body",item.value}})) return false;
+        }
+        return true;
+    }
+    void receive_delivery(const std::string& name, const json& frame) {
+        auto found = peerDelivery.find(name);
+        if (found == peerDelivery.end()) return; // already departed this room
+        auto& state = found->second;
+        if (frame.contains("ack")) {
+            if (!frame.at("ack").is_number_unsigned()) { deliveryFailure = true; return; }
+            const auto ack = frame.at("ack").get<uint64_t>();
+            if (ack >= state.nextSend) { deliveryFailure = true; return; }
+            while (!state.sent.empty() && state.sent.begin()->first <= ack) {
+                deliveryBytes -= state.sent.begin()->second.bytes; state.sent.erase(state.sent.begin());
+            }
+            return;
+        }
+        const auto& number = frame.at("sequence");
+        if (!number.is_number_unsigned()) { deliveryFailure = true; return; }
+        const auto sequence = number.get<uint64_t>();
+        if (!sequence || sequence == UINT64_MAX) { deliveryFailure = true; return; }
+        if (sequence < state.nextReceive) { state.ackPending = state.nextReceive-1; return; }
+        if (sequence - state.nextReceive >= 4096) { deliveryFailure = true; return; }
+        const auto& body = frame.at("body");
+        if (auto duplicate = state.received.find(sequence); duplicate != state.received.end()) {
+            if (duplicate->second.value != body) deliveryFailure = true;
+            return;
+        }
+        const size_t bytes = body.dump().size();
+        if (bytes > reliableJsonLimit+128 || !retain_delivery(bytes)) { deliveryFailure = true; return; }
+        state.received.emplace(sequence, PendingGameplay{body,bytes});
+        while (!deliveryFailure && !state.received.empty() && state.received.begin()->first == state.nextReceive) {
+            auto item = std::move(state.received.begin()->second);
+            state.received.erase(state.received.begin()); deliveryBytes -= item.bytes;
+            apply_delivery_body(name,item.value);
+            ++state.nextReceive;
+        }
+        if (!deliveryFailure) state.ackPending = state.nextReceive-1;
+    }
+    bool send_peer_gameplay(const json& message) {
+        if (message.dump().size() > reliableJsonLimit) return false;
+        const auto target = message.value("target_client_id", "");
+        if (message.value("type", "") == "sync_request" && target.empty()) return false;
+        if (!target.empty() && !meshLinks.contains(target)) return false;
+        std::vector<std::string> recipients;
+        for (const auto& [name,link] : meshLinks) {
+            if (!target.empty() && name != target) continue;
+            recipients.push_back(name);
+        }
+        return send_delivery(recipients,{{"generation",settingsGeneration},{"payload",message}});
+    }
+    bool send_mesh_message(const json& message) {
+        const bool setting = message.value("type", "") == "room_settings";
+        if (settingsRequested || settingsBarrier) return defer_gameplay(message);
+        if (!setting) {
+            if (message.value("type", "") == "progression_state") {
+                const auto stage = message.value("stage", "");
+                if (stage != announcedStage) {
+                    // Stage filtering is relay metadata, updated only on a
+                    // stage change. Gameplay never waits for its receipt.
+                    if (!queue(socket,tx,{{"type","peer_stage"},{"stage",stage}})) return false;
+                    announcedStage = stage;
+                }
+            }
+            return send_peer_gameplay(message);
+        }
+        settingsRequested = true; barrierStarted = std::chrono::steady_clock::now();
+        return queue(socket,tx,message);
+    }
+    void flush_deferred_gameplay() {
+        while (!settingsRequested && !settingsBarrier && !deferredSends.empty() && !deliveryFailure) {
+            auto item = std::move(deferredSends.front()); deferredSends.pop_front();
+            deliveryBytes -= item.bytes;
+            if (!send_mesh_message(item.value)) deliveryFailure = true;
+        }
+    }
+    void apply_peer_gameplay(const std::string& name, json message) {
+        if (!message.is_object() || message.dump().size() > reliableJsonLimit || !peer_delivery_type(message.value("type", "")) ||
+            (!message.value("target_client_id", "").empty() && message.value("target_client_id", "") != status.clientId)) {
+            deliveryFailure = true; return;
+        }
+        message["client_id"] = name;
+        handle_primary_message(message);
+    }
+    void receive_primary(const json& message) {
+        const auto type = message.value("type", "");
+        if (meshEnabled && (type == "peer_reliable" || type == "peer_receipt")) {
+            receive_delivery(message.at("client_id").get<std::string>(), message.at("frame"));
+            return;
+        }
+        if (meshEnabled && type == "settings_prepare") {
+            if (settingsBarrier || message.at("generation").get<uint64_t>() != settingsGeneration + 1) {
+                deliveryFailure = true; return;
+            }
+            settingsBarrier = true; barrierReady = false;
+            barrierObserver = message.value("observer", false);
+            barrierStarted = std::chrono::steady_clock::now();
+            barrierExpected.clear();
+            if (!barrierObserver) for (const auto& member : message.at("participants")) {
+                const auto name = member.get<std::string>();
+                if (name == status.clientId) continue;
+                if (!meshLinks.contains(name)) { deliveryFailure = true; return; }
+                barrierExpected.insert(name);
+                // Shares delivery order with gameplay, across BOTH carriers.
+                if (!send_delivery({name},{{"barrier",settingsGeneration+1}})) deliveryFailure = true;
+            }
+            return;
+        }
+        if (meshEnabled && type == "room_settings") {
+            const auto generation = message.at("settings_generation").get<uint64_t>();
+            if (!settingsBarrier || generation != settingsGeneration+1 || (!barrierObserver && !barrierReady)) {
+                deliveryFailure = true; return;
+            }
+            handle_primary_message(message);
+            settingsGeneration = generation;
+            settingsRequested = settingsBarrier = barrierObserver = barrierReady = false;
+            barrierExpected.clear(); barrierSeen = std::move(futureBarrierSeen); futureBarrierSeen.clear();
+            return;
+        }
+        if (meshEnabled && type == "error" && !settingsBarrier && settingsRequested) {
+            settingsRequested = false;
+        }
+        handle_primary_message(message);
+    }
+    void apply_delivery_body(const std::string& name, const json& envelope) {
+        auto& pending = futureGameplay[name];
+        // The relay stream can deliver a settings commit and the next frame
+        // in one read. Flush earlier deferred frames before that next frame.
+        while (!pending.empty() && pending.front().value.at("generation").get<uint64_t>() == settingsGeneration) {
+            auto item = std::move(pending.front()); pending.pop_front(); deliveryBytes -= item.bytes;
+            apply_peer_gameplay(name,item.value.at("payload"));
+        }
+        if (envelope.contains("barrier")) {
+            if (!envelope["barrier"].is_number_unsigned()) { deliveryFailure = true; return; }
+            const auto marker = envelope["barrier"].get<uint64_t>();
+            if (marker == settingsGeneration+1) {
+                if (!barrierSeen.insert(name).second) deliveryFailure = true;
+            } else if (marker == settingsGeneration+2 && settingsBarrier && (barrierReady || barrierObserver)) {
+                if (!futureBarrierSeen.insert(name).second) deliveryFailure = true;
+            } else deliveryFailure = true;
+            return;
+        }
+        const auto& number = envelope.at("generation");
+        if (!number.is_number_unsigned()) { deliveryFailure = true; return; }
+        const auto generation = number.get<uint64_t>();
+        if (generation < settingsGeneration || generation > settingsGeneration+1) { deliveryFailure = true; return; }
+        if (generation == settingsGeneration) {
+            if (barrierSeen.contains(name)) { deliveryFailure = true; return; }
+            apply_peer_gameplay(name,envelope.at("payload"));
+        } else {
+            if (!settingsBarrier || (!barrierReady && !barrierObserver)) { deliveryFailure = true; return; }
+            const size_t bytes = envelope.dump().size();
+            if (pending.size() >= 4096 || !retain_delivery(bytes)) { deliveryFailure = true; return; }
+            pending.push_back({envelope,bytes});
+        }
+
+    }
+    void drain_peer_gameplay(const std::string& name, socket_t link) {
+        auto& pending = futureGameplay[name];
+        // A remote peer can receive the commit before this peer does.
+        // Retain its next-generation data until our authoritative commit.
+        while (!pending.empty() && pending.front().value.at("generation").get<uint64_t>() == settingsGeneration) {
+            auto item = std::move(pending.front()); pending.pop_front(); deliveryBytes -= item.bytes;
+            apply_peer_gameplay(name,item.value.at("payload"));
+        }
+        if (!receive(link,meshRx[name],[&](const json& frame) { receive_delivery(name,frame); },true)) deliveryFailure = true;
+    }
+    void pump_deliveries() {
+        for (const auto& [name,link] : meshLinks) drain_peer_gameplay(name,link);
+        for (auto& [name,state] : peerDelivery) if (state.ackPending) {
+            const json receipt = {{"ack",state.ackPending}};
+            bool accepted;
+            if (delivery_direct(name)) {
+                std::string unused; accepted = queue(meshLinks.at(name),unused,receipt);
+            } else accepted = queue(socket,tx,{{"type","peer_receipt"},{"target_client_id",name},{"frame",receipt}});
+            if (!accepted) deliveryFailure = true;
+            state.ackPending = 0;
+        }
+        if (settingsBarrier && !barrierObserver && !barrierReady &&
+            std::all_of(barrierExpected.begin(),barrierExpected.end(),[&](const auto& id){return barrierSeen.contains(id);})) {
+            barrierReady = true;
+            if (!queue(socket,tx,{{"type","settings_ready"},{"generation",settingsGeneration+1}})) deliveryFailure = true;
+        }
+        if ((settingsBarrier || settingsRequested) && std::chrono::steady_clock::now()-barrierStarted > std::chrono::seconds(30))
+            deliveryFailure = true;
+        flush_deferred_gameplay();
+    }
+
     void handle_primary_message(const json& message) {
         if (!message.is_object()) {
             emit(EventKind::Error, {}, "non-object JSON message rejected");
@@ -1243,6 +1547,11 @@ struct Transport::Impl {
         const std::string type = message.value("type", "");
         if (type == "welcome") {
             status.welcomed = true;
+            if (status.mode == Mode::Relay) {
+                settingsGeneration = message.value("settings_generation",uint64_t(0));
+                settingsBarrier = barrierObserver = message.value("settings_pending",false);
+                if (settingsBarrier) barrierStarted = std::chrono::steady_clock::now();
+            }
             status.error.clear();
             status.clientId = message.value("client_id", "");
             status.ownerClientId = message.value("owner_client_id", "");
@@ -1253,6 +1562,9 @@ struct Transport::Impl {
             status.snapshotDeltasReady =
                 message.value("snapshot_deltas_ready", false);
             if (status.mode == Mode::Relay) {
+                const int port = message.value("stun_port", 0);
+                meshEnabled = connections.mesh_open(status.clientId, socket,
+                    port > 0 ? status.host : std::string{}, static_cast<uint16_t>(std::clamp(port, 0, 65535)));
                 if (relayCreateRoom) {
                     relayMayRecreateRoom = true;
                 }
@@ -1281,6 +1593,11 @@ struct Transport::Impl {
                 const std::string id = peer.value("client_id", "");
                 if (!id.empty()) {
                     peerNames[id] = peer.value("name", id);
+                    if (meshEnabled) {
+                        admit_mesh(id);
+                        meshPuppets[id] = peer.value("want_puppet", true);
+                        peerStages[id] = {peer.value("stage", ""), 0};
+                    }
                 }
             }
             emit(EventKind::Connected, status.clientId, {}, message);
@@ -1291,6 +1608,10 @@ struct Transport::Impl {
             const std::string id = message.value("client_id", "");
             if (!id.empty()) {
                 peerNames[id] = message.value("name", id);
+                if (meshEnabled) {
+                    admit_mesh(id);
+                    meshPuppets[id] = message.value("want_puppet", true);
+                }
             }
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
@@ -1299,7 +1620,21 @@ struct Transport::Impl {
             emit(EventKind::PeerJoined, id, message.value("name", id), message);
         } else if (type == "peer_left") {
             const std::string id = message.value("client_id", "");
+            if (meshLinks.contains(id)) drain_peer_gameplay(id,meshLinks.at(id));
             peerNames.erase(id);
+            connections.mesh_remove(id);
+            meshRoutes.erase(id); meshLinks.erase(id); meshRx.erase(id);
+            if (auto it = peerDelivery.find(id); it != peerDelivery.end()) {
+                for (const auto& [sequence,item] : it->second.sent) deliveryBytes -= item.bytes;
+                for (const auto& [sequence,item] : it->second.received) deliveryBytes -= item.bytes;
+                peerDelivery.erase(it);
+            }
+            barrierExpected.erase(id); barrierSeen.erase(id); futureBarrierSeen.erase(id);
+            if (auto it = futureGameplay.find(id); it != futureGameplay.end()) {
+                for (const auto& item : it->second) deliveryBytes -= item.bytes;
+                futureGameplay.erase(it);
+            }
+            meshPuppets.erase(id);
             forget_pose_ack_history(id);
             peerStages.erase(id);
             peerPoseStages.erase(id);
@@ -1308,6 +1643,13 @@ struct Transport::Impl {
             status.snapshotDeltasReady =
                 message.value("snapshot_deltas_ready", false);
             emit(EventKind::PeerLeft, id, {}, message);
+        } else if (type == "ice_signal") {
+            if (meshEnabled && meshLinks.contains(message.value("client_id", ""))) {
+                const int kind = message.value("kind", -1);
+                if (kind >= 0 && kind <= 2) connections.mesh_signal(message.value("client_id", ""),
+                    {static_cast<IceAgent::Signal::Kind>(kind), message.value("data", ""), message.value("generation", 0U)});
+            }
+            return;
         } else if (type == "owner_changed") {
             status.ownerClientId = message.value("owner_client_id", "");
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
@@ -1358,7 +1700,9 @@ struct Transport::Impl {
                 status.error = recreate ? "Relay room vanished; recreating it" : reason;
             }
         } else {
-            if (type == "presence") {
+            if (meshEnabled && type == "puppet_preference")
+                meshPuppets[message.value("client_id", "")] = message.value("want_puppet", true);
+            if (type == "presence" || type == "progression_state") {
                 const std::string id = message.value("client_id", "direct");
                 peerStages[id] = {message.value("stage", ""), 0};
             }
@@ -1371,7 +1715,7 @@ struct Transport::Impl {
     }
 
     template <typename Handler>
-    bool receive(socket_t source, std::string& buffer, Handler&& handler) {
+    bool receive(socket_t source, std::string& buffer, Handler&& handler, bool peerFrame = false) {
         std::array<char, 4096> bytes{};
         while (true) {
             const int count = connections.receive(source, bytes.data(), bytes.size());
@@ -1388,7 +1732,7 @@ struct Transport::Impl {
                         continue;
                     }
                     try {
-                        handler(decode_reliable_json(line));
+                        handler(decode_reliable_json(line, (peerFrame || meshEnabled) ? reliablePeerFrameLimit : reliableJsonLimit));
                     } catch (const ReliableJsonError&) {
                         emit(EventKind::Error, {}, "invalid compressed JSON");
                         return false;
@@ -1411,7 +1755,7 @@ struct Transport::Impl {
 
     void pump_primary() {
         if (!flush(socket, tx) ||
-            !receive(socket, rx, [this](const json& message) { handle_primary_message(message); }) ||
+            !receive(socket, rx, [this](const json& message) { receive_primary(message); }) ||
             !flush(socket, tx)) {
             const bool overflow = eventQueueOverflow;
             const bool rejected = handshakeRejected;
@@ -1488,6 +1832,38 @@ struct Transport::Impl {
             send_hello();
             pump_primary();
             if (status.state == State::Disconnected) return;
+            if (meshEnabled) {
+#if defined(DUSKLIGHT_TRANSPORT_TESTING)
+                if (std::getenv("DUSKLIGHT_TEST_RESTART_ICE") && !testRestarted) {
+                    for (const auto& [id,link] : meshLinks) connections.mesh_retry(id);
+                    testRestarted = true;
+                }
+#endif
+                try { pump_deliveries(); }
+                catch (const json::exception&) { deliveryFailure = true; }
+                if (deliveryFailure) { fail("reliable peer delivery failed or exceeded its bounded queue/deadline"); return; }
+                for (auto& [id, direct] : meshRoutes) {
+                    const bool current = delivery_direct(id);
+                    if (current != direct) {
+                        direct = current;
+                        if (!resend_delivery(id,direct)) deliveryFailure = true;
+                        emit(EventKind::RouteChanged, id, direct ? "direct" : "relay");
+                    }
+                }
+                std::string target;
+                IceAgent::Signal signal;
+                bool serviceSignals = true;
+#if defined(DUSKLIGHT_TRANSPORT_TESTING)
+                // Compiled only into the standalone harness, never the mod.
+                serviceSignals = std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") == nullptr;
+#endif
+                for (size_t n = 0; serviceSignals && n < 128 && connections.mesh_pop_signal(target, signal); ++n) {
+                    if (!queue(socket, tx, {{"type", "ice_signal"}, {"target_client_id", target},
+                        {"kind", static_cast<int>(signal.kind)}, {"data", signal.text}, {"generation", signal.generation}})) {
+                        fail("ICE signaling queue full"); return;
+                    }
+                }
+            }
             pump_udp();
             if (eventQueueOverflow) {
                 fail("transport event queue limit reached");
@@ -1628,7 +2004,9 @@ bool Transport::send(const nlohmann::json& message) {
     if (impl_->status.mode == Mode::DirectHost) {
         return impl_->broadcast(message);
     }
-    if (impl_->status.state != State::Connected || !impl_->queue(impl_->socket, impl_->tx, message)) {
+    const bool peerGameplay = impl_->meshEnabled && (peer_delivery_type(message.value("type","")) || message.value("type","") == "room_settings");
+    if (impl_->status.state != State::Connected ||
+        !(peerGameplay ? impl_->send_mesh_message(message) : impl_->queue(impl_->socket, impl_->tx, message))) {
         impl_->fail("send failed");
         return false;
     }
@@ -1647,7 +2025,8 @@ bool Transport::send_to(const std::string& peerId, const nlohmann::json& message
     nlohmann::json targeted = message;
     targeted["target_client_id"] = peerId;
     if (impl_->status.state != State::Connected ||
-        !impl_->queue(impl_->socket, impl_->tx, targeted)) {
+        !(impl_->meshEnabled && peer_delivery_type(targeted.value("type","")) ?
+            impl_->send_mesh_message(targeted) : impl_->queue(impl_->socket, impl_->tx, targeted))) {
         impl_->fail("targeted send failed");
         return false;
     }
@@ -1731,6 +2110,21 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
         impl_->emit(EventKind::Error, {}, error);
         return false;
     }
+    if (impl_->meshEnabled) {
+        bool accepted = true;
+        std::vector<std::string> recipients;
+        for (const auto& [id, name] : impl_->peerNames) {
+            if (impl_->meshPuppets.contains(id) && !impl_->meshPuppets.at(id)) continue;
+            if (!impl_->stages_match(message, id, senderId)) continue;
+            recipients.push_back(id);
+            ++impl_->lastVisualSend.recipients;
+        }
+        for (const auto& datagram : datagrams) {
+            accepted = impl_->connections.mesh_send_many(recipients, datagram.bytes,
+                &impl_->lastVisualSend.datagrams, &impl_->lastVisualSend.wireBytes) && accepted;
+        }
+        return accepted;
+    }
     const bool queued = impl_->enqueue_udp_tx_datagrams(impl_->udpRemoteAddress, datagrams,
                                                         senderId, receiverId, type);
     if (queued) {
@@ -1801,13 +2195,13 @@ bool Transport::publish_room_settings(const RoomSettings& settings) {
     if (impl_->status.mode != Mode::Relay && impl_->status.mode != Mode::DirectHost) {
         return false;
     }
+    if (impl_->status.mode == Mode::Relay) {
+        auto requested = settings; requested.pvp &= requested.remoteCollision;
+        return send({{"type","room_settings"},{"settings",settings_json(requested)}});
+    }
     const RoomSettings previous = impl_->status.settings;
     impl_->status.settings = settings;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
-    if (impl_->status.mode == Mode::Relay) {
-        return send({{"type", "room_settings"},
-                     {"settings", settings_json(impl_->status.settings)}});
-    }
     bool ok = true;
     if (previous.dummyModel != impl_->status.settings.dummyModel) {
         ok &= send({{"type", "dummy_model"},

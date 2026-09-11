@@ -14,6 +14,8 @@ using NativeSocket = int;
 #endif
 #include "dusklight_online/net/udp_connection.hpp"
 #include "dusklight_online/net/datagram_scheduler.hpp"
+#include "dusklight_online/net/peer_tunnel.hpp"
+#include "dusklight_online/net/stun_binding.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -61,6 +63,13 @@ struct UdpConnection::Impl : DatagramTransport {
         uint64_t nonce = 0, session = 0;
         uint32_t started = 0, lastReceive = 0, lastControl = 0;
         bool ready = false, closed = false, accepted = false;
+        uint64_t logical = 0;
+        bool meshReliable = false;
+        std::unique_ptr<IceAgent> ice;
+        uint32_t lastProbe = 0, lastEcho = 0, probeRtt = 250;
+        bool hasEcho = false;
+        uint32_t iceGeneration = 0, retryAt = 0, retryDelay = 30000;
+        uint32_t lastIceChange = 0;
         std::string rx;
     };
     struct Raw { Address address; std::vector<uint8_t> bytes; };
@@ -70,22 +79,52 @@ struct UdpConnection::Impl : DatagramTransport {
     std::jthread worker;
     NativeSocket socket = badSocket;
     bool stack = false, server = false;
+    bool stun = false;
+    uint32_t stunWindow = 0, stunCount = 0;
+    struct StunRate { uint32_t window = 0, count = 0; };
+    std::array<StunRate, 256> stunRates{};
     size_t capacity = 0;
     Id nextId = 1;
     std::map<Id, Peer> peers;
     std::deque<Id> accepted;
     std::deque<Raw> realtime;
+    struct MeshRaw { std::string peer; std::vector<uint8_t> bytes; };
+    std::deque<MeshRaw> meshRealtime;
+    uint64_t localLogical = 0;
+    Id relayId = invalid;
+    std::string stunHost;
+    uint16_t stunPort = 0;
     DatagramScheduler budget{*this};
     ReliableUdp reliable{budget, 4096};
     std::random_device random;
     uint64_t nonce() { uint64_t n = (uint64_t(random()) << 32) ^ random(); return n ? n : 1; }
     Id find(const sockaddr_in& address) const {
-        for (const auto& [id, peer] : peers) if (!peer.closed && same(peer.address, address)) return id;
+        for (const auto& [id, peer] : peers) if (!peer.logical && !peer.closed && same(peer.address, address)) return id;
         return invalid;
+    }
+    Id logical_peer(uint64_t logical) const {
+        if (logical) for (const auto& [id, peer] : peers)
+            if (!peer.closed && peer.logical == logical) return id;
+        return invalid;
+    }
+    bool direct(const Peer& peer, uint32_t now) const {
+        return peer.ice && peer.ice->connected() && peer.hasEcho &&
+            uint32_t(now - peer.lastEcho) < std::max(750U, std::min(3000U, peer.probeRtt * 4));
     }
     bool send(LogicalPeerId id, std::span<const uint8_t> bytes) override {
         auto it = peers.find(static_cast<Id>(id));
         if (it == peers.end() || it->second.closed || socket == badSocket) return false;
+        if (it->second.logical) {
+            auto& peer = it->second;
+            if (direct(peer, clock_ms()) && peer.ice->send(bytes)) return true;
+            const auto relay = peers.find(relayId);
+            if (relay == peers.end() || relay->second.closed || !relay->second.ready) return false;
+            auto wrapped = peer_tunnel(localLogical, peer.logical, bytes);
+            if (wrapped.empty()) return false;
+            const auto& endpoint = relay->second.address;
+            return sendto(socket, reinterpret_cast<const char*>(wrapped.data()), static_cast<int>(wrapped.size()), 0,
+                reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint)) == static_cast<int>(wrapped.size());
+        }
         const auto& destination = datagram_kind(bytes) == DatagramKind::Realtime &&
             it->second.realtimeAddress.sin_port ? it->second.realtimeAddress : it->second.address;
         return sendto(socket, reinterpret_cast<const char*>(bytes.data()), static_cast<int>(bytes.size()), 0,
@@ -96,6 +135,7 @@ struct UdpConnection::Impl : DatagramTransport {
     // the existing hello handler. They do not claim cryptographic identity.
     void control(Id id, uint8_t type) {
         auto& peer = peers.at(id);
+        if (peer.logical) return;
         std::array<uint8_t, 21> bytes{'D','U','C','1',type};
         write64(bytes.data() + 5, peer.nonce); write64(bytes.data() + 13, peer.session);
         send(id, bytes);
@@ -105,6 +145,7 @@ struct UdpConnection::Impl : DatagramTransport {
         auto& peer = peers.at(id);
         if (peer.ready) return true;
         if (!budget.add_peer(id)) return false;
+        if (peer.logical && !peer.meshReliable) { peer.ready = true; return true; }
         if (!reliable.add_peer(id, peer.session)) { budget.remove_peer(id); return false; }
         peer.ready = true;
         return true;
@@ -121,7 +162,9 @@ struct UdpConnection::Impl : DatagramTransport {
             if (peer.ready && !peer.closed && socket != badSocket) control(id, 6);
             reliable.remove_peer(id); budget.remove_peer(id);
         }
-        peers.clear(); accepted.clear(); realtime.clear();
+        peers.clear(); accepted.clear(); realtime.clear(); meshRealtime.clear();
+        localLogical = 0; relayId = invalid; stunHost.clear(); stunPort = 0;
+        stun = false; stunWindow = 0; stunCount = 0; stunRates = {};
         if (socket != badSocket) {
 #if defined(_WIN32)
             closesocket(socket);
@@ -174,6 +217,53 @@ struct UdpConnection::Impl : DatagramTransport {
         } else if (type == 5 && peer.ready) peer.lastReceive = now;
         else if (type == 6 && peer.ready) close_peer(id, false);
     }
+    void mesh_input(Id id, std::span<const uint8_t> bytes) {
+        auto& peer = peers.at(id);
+        if (peer.meshReliable && datagram_kind(bytes) == DatagramKind::Reliable) {
+            reliable.input(id, bytes);
+        } else if (bytes.size() >= 58 && std::memcmp(bytes.data(), "DMPU", 4) == 0) {
+            // Bind the claimed sender BEFORE the application decoder allocates.
+            size_t length = 0;
+            while (length < 32 && bytes[26 + length]) ++length;
+            std::string sender(reinterpret_cast<const char*>(bytes.data() + 26), length);
+            if (peer_number(sender) != peer.logical || meshRealtime.size() >= 512) return;
+            meshRealtime.push_back({std::move(sender), {bytes.begin(), bytes.end()}});
+        }
+    }
+    void pump_mesh(uint32_t now) {
+        for (auto& [id, peer] : peers) {
+            if (!peer.logical || peer.closed || !peer.ice) continue;
+            if (localLogical < peer.logical && !direct(peer, now) &&
+                static_cast<int32_t>(now - peer.retryAt) >= 0) {
+                peer.ice = std::make_unique<IceAgent>(stunHost, stunPort);
+                ++peer.iceGeneration; peer.hasEcho = false;
+                peer.lastIceChange = now;
+                peer.retryDelay = std::min(120000U, peer.retryDelay * 2);
+                peer.retryAt = now + peer.retryDelay;
+            }
+            if (direct(peer, now)) { peer.retryDelay = 30000; peer.retryAt = now + peer.retryDelay; }
+            if (peer.ice->connected() && uint32_t(now - peer.lastProbe) >= 250) {
+                std::array<uint8_t, 13> probe{'D','P','I','1',1};
+                write64(probe.data() + 5, now);
+                peer.ice->send(probe); peer.lastProbe = now;
+            }
+            std::vector<uint8_t> bytes;
+            for (size_t n = 0; n < 512 && peer.ice->pop(bytes); ++n) {
+                if (bytes.size() == 13 && std::memcmp(bytes.data(), "DPI1", 4) == 0) {
+                    if (bytes[4] == 1) { bytes[4] = 2; peer.ice->send(bytes); }
+                    else if (bytes[4] == 2) {
+                        const auto echoed = read64(bytes.data() + 5);
+                        if (echoed <= UINT32_MAX && uint32_t(now - static_cast<uint32_t>(echoed)) < 3000) {
+                            peer.probeRtt = uint32_t(now - static_cast<uint32_t>(echoed));
+                            peer.hasEcho = true; peer.lastEcho = now;
+                        }
+                    }
+                    continue;
+                }
+                mesh_input(id, bytes);
+            }
+        }
+    }
 };
 UdpConnection::UdpConnection() : impl_(std::make_unique<Impl>()) {}
 UdpConnection::~UdpConnection() { close(); }
@@ -184,7 +274,7 @@ void UdpConnection::close() {
     ++impl_->activityGeneration;
     impl_->activity.notify_all();
 }
-bool UdpConnection::open(std::string_view host, uint16_t port, size_t capacity, bool server) {
+bool UdpConnection::open(std::string_view host, uint16_t port, size_t capacity, bool server, bool stun) {
     close();
     std::lock_guard lock(impl_->mutex);
     if (!capacity || capacity > 4096) return false;
@@ -210,6 +300,7 @@ bool UdpConnection::open(std::string_view host, uint16_t port, size_t capacity, 
         impl_->close(); return false;
     }
     impl_->capacity = capacity; impl_->server = server;
+    impl_->stun = server && stun;
     impl_->budget.update(clock_ms());
     // Socket servicing must survive game loading/paused updates just as TCP's
     // kernel ACK processing did. All access to protocol state is serialized;
@@ -340,6 +431,40 @@ void UdpConnection::poll() {
         if (size < 0) break;
         received = true;
         auto packet = std::span<const uint8_t>(bytes).first(static_cast<size_t>(size));
+        if (impl_->stun && is_stun_binding(packet)) {
+            // Fixed storage, global and hashed per-source budgets. A discovery
+            // flood must not allocate peers or consume unbounded response work.
+            if (uint32_t(now - impl_->stunWindow) >= 1000) { impl_->stunWindow = now; impl_->stunCount = 0; }
+            uint32_t key = ntohl(from.sin_addr.s_addr);
+            key ^= key >> 16; key *= 0x7feb352dU; key ^= key >> 15;
+            auto& rate = impl_->stunRates[key % impl_->stunRates.size()];
+            if (uint32_t(now - rate.window) >= 1000) { rate.window = now; rate.count = 0; }
+            if (impl_->stunCount >= 1024 || rate.count >= 64) continue;
+            ++impl_->stunCount; ++rate.count;
+            const auto reply = stun_binding_reply(packet, ntohl(from.sin_addr.s_addr), ntohs(from.sin_port));
+            if (!reply.empty()) sendto(impl_->socket, reinterpret_cast<const char*>(reply.data()),
+                static_cast<int>(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+            continue;
+        }
+        if (peer_group_header(packet)) {
+            if (impl_->server && impl_->realtime.size() < 512)
+                impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)}, {packet.begin(), packet.end()}});
+            continue;
+        }
+        if (is_peer_tunnel(packet)) {
+            if (impl_->server) {
+                if (impl_->realtime.size() < 512)
+                    impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)}, {packet.begin(), packet.end()}});
+            } else {
+                const auto relay = impl_->peers.find(impl_->relayId);
+                if (relay != impl_->peers.end() && !relay->second.closed && same(from, relay->second.address) &&
+                    tunnel_read(packet.subspan(12, 8)) == impl_->localLogical) {
+                    const Id id = impl_->logical_peer(tunnel_read(packet.subspan(4, 8)));
+                    if (id != invalid) impl_->mesh_input(id, packet.subspan(20));
+                }
+            }
+            continue;
+        }
         if (packet.size() >= 4 && std::memcmp(packet.data(), "DUC1", 4) == 0) {
             impl_->receive_control(from, packet, now); continue;
         }
@@ -359,6 +484,7 @@ void UdpConnection::poll() {
         });
         if (accepted) impl_->peers.at(id).lastReceive = now;
     }
+    impl_->pump_mesh(now);
     impl_->reliable.update(now);
     ReliableUdp::Message message;
     while (impl_->reliable.pop(message)) {
@@ -370,6 +496,10 @@ void UdpConnection::poll() {
     }
     for (auto it = impl_->peers.begin(); it != impl_->peers.end();) {
         Id id = it->first; auto& peer = it->second;
+        if (peer.logical) {
+            if (!peer.closed && peer.meshReliable && impl_->reliable.failed(id)) impl_->close_peer(id, false);
+            ++it; continue;
+        }
         if (!peer.closed && ((peer.ready && (impl_->reliable.failed(id) || uint32_t(now - peer.lastReceive) >= 15000)) ||
             (!peer.ready && uint32_t(now - peer.started) >= 10000))) impl_->close_peer(id, true);
         if (peer.closed && impl_->server && !peer.accepted) { it = impl_->peers.erase(it); continue; }
@@ -392,5 +522,123 @@ void UdpConnection::wait_for_activity(uint32_t timeoutMs) {
         return std::any_of(impl_->peers.begin(), impl_->peers.end(),
             [](const auto& entry) { return !entry.second.rx.empty(); });
     });
+}
+bool UdpConnection::mesh_open(std::string_view localId, Id relay, std::string_view host, uint16_t port) {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->server || !peer_number(localId) || !impl_->peers.contains(relay)) return false;
+    impl_->localLogical = peer_number(localId); impl_->relayId = relay;
+    impl_->stunHost = host; impl_->stunPort = port;
+    return true;
+}
+UdpConnection::Id UdpConnection::mesh_admit(std::string_view peerId, bool reliable) {
+    std::lock_guard lock(impl_->mutex);
+    const auto number = peer_number(peerId);
+    if (!impl_->localLogical || !number || number == impl_->localLogical) return invalid;
+    const Id existing = impl_->logical_peer(number);
+    if (existing != invalid) return existing;
+    // One relay + seven player connections, independent of native capacity.
+    if (impl_->peers.size() >= 8) return invalid;
+    Impl::Peer peer;
+    peer.logical = number;
+    peer.meshReliable = reliable;
+    // IDs are regenerated on rejoin, so old sessions cannot enter a new link.
+    uint64_t low = std::min(number, impl_->localLogical), high = std::max(number, impl_->localLogical);
+    peer.session = low ^ (high + 0x9e3779b97f4a7c15ULL + (low << 6) + (low >> 2));
+    if (!peer.session) peer.session = 1;
+    peer.ice = std::make_unique<IceAgent>(impl_->stunHost, impl_->stunPort);
+    peer.retryAt = clock_ms() + peer.retryDelay;
+    peer.lastIceChange = clock_ms();
+    const Id id = impl_->nextId++;
+    impl_->peers.emplace(id, std::move(peer));
+    if (!impl_->ready(id)) { impl_->peers.erase(id); return invalid; }
+    return id;
+}
+void UdpConnection::mesh_remove(std::string_view peerId) {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    if (id != invalid) { impl_->close_peer(id, false); impl_->peers.erase(id); }
+    std::erase_if(impl_->meshRealtime, [&](const auto& packet) { return packet.peer == peerId; });
+}
+bool UdpConnection::mesh_signal(std::string_view peerId, const IceAgent::Signal& value) {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    if (id == invalid) return false;
+    auto& peer = impl_->peers.at(id);
+    if (value.generation != peer.iceGeneration) {
+        if (peer.logical >= impl_->localLogical || value.kind != IceAgent::Signal::Description ||
+            value.generation != peer.iceGeneration + 1 ||
+            uint32_t(clock_ms() - peer.lastIceChange) < 1000) return false;
+        peer.ice = std::make_unique<IceAgent>(impl_->stunHost, impl_->stunPort);
+        peer.iceGeneration = value.generation; peer.hasEcho = false;
+        peer.lastIceChange = clock_ms();
+    }
+    return peer.ice->signal(value);
+}
+bool UdpConnection::mesh_pop_signal(std::string& peerId, IceAgent::Signal& value) {
+    std::lock_guard lock(impl_->mutex);
+    for (auto& [id, peer] : impl_->peers) {
+        if (peer.logical && !peer.closed && peer.ice->pop_signal(value)) {
+            value.generation = peer.iceGeneration;
+            peerId = "client_" + std::to_string(peer.logical); return true;
+        }
+    }
+    return false;
+}
+bool UdpConnection::mesh_send(std::string_view peerId, std::span<const uint8_t> bytes) {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    if (id == invalid) return false;
+    const bool accepted = impl_->budget.send(id, bytes);
+    impl_->budget.update(clock_ms()); return accepted;
+}
+int UdpConnection::mesh_receive(std::string& peerId, std::span<uint8_t> bytes) {
+    poll();
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->meshRealtime.empty()) return -1;
+    auto packet = std::move(impl_->meshRealtime.front()); impl_->meshRealtime.pop_front();
+    if (packet.bytes.size() > bytes.size()) return -1;
+    peerId = std::move(packet.peer);
+    std::copy(packet.bytes.begin(), packet.bytes.end(), bytes.begin());
+    return static_cast<int>(packet.bytes.size());
+}
+bool UdpConnection::mesh_send_many(std::span<const std::string> names, std::span<const uint8_t> bytes,
+    uint32_t* queuedDatagrams, uint64_t* queuedBytes) {
+    std::lock_guard lock(impl_->mutex);
+    if (names.size() > 7 || bytes.size() < 58 || bytes.size() > 1158 ||
+        std::memcmp(bytes.data(), "DMPU", 4) != 0) return false;
+    std::vector<uint64_t> fallback;
+    bool ok = true;
+    const auto enqueue = [&](Id id, std::span<const uint8_t> packet) {
+        if (!impl_->budget.send(id, packet)) return false;
+        if (queuedDatagrams) ++*queuedDatagrams;
+        if (queuedBytes) *queuedBytes += packet.size();
+        return true;
+    };
+    const auto now = clock_ms();
+    for (const auto& name : names) {
+        const Id id = impl_->logical_peer(peer_number(name));
+        if (id == invalid) { ok = false; continue; }
+        const auto& peer = impl_->peers.at(id);
+        if (impl_->direct(peer, now)) ok = enqueue(id, bytes) && ok;
+        else if (std::find(fallback.begin(), fallback.end(), peer.logical) == fallback.end()) fallback.push_back(peer.logical);
+    }
+    if (!fallback.empty()) ok = enqueue(impl_->relayId, peer_group(impl_->localLogical, fallback, bytes)) && ok;
+    impl_->budget.update(now); return ok;
+}
+bool UdpConnection::mesh_direct(std::string_view peerId) const {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    return id != invalid && impl_->direct(impl_->peers.at(id), clock_ms());
+}
+bool UdpConnection::mesh_retry(std::string_view peerId) {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    if (id == invalid || impl_->localLogical >= impl_->peers.at(id).logical) return false;
+    auto& peer = impl_->peers.at(id);
+    peer.ice = std::make_unique<IceAgent>(impl_->stunHost, impl_->stunPort);
+    ++peer.iceGeneration; peer.hasEcho = false;
+    peer.lastIceChange = clock_ms();
+    peer.retryAt = clock_ms() + peer.retryDelay;
+    return true;
 }
 }

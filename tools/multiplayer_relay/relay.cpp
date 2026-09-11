@@ -1,6 +1,9 @@
+#include "dusklight_online/net/peer_delivery.hpp"
 #include "dusklight_online/net/reliable_json.hpp"
 #include "dusk/multiplayer/invite_code.hpp"
 #include "dusklight_online/net/udp_connection.hpp"
+#include "dusklight_online/net/peer_tunnel.hpp"
+#include "dusklight_online/net/datagram_scheduler.hpp"
 #include <thread>
 #include "nlohmann/json.hpp"
 
@@ -64,7 +67,7 @@ using dusklight_online::net::UdpConnection;
 constexpr int kProtocolVersion = 2;
 constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
 constexpr const char* kSnapshotDeltaCapability = "semantic_snapshot_delta_v1";
-constexpr size_t kMaxLineBytes = 512 * 1024;
+constexpr size_t kMaxLineBytes = dusklight_online::net::reliablePeerFrameLimit;
 constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxRoomClients = 8;
 constexpr size_t kMaxRoomIdBytes = 64;
@@ -301,6 +304,8 @@ struct Client {
     SteadyClock::time_point acceptedAt = SteadyClock::now();
     SteadyClock::time_point udpRateWindowStarted = SteadyClock::now();
     size_t udpRateWindowBytes = 0;
+    SteadyClock::time_point signalWindow = SteadyClock::now();
+    size_t signalBytes = 0;
     uint32_t poseCount = 0;
     bool closeAfterFlush = false;
     bool disconnectRequested = false;
@@ -316,6 +321,10 @@ struct Room {
     std::string password;
     std::vector<std::string> clientIds;
     std::string ownerClientId;
+    uint64_t settingsGeneration = 0;
+    json pendingSettings;
+    std::set<std::string> settingsWaiting;
+    SteadyClock::time_point settingsStarted{};
     bool dummyModel = true;
     bool syncFlags = true;
     bool syncWorld = false;
@@ -417,11 +426,12 @@ public:
 #endif
 
         if (!mConnections.open(mOptions.host, static_cast<uint16_t>(mOptions.port),
-                               FD_SETSIZE - 2, true)) {
+                               FD_SETSIZE - 2, true, true)) {
             std::cerr << "UDP listen failed\n";
             return false;
         }
         std::cout << "TP relay listening on UDP " << mOptions.host << ":" << mOptions.port << "\n";
+        std::cout << "STUN discovery shares the relay UDP port (public " << mOptions.publicPort << ")\n";
         while (true) {
             tick();
         }
@@ -465,6 +475,11 @@ private:
             }
         }
 
+        for (const auto& [id,room] : mRooms) if (!room.pendingSettings.is_null() &&
+            now-room.settingsStarted > std::chrono::seconds(30)) {
+            // Never apply half a settings transition or stall it indefinitely.
+            for (const auto& member : room.clientIds) disconnected.push_back(member);
+        }
         std::sort(disconnected.begin(), disconnected.end());
         disconnected.erase(std::unique(disconnected.begin(), disconnected.end()),
                            disconnected.end());
@@ -527,7 +542,7 @@ private:
                     }
 
                     try {
-                        route_message(client, dusklight_online::net::decode_reliable_json(line));
+                        route_message(client, dusklight_online::net::decode_reliable_json(line,kMaxLineBytes));
                     } catch (const dusklight_online::net::ReliableJsonError&) {
                         reject_and_close(client, "invalid_compressed_json");
                         return true;
@@ -566,6 +581,9 @@ private:
         }
 
         const std::string type = message.value("type", "");
+        if (type != "peer_reliable" && message.dump().size() > dusklight_online::net::reliableJsonLimit) {
+            reject_and_close(client,"message_too_large"); return;
+        }
         if (type == "hello") {
             if (!client.roomId.empty()) {
                 send_error(client, "already_joined");
@@ -582,6 +600,78 @@ private:
 
         if (type == "ping") {
             send_json(client, {{"type", "pong"}, {"time", now_seconds()}});
+            return;
+        }
+
+        if (type == "peer_reliable") {
+            const auto& recipients = message.at("recipients");
+            const auto& body = message.at("body");
+            if (!recipients.is_array() || recipients.empty() || recipients.size() > 7 ||
+                !body.is_object() || body.dump().size() > 512*1024+128) {
+                reject_and_close(client,"invalid_peer_delivery"); return;
+            }
+            std::set<std::string> targets;
+            auto room = mRooms.find(client.roomId);
+            if (room == mRooms.end()) return;
+            for (const auto& recipient : recipients) {
+                const auto name = recipient.at("id").get<std::string>();
+                const auto& sequence = recipient.at("sequence");
+                if (name == client.id || !targets.insert(name).second ||
+                    !sequence.is_number_unsigned() || !sequence.get<uint64_t>() ||
+                    std::find(room->second.clientIds.begin(),room->second.clientIds.end(),name) == room->second.clientIds.end()) {
+                    reject_and_close(client,"invalid_peer_delivery"); return;
+                }
+            }
+            for (const auto& recipient : recipients) send_to_client(client,recipient.at("id").get<std::string>(),
+                {{"type","peer_reliable"},{"client_id",client.id},
+                 {"frame",{{"sequence",recipient.at("sequence")},{"body",body}}}});
+            return;
+        }
+        if (type == "peer_receipt") {
+            const auto& ack = message.at("frame").at("ack");
+            if (!ack.is_number_unsigned()) { reject_and_close(client,"invalid_peer_receipt"); return; }
+            send_to_client(client,message.at("target_client_id").get<std::string>(),
+                {{"type","peer_receipt"},{"client_id",client.id},{"frame",{{"ack",ack}}}});
+            return;
+        }
+
+        if (type == "ice_signal") {
+            const auto now = SteadyClock::now();
+            if (now - client.signalWindow >= std::chrono::seconds(1)) {
+                client.signalWindow = now; client.signalBytes = 0;
+            }
+            const auto target = message.find("target_client_id");
+            const auto kind = message.find("kind");
+            const auto data = message.find("data");
+            const auto generation = message.find("generation");
+            if (target == message.end() || !target->is_string() ||
+                kind == message.end() || !kind->is_number_integer() ||
+                data == message.end() || !data->is_string() || generation == message.end() ||
+                !generation->is_number_unsigned() || generation->get<uint64_t>() > UINT32_MAX) return;
+            const auto text = data->get<std::string>();
+            const int k = kind->get<int>();
+            if (k < 0 || k > 2 || text.size() > (k == 0 ? 4095U : k == 1 ? 255U : 0U) ||
+                text.find('\0') != std::string::npos || client.signalBytes + text.size() + 64 > 65536) return;
+            client.signalBytes += text.size() + 64;
+            send_to_client(client, target->get<std::string>(), {
+                {"type", "ice_signal"}, {"client_id", client.id}, {"kind", k}, {"data", text}, {"generation", *generation}});
+            return;
+        }
+
+        if (type == "peer_stage") {
+            const auto stage = message.find("stage");
+            if (stage != message.end() && stage->is_string() && stage->get_ref<const std::string&>().size() <= 32)
+                client.stage = stage->get<std::string>();
+            return;
+        }
+        if (type == "settings_ready") {
+            auto room = mRooms.find(client.roomId);
+            const auto number = message.find("generation");
+            if (room == mRooms.end() || room->second.pendingSettings.is_null() ||
+                number == message.end() || !number->is_number_unsigned() ||
+                number->get<uint64_t>() != room->second.settingsGeneration+1) return;
+            room->second.settingsWaiting.erase(client.id);
+            finish_settings(room->second);
             return;
         }
 
@@ -606,21 +696,17 @@ private:
                 send_error(client, "owner_only");
                 return;
             }
-            const json settings = message.value("settings", json{});
-            if (!apply_room_settings(room, settings)) {
-                send_error(client, "invalid_settings");
-                return;
+            if (!room.pendingSettings.is_null()) { send_error(client,"settings_busy"); return; }
+            Room candidate = room;
+            if (!apply_room_settings(candidate, message.value("settings",json{}))) {
+                send_error(client,"invalid_settings"); return;
             }
-
-            const json routed = {
-                {"type", "room_settings"},
-                {"owner_client_id", room.ownerClientId},
-                {"semantic_visuals_ready", room.semanticVisualsReady},
-                {"snapshot_deltas_ready", room.snapshotDeltasReady},
-                {"settings", room_settings_json(room)},
-            };
-            send_json(client, routed);
-            broadcast(client, routed);
+            room.pendingSettings = room_settings_json(candidate);
+            room.settingsWaiting = {room.clientIds.begin(),room.clientIds.end()};
+            room.settingsStarted = SteadyClock::now();
+            const json prepare = {{"type","settings_prepare"},{"generation",room.settingsGeneration+1},
+                {"participants",room.clientIds}};
+            send_json(client,prepare); broadcast(client,prepare);
             return;
         }
 
@@ -773,7 +859,8 @@ private:
         for (const std::string& peerId : roomIt->second.clientIds) {
             const auto peerIt = mClients.find(peerId);
             if (peerIt != mClients.end()) {
-                peers.push_back({{"client_id", peerIt->second.id}, {"name", peerIt->second.name}});
+                peers.push_back({{"client_id", peerIt->second.id}, {"name", peerIt->second.name},
+                    {"want_puppet", peerIt->second.wantsPuppet}, {"stage", peerIt->second.stage}});
             }
         }
 
@@ -790,6 +877,9 @@ private:
             {"room_id", roomId},
             {"client_id", client.id},
             {"udp_token", client.udpToken},
+            {"stun_port", mOptions.publicPort},
+            {"settings_generation", roomIt->second.settingsGeneration},
+            {"settings_pending", !roomIt->second.pendingSettings.is_null()},
             {"owner_client_id", roomIt->second.ownerClientId},
             {"semantic_visuals_ready", roomIt->second.semanticVisualsReady},
             {"snapshot_deltas_ready", roomIt->second.snapshotDeltasReady},
@@ -799,6 +889,7 @@ private:
         broadcast(client, {
             {"type", "peer_joined"},
             {"client_id", client.id},
+            {"want_puppet", client.wantsPuppet},
             {"name", client.name},
             {"semantic_visuals_ready", roomIt->second.semanticVisualsReady},
             {"snapshot_deltas_ready", roomIt->second.snapshotDeltasReady},
@@ -885,6 +976,25 @@ private:
             from.sin_family = AF_INET;
             from.sin_addr.s_addr = endpoint.ipv4;
             from.sin_port = htons(endpoint.port);
+            const std::span<const uint8_t> wire(packet.data(), static_cast<size_t>(received));
+            if (const auto header = dusklight_online::net::peer_group_header(wire)) {
+                using namespace dusklight_online::net;
+                const auto payload = wire.subspan(header);
+                if (std::memcmp(payload.data(), "DMPU", 4) != 0) continue;
+                const auto sender = tunnel_read(wire.subspan(4, 8));
+                std::array<uint64_t, 7> seen{};
+                for (size_t i = 0; i < wire[12]; ++i) {
+                    const auto target = tunnel_read(wire.subspan(13 + i * 8, 8));
+                    if (!target || std::find(seen.begin(), seen.end(), target) != seen.end()) continue;
+                    seen[i] = target;
+                    route_peer_datagram(from, peer_tunnel(sender, target, payload));
+                }
+                continue;
+            }
+            if (dusklight_online::net::is_peer_tunnel(wire)) {
+                route_peer_datagram(from, wire);
+                continue;
+            }
             if (static_cast<size_t>(received) < sizeof(UdpRelayHeader)) {
                 continue;
             }
@@ -1012,6 +1122,46 @@ private:
         }
     }
 
+    void route_peer_datagram(const sockaddr_in& from, std::span<const uint8_t> wire) {
+        using namespace dusklight_online::net;
+        if (!is_peer_tunnel(wire)) return;
+        const auto senderId = "client_" + std::to_string(tunnel_read(wire.subspan(4, 8)));
+        const auto targetId = "client_" + std::to_string(tunnel_read(wire.subspan(12, 8)));
+        auto source = mClients.find(senderId), destination = mClients.find(targetId);
+        if (source == mClients.end() || destination == mClients.end() || source == destination) return;
+        auto& sender = source->second; auto& target = destination->second;
+        if (sender.roomId.empty() || sender.roomId != target.roomId ||
+            !sender.udpAddrKnown || !same_udp_endpoint(from, sender.udpAddr)) return;
+        const auto now = SteadyClock::now();
+        if (now - sender.udpRateWindowStarted >= std::chrono::seconds(1)) {
+            sender.udpRateWindowStarted = now; sender.udpRateWindowBytes = 0;
+        }
+        if (sender.udpRateWindowBytes + wire.size() > kMaxUdpBytesPerClientSecond) return;
+        sender.udpRateWindowBytes += wire.size();
+        const auto payload = wire.subspan(20);
+        if (is_peer_tunnel(payload)) return;
+        const auto kind = datagram_kind(payload);
+        if (kind == DatagramKind::Invalid) return;
+        if (kind == DatagramKind::Realtime) {
+            UdpRelayHeader header{};
+            std::memcpy(&header, payload.data(), sizeof(header));
+            if (header.version != 1 || header.headerSize != sizeof(header) ||
+                payload.size() != sizeof(header) + header.payloadSize || udp_sender_id(header) != senderId) return;
+            const bool pose = header.type == kUdpPacketTypePoseJson || header.type == kUdpPacketTypePoseMsgpack ||
+                header.type == kUdpPacketTypeSemanticPoseMsgpack;
+            if (!pose && header.type != kUdpPacketTypeRemoteObject && header.type != kUdpPacketTypePoseAck) return;
+            if (pose && (!target.wantsPuppet ||
+                (!sender.stage.empty() && !target.stage.empty() && sender.stage != target.stage))) return;
+            if (header.type == kUdpPacketTypeSemanticPoseMsgpack && !target.supportsSemanticVisuals) return;
+            if (header.type == kUdpPacketTypePoseAck) {
+                if (header.payloadSize != sizeof(UdpPoseAckPacket)) return;
+                UdpPoseAckPacket ack{}; std::memcpy(&ack, payload.data() + sizeof(header), sizeof(ack));
+                if (udp_acked_sender_id(ack) != targetId) return;
+            }
+        }
+        send_udp_to_client(target, wire.data(), wire.size());
+    }
+
     bool send_to_client(const Client& sender, const std::string& targetClientId,
                         const json& message) {
         const auto roomIt = mRooms.find(sender.roomId);
@@ -1056,6 +1206,7 @@ private:
                 room.clientIds.erase(
                     std::remove(room.clientIds.begin(), room.clientIds.end(), clientId),
                     room.clientIds.end());
+                room.settingsWaiting.erase(clientId);
                 room.semanticVisualsReady = room_semantic_visuals_ready(room);
                 room.snapshotDeltasReady = room_snapshot_deltas_ready(room);
                 log("leave room=" + roomId + " client=" + clientId);
@@ -1075,12 +1226,24 @@ private:
                         {"owner_client_id", room.ownerClientId},
                     });
                 }
+                if (auto remaining=mRooms.find(roomId); remaining!=mRooms.end()) finish_settings(remaining->second);
             }
         }
     }
 
+    void finish_settings(Room& room) {
+        if (room.pendingSettings.is_null() || !room.settingsWaiting.empty()) return;
+        apply_room_settings(room,room.pendingSettings);
+        room.pendingSettings = nullptr;
+        ++room.settingsGeneration;
+        const json commit = {{"type","room_settings"},{"settings_generation",room.settingsGeneration},
+            {"owner_client_id",room.ownerClientId},{"semantic_visuals_ready",room.semanticVisualsReady},
+            {"snapshot_deltas_ready",room.snapshotDeltasReady},{"settings",room_settings_json(room)}};
+        for (const auto& id : room.clientIds) if (auto it=mClients.find(id); it!=mClients.end()) send_json(it->second,commit);
+    }
+
     bool send_json(Client& client, const json& message) {
-        std::string bytes = dusklight_online::net::encode_reliable_json(message);
+        std::string bytes = dusklight_online::net::encode_reliable_json(message,dusklight_online::net::reliablePeerFrameLimit);
         bytes.push_back('\n');
         trace_packet_tx(client.id, message, bytes.size());
         if (bytes.size() > kMaxQueuedBytes ||
