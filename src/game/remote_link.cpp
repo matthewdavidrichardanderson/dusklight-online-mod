@@ -16,9 +16,13 @@
 namespace dusklight_online::game {
 
 JAUAudibleParam remote_audio_audible_params(JAISoundID soundId) {
-    Z2AudioMgr* audioMgr = Z2GetAudioMgr();
-    return audioMgr == nullptr ? JAUAudibleParam{}
-                               : audioMgr->mSoundInfo.getAudibleSwFull(soundId);
+    // getAudibleSwFull is not part of Dusklight's stable mod ABI: older
+    // releases do not export it and current upstream gives it a different PC
+    // signature. Remote Link only consumes the distance-volume bits from this
+    // value, so use its existing default curve without importing that private
+    // game method.
+    (void)soundId;
+    return JAUAudibleParam{};
 }
 
 Z2Audience* remote_audio_audience() {

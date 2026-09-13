@@ -195,8 +195,10 @@ string(REPLACE
     "${DUSKLIGHT_ONLINE_REMOTE_LINK_SOURCE}"
 )
 # JASGlobalInstance<T> inline accessors bind to the consuming DLL's template
-# static on Windows. Route Remote Link audio metadata/audience lookups through
-# the exported Z2AudioMgr pointer instead of permitting null mod-local copies.
+# static on Windows. Route Remote Link audio helpers through compatibility
+# functions instead of permitting null mod-local copies. In particular,
+# getAudibleSwFull is not a stable mod ABI symbol, so its helper uses the
+# default distance-volume curve without importing that private game method.
 set(DUSKLIGHT_ONLINE_REMOTE_SOUND_INFO_CALL
     "Z2GetSoundInfo()->getAudibleSwFull(i_soundId)")
 string(FIND "${DUSKLIGHT_ONLINE_REMOTE_LINK_SOURCE}"
