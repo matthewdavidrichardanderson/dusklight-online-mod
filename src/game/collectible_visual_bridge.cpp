@@ -1,5 +1,7 @@
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
 
+#include <unordered_set>
+
 #include "d/dolzel.h"
 
 // These fields are private only as a source-level encapsulation detail. Keep
@@ -13,11 +15,24 @@
 #include "d/actor/d_a_obj_kshutter.h"
 #include "d/actor/d_a_obj_lv4PoGate.h"
 #include "d/actor/d_a_obj_scannon.h"
+#include "d/actor/d_a_obj_bky_rock.h"
+#include "d/actor/d_a_obj_bmWindow.h"
+#include "d/actor/d_a_obj_hbombkoya.h"
+#include "d/actor/d_a_obj_lv4digsand.h"
+#include "d/actor/d_a_obj_lv5FloorBoard.h"
+#include "d/actor/d_a_obj_lv5IceWall.h"
+#include "d/actor/d_a_obj_lv5SwIce.h"
+#include "d/actor/d_a_obj_movebox.h"
+#include "d/actor/d_a_obj_picture.h"
+#include "d/actor/d_a_obj_rstair.h"
+#include "d/actor/d_a_obj_rfHole.h"
+#include "d/actor/d_a_obj_well_cover.h"
 #undef private
 
 #include "d/actor/d_a_e_pz.h"
 #include "d/actor/d_a_obj_carry.h"
 #include "d/actor/d_a_obj_Lv5Key.h"
+#include "d/actor/d_a_obj_iceblock.h"
 #include "d/actor/d_a_obj_kgate.h"
 #include "d/actor/d_a_obj_keyhole.h"
 #include "d/actor/d_a_obj_drop.h"
@@ -193,6 +208,30 @@ struct WebTimerSearch {
     int timer;
 };
 
+void* repair_lakebed_rot_stair(void* actor, void*) {
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_Obj_RotStair_e) return nullptr;
+    auto* stair = static_cast<daObjRotStair_c*>(actor);
+    if (fopAcM_GetRoomNo(stair) != 3 || stair->getSwNo() != 0) return nullptr;
+    int target = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (dComIfGs_isSwitch(stair->getSwNo() + i, fopAcM_GetRoomNo(stair))) {
+            target = i;
+            break;
+        }
+    }
+    if (target < 0) return nullptr;
+    for (int i = 0; i < 4; ++i) stair->mIsSw[i] = i == target;
+    if (stair->mMode == daObjRotStair_c::MODE_WAIT) {
+        static constexpr s16 kTargetAngles[] = {0x7FFF, 0x4000, 0x0000, -0x4000};
+        stair->field_0x5e3 = static_cast<s8>(target);
+        stair->mTargetAngle = kTargetAngles[target];
+        stair->shape_angle.y = kTargetAngles[target];
+        stair->field_0x5e2 = false;
+        stair->init_modeWait();
+    }
+    return actor;
+}
+
 void* start_web_timer(void* actor, void* data) {
     if (actor == nullptr || data == nullptr) return nullptr;
     const auto& search = *static_cast<const WebTimerSearch*>(data);
@@ -240,6 +279,270 @@ void* repair_web_switch(void* actor, void* data) {
     // switch as the authoritative fallback for paths which skip that timer.
     fopAcM_delete(web);
     return actor;
+}
+
+struct RoomActorSearch {
+    int actorName;
+    int room;
+    uint32_t params;
+    RoomActorAction action;
+    int actionArgument;
+};
+
+std::unordered_set<void*> sRemoteMoveboxes;
+std::unordered_set<void*> sRemoteIceblocks;
+
+bool room_actor_action_supported(int actorName, RoomActorAction action) {
+    switch (actorName) {
+    case fpcNm_BkyRock_e:
+        return action == RoomActorAction::DamageStage || action == RoomActorAction::Break;
+    case fpcNm_Obj_Lv4DigSand_e:
+        return action == RoomActorAction::DigStart || action == RoomActorAction::Break;
+    case fpcNm_Obj_IceWall_e:
+        return action == RoomActorAction::PartialBreak || action == RoomActorAction::Break;
+    case fpcNm_Obj_HBombkoya_e:
+    case fpcNm_Obj_RfHole_e:
+    case fpcNm_Obj_BmWindow_e:
+    case fpcNm_Obj_WellCover_e:
+    case fpcNm_Obj_BBox_e:
+    case fpcNm_Obj_Lv5FBoard_e:
+    case fpcNm_Obj_Picture_e:
+    case fpcNm_Obj_Lv5SwIce_e:
+        return action == RoomActorAction::Break;
+    case fpcNm_Obj_Movebox_e:
+        return action == RoomActorAction::MoveStep;
+    case fpcNm_Obj_RotStair_e:
+        return action == RoomActorAction::RotateTo;
+    case fpcNm_Obj_IceBlock_e:
+        return action == RoomActorAction::Slide;
+    default:
+        return false;
+    }
+}
+
+int room_actor_switch_flag(int actorName, uint32_t params) {
+    switch (actorName) {
+    case fpcNm_BkyRock_e:
+    case fpcNm_Obj_Picture_e:
+        return static_cast<int>((params >> 4) & 0xFF);
+    case fpcNm_Obj_HBombkoya_e:
+        return static_cast<int>((params >> 8) & 0xFF);
+    case fpcNm_Obj_RfHole_e:
+    case fpcNm_Obj_BmWindow_e:
+    case fpcNm_Obj_WellCover_e:
+    case fpcNm_Obj_BBox_e:
+    case fpcNm_Obj_Lv5FBoard_e:
+    case fpcNm_Obj_Lv4DigSand_e:
+    case fpcNm_Obj_IceWall_e:
+    case fpcNm_Obj_Lv5SwIce_e:
+        return static_cast<int>(params & 0xFF);
+    default:
+        return -1;
+    }
+}
+
+bool apply_room_actor_action(void* actor, int actorName, RoomActorAction action,
+                             int actionArgument) {
+    static constexpr u16 kBkyFirstParticles[] = {0x89C4, 0x89C5, 0x89C6, 0x89C7};
+    static constexpr u16 kBkySecondParticles[] = {0x89C2, 0x89C3, 0x89C4,
+                                                  0x89C5, 0x89C6, 0x89C7};
+    switch (actorName) {
+    case fpcNm_BkyRock_e: {
+        auto* rock = static_cast<daBkyRock_c*>(actor);
+        if (action == RoomActorAction::DamageStage && rock->mMode == daBkyRock_c::MODE_0) {
+            rock->initChangeModeBefore();
+            rock->callBombEmt(4, kBkyFirstParticles);
+            fopAcM_seStartCurrent(rock, Z2SE_OBJ_BOMB_ROCK_BRK_WTR_1, 0);
+            rock->mMode = daBkyRock_c::MODE_1;
+            rock->initChangeModeAfter();
+            return true;
+        }
+        if (action != RoomActorAction::Break || rock->mMode == daBkyRock_c::MODE_2) return false;
+        if (rock->mMode == daBkyRock_c::MODE_0) {
+            apply_room_actor_action(actor, actorName, RoomActorAction::DamageStage, 0);
+        }
+        if (rock->mMode != daBkyRock_c::MODE_1) return false;
+        rock->initChangeModeBefore();
+        rock->callBombEmt(6, kBkySecondParticles);
+        fopAcM_seStartCurrent(rock, Z2SE_OBJ_BOMB_ROCK_BRK_WTR_2, 0);
+        rock->mMode = daBkyRock_c::MODE_2;
+        fopAcM_onSwitch(rock, rock->getSwBit0());
+        rock->initChangeModeAfter();
+        return true;
+    }
+    case fpcNm_Obj_HBombkoya_e: {
+        auto* house = static_cast<daObjHBombkoya_c*>(actor);
+        if (action != RoomActorAction::Break) return false;
+        // The house's own Execute observes this completion bit and performs
+        // its normal final teardown on the following frame.
+        fopAcM_onSwitch(house, house->getSw2No());
+        return true;
+    }
+    case fpcNm_Obj_RfHole_e: {
+        auto* roof = static_cast<daRfHole_c*>(actor);
+        if (action != RoomActorAction::Break || roof->mMode != daRfHole_c::MODE_WAIT) return false;
+        roof->init_modeBreak();
+        return true;
+    }
+    case fpcNm_Obj_BmWindow_e: {
+        auto* window = static_cast<daBmWindow_c*>(actor);
+        if (action != RoomActorAction::Break || window->mMode != daBmWindow_c::WAIT) return false;
+        window->init_modeBreak();
+        return true;
+    }
+    case fpcNm_Obj_WellCover_e: {
+        auto* cover = static_cast<daObjWCover_c*>(actor);
+        if (action != RoomActorAction::Break || cover->field_0x5b0 != 0) return false;
+        cover->init_modeBreak();
+        return true;
+    }
+    case fpcNm_Obj_BBox_e: {
+        auto* box = static_cast<daObjBBox_c*>(actor);
+        if (action != RoomActorAction::Break ||
+            dComIfGs_isSwitch(box->getSwNo(), fopAcM_GetRoomNo(box))) return false;
+        static constexpr u16 particleIds[] = {0x83B0, 0x83B1, 0x83B2, 0x83B3, 0x83B4};
+        for (u16 particleId : particleIds) {
+            dComIfGp_particle_set(particleId, &box->current.pos, nullptr, &box->scale,
+                                  0xff, nullptr, -1, nullptr, nullptr, nullptr);
+        }
+        fopAcM_seStart(box, Z2SE_OBJ_WOODBOX_BREAK, 0);
+        fopAcM_onSwitch(box, box->getSwNo());
+        fopAcM_delete(box);
+        return true;
+    }
+    case fpcNm_Obj_Lv5FBoard_e: {
+        auto* floor = static_cast<daFlorBoad_c*>(actor);
+        if (action != RoomActorAction::Break || floor->mMode != daFlorBoad_c::MODE_WAIT) return false;
+        floor->init_modeBreak();
+        return true;
+    }
+    case fpcNm_Obj_Lv4DigSand_e: {
+        auto* sand = static_cast<daObjL4DigSand_c*>(actor);
+        if (action == RoomActorAction::DigStart && sand->mMode == 0) {
+            sand->startDig();
+            return true;
+        }
+        if (action != RoomActorAction::Break || sand->mMode == 2) return false;
+        sand->mode_init_end();
+        return true;
+    }
+    case fpcNm_Obj_Picture_e: {
+        auto* picture = static_cast<daObjPicture_c*>(actor);
+        if (action != RoomActorAction::Break || picture->field_0xd24 != 0 ||
+            picture->field_0xd26 != 0) return false;
+        fopAcM_onSwitch(picture, picture->getSW_0());
+        mDoAud_seStart(Z2SE_OBJ_ROPE_PAINT_CUT, &picture->field_0xc88, 0, 0);
+        picture->field_0xd24 = 1;
+        picture->speed.set(0.0f, -1.0f, 0.0f);
+        for (int i = 0; i < 10; ++i) {
+            picture->field_0xd28[i].x = (i == 5 || i == 6) ? 12.0f
+                                           : (i == 0 || i == 1) ? 4.0f : 7.0f;
+            picture->field_0xd28[i].y = -1.0f;
+            picture->field_0xd28[i].z = 0.0f;
+        }
+        return true;
+    }
+    case fpcNm_Obj_IceWall_e: {
+        auto* wall = static_cast<daIceWall_c*>(actor);
+        if (wall->mMode != daIceWall_c::MODE_WAIT) return false;
+        if (action == RoomActorAction::PartialBreak) {
+            if (wall->mIsBreaking != 0) return false;
+            wall->mIsBreaking = 1;
+            fopAcM_onSwitch(wall, wall->mIsBreakingSwBit);
+            fopAcM_SetMtx(wall, wall->mpModel[1]->getBaseTRMtx());
+            fopAcM_setCullSizeBox2(wall, wall->mpModel[1]->getModelData());
+            return true;
+        }
+        if (action != RoomActorAction::Break) return false;
+        wall->mIsBreaking = 1;
+        wall->init_modeBreak();
+        return true;
+    }
+    case fpcNm_Obj_Lv5SwIce_e: {
+        auto* ice = static_cast<daLv5SwIce_c*>(actor);
+        if (action != RoomActorAction::Break || ice->mMode != daLv5SwIce_c::MODE_WAIT) return false;
+        ice->init_modeBreak();
+        return true;
+    }
+    case fpcNm_Obj_Movebox_e: {
+        auto* block = static_cast<daObjMovebox::Act_c*>(actor);
+        const int direction = actionArgument & 0x3;
+        const bool pull = (actionArgument & 0x4) != 0;
+        const int duration = actionArgument >> 3;
+        if (action != RoomActorAction::MoveStep || block->field_0x5ac != 0 ||
+            direction < 0 || direction >= 4 || duration <= 0 || duration > 300) {
+            return false;
+        }
+        block->field_0x8e8 = direction;
+        block->mPPLabel = pull ? dBgW::PPLABEL_PULL : dBgW::PPLABEL_PUSH;
+        block->eff_smoke_slip_start();
+        block->mode_walk_init();
+        block->field_0x8f8 = static_cast<s16>(duration);
+        block->field_0x8e4 = 32768.0f / static_cast<f32>(duration);
+        sRemoteMoveboxes.insert(block);
+        return true;
+    }
+    case fpcNm_Obj_RotStair_e: {
+        auto* stair = static_cast<daObjRotStair_c*>(actor);
+        const int target = actionArgument;
+        if (action != RoomActorAction::RotateTo || target < 0 || target >= 4 ||
+            stair->mMode != daObjRotStair_c::MODE_WAIT) {
+            return false;
+        }
+        static constexpr s16 kTargetAngles[] = {0x7FFF, 0x4000, 0x0000, -0x4000};
+        const int baseSwitch = stair->getSwNo();
+        for (int i = 0; i < 4; ++i) {
+            if (i == target) {
+                dComIfGs_onSwitch(baseSwitch + i, fopAcM_GetRoomNo(stair));
+            } else {
+                dComIfGs_offSwitch(baseSwitch + i, fopAcM_GetRoomNo(stair));
+            }
+            stair->mIsSw[i] = i == target;
+        }
+        stair->field_0x5e3 = static_cast<s8>(target);
+        stair->mTargetAngle = kTargetAngles[target];
+        stair->field_0x5e2 = false;
+        stair->init_modeRotate();
+        return true;
+    }
+    case fpcNm_Obj_IceBlock_e: {
+        auto* block = static_cast<daObjIceBlk_c*>(actor);
+        const int direction = actionArgument & 0x3;
+        const int walkType = actionArgument >> 2;
+        if (action != RoomActorAction::Slide ||
+            block->mMode != daObjIceBlk_c::MODE_PROC_WAIT_e ||
+            direction < 0 || direction >= 4 || walkType < 1 || walkType > 2) {
+            return false;
+        }
+        static constexpr s16 kDirectionAngles[] = {0x0000, 0x4000, -0x8000, -0x4000};
+        block->mMoveDir = direction;
+        block->mWalkType = static_cast<u8>(walkType);
+        block->current.angle.y = kDirectionAngles[direction];
+        block->mode_init_walk();
+        // The local push path uses this event to take over the camera. The
+        // remote block keeps its native movement but must not control this
+        // client's camera; restore ACTION_WAIT when the slide ends.
+        block->setAction(daObjIceBlk_c::ACTION_DEAD_e);
+        fopAcM_seStart(block, Z2SE_OBJ_IRONBLOCK_MOVE, 0);
+        sRemoteIceblocks.insert(block);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+void* apply_room_actor_action_judge(void* actor, void* data) {
+    if (actor == nullptr || data == nullptr) return nullptr;
+    const auto& search = *static_cast<const RoomActorSearch*>(data);
+    auto* gameActor = static_cast<fopAc_ac_c*>(actor);
+    if (fpcM_GetName(actor) != search.actorName ||
+        fopAcM_GetRoomNo(gameActor) != search.room ||
+        fopAcM_GetParam(actor) != search.params) {
+        return nullptr;
+    }
+    return apply_room_actor_action(actor, search.actorName, search.action,
+                                   search.actionArgument) ? actor : nullptr;
 }
 
 struct FaronCageSearch {
@@ -374,6 +677,10 @@ bool repair_remote_switch_actors(int stage, int flag) {
     }
     repaired = fopAcIt_Judge(repair_phantom_zant, &flag) != nullptr || repaired;
     repaired = fopAcIt_Judge(repair_sky_cannon, &flag) != nullptr || repaired;
+    if (stage == dStage_SaveTbl_LV3 && flag >= 0 && flag <= 3 &&
+        dComIfGp_roomControl_getStayNo() == 3) {
+        repaired = fopAcIt_Judge(repair_lakebed_rot_stair, nullptr) != nullptr || repaired;
+    }
 
     if (stage == dStage_SaveTbl_FARON) {
         constexpr int kBothBokoblins = 45;
@@ -450,6 +757,113 @@ bool repair_remote_web_actor(int actorName, int room, int flag, uint32_t params)
     }
     WebSwitchSearch search{actorName, room, flag, params};
     return fopAcIt_Judge(repair_web_switch, &search) != nullptr;
+}
+
+int room_actor_action_state(void* actor) {
+    if (actor == nullptr || !fopAcM_IsActor(actor)) return -1;
+    switch (fpcM_GetName(actor)) {
+    case fpcNm_BkyRock_e:
+        return static_cast<daBkyRock_c*>(actor)->mMode;
+    case fpcNm_Obj_Lv4DigSand_e:
+        return static_cast<daObjL4DigSand_c*>(actor)->mMode;
+    case fpcNm_Obj_Movebox_e:
+        return static_cast<daObjMovebox::Act_c*>(actor)->field_0x5ac;
+    case fpcNm_Obj_RotStair_e:
+        return static_cast<daObjRotStair_c*>(actor)->mMode;
+    case fpcNm_Obj_IceBlock_e:
+        return static_cast<daObjIceBlk_c*>(actor)->mMode;
+    default:
+        return -1;
+    }
+}
+
+int room_actor_action_argument(void* actor) {
+    if (actor == nullptr || !fopAcM_IsActor(actor)) return -1;
+    switch (fpcM_GetName(actor)) {
+    case fpcNm_Obj_Movebox_e: {
+        const auto* block = static_cast<const daObjMovebox::Act_c*>(actor);
+        if (block->field_0x8e8 < 0 || block->field_0x8e8 >= 4 ||
+            block->field_0x8f8 <= 0) return -1;
+        const bool pull = cLib_checkBit<dBgW::PushPullLabel>(
+            block->mPPLabel, dBgW::PPLABEL_PULL) != 0;
+        return (block->field_0x8f8 << 3) | (pull ? 0x4 : 0) | block->field_0x8e8;
+    }
+    case fpcNm_Obj_RotStair_e:
+        return static_cast<const daObjRotStair_c*>(actor)->field_0x5e3;
+    case fpcNm_Obj_IceBlock_e: {
+        const auto* block = static_cast<const daObjIceBlk_c*>(actor);
+        if (block->mMoveDir < 0 || block->mMoveDir >= 4 ||
+            block->mWalkType < 1 || block->mWalkType > 2) return -1;
+        return (static_cast<int>(block->mWalkType) << 2) | block->mMoveDir;
+    }
+    default:
+        return 0;
+    }
+}
+
+RoomActorAction room_actor_switch_action(void* actor, bool wasSet) {
+    if (actor != nullptr && fopAcM_IsActor(actor) &&
+        fpcM_GetName(actor) == fpcNm_Obj_IceWall_e) {
+        const auto* wall = static_cast<const daIceWall_c*>(actor);
+        if (!wasSet && wall->mIsBreaking == 1) return RoomActorAction::PartialBreak;
+    }
+    return RoomActorAction::Break;
+}
+
+bool apply_remote_room_actor_action(int actorName, int room, uint32_t params,
+                                    RoomActorAction action, int actionArgument) {
+    if (!room_actor_action_supported(actorName, action) || room < 0 || room >= 64 ||
+        room != dComIfGp_roomControl_getStayNo()) {
+        return false;
+    }
+    RoomActorSearch search{actorName, room, params, action, actionArgument};
+    return fopAcIt_Judge(apply_room_actor_action_judge, &search) != nullptr;
+}
+
+bool remote_movebox_action_active(void* actor) {
+    const auto it = sRemoteMoveboxes.find(actor);
+    if (it == sRemoteMoveboxes.end()) return false;
+    if (actor == nullptr || !fopAcM_IsActor(actor) ||
+        fpcM_GetName(actor) != fpcNm_Obj_Movebox_e ||
+        static_cast<daObjMovebox::Act_c*>(actor)->field_0x5ac != 1) {
+        sRemoteMoveboxes.erase(it);
+        return false;
+    }
+    return true;
+}
+
+bool remote_iceblock_action_active(void* actor) {
+    return sRemoteIceblocks.contains(actor);
+}
+
+void finish_remote_iceblock_action(void* actor) {
+    const auto it = sRemoteIceblocks.find(actor);
+    if (it == sRemoteIceblocks.end()) return;
+    if (actor == nullptr || !fopAcM_IsActor(actor) ||
+        fpcM_GetName(actor) != fpcNm_Obj_IceBlock_e) {
+        sRemoteIceblocks.erase(it);
+        return;
+    }
+    auto* block = static_cast<daObjIceBlk_c*>(actor);
+    if (block->mMode == daObjIceBlk_c::MODE_PROC_WAIT_e) {
+        block->setAction(daObjIceBlk_c::ACTION_WAIT_e);
+        sRemoteIceblocks.erase(it);
+    }
+}
+
+bool apply_remote_room_actor_switch(int actorName, int room, int flag, uint32_t params,
+                                    RoomActorAction fallbackAction) {
+    if (room < 0 || room >= 64 || flag < 0 || flag >= 0xFF ||
+        room != dComIfGp_roomControl_getStayNo() ||
+        room_actor_switch_flag(actorName, params) != flag ||
+        !room_actor_action_supported(actorName, fallbackAction)) {
+        return false;
+    }
+
+    RoomActorSearch search{actorName, room, params, fallbackAction, 0};
+    fopAcIt_Judge(apply_room_actor_action_judge, &search);
+    dComIfGs_onSwitch(flag, room);
+    return true;
 }
 
 void repair_current_stage_collectibles() {

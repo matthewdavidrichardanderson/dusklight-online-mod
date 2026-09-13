@@ -247,6 +247,8 @@ constexpr std::string_view kPvpReactionShieldBash = "shield_bash";
 GameAdapter* sActiveAdapter = nullptr;
 std::vector<void*> sExecutingProcessStack;
 std::vector<int> sWebDeleteTimerStack;
+std::vector<int> sRoomActorActionStateStack;
+std::vector<int> sRemoteMoveboxPushPullKeepStack;
 std::unordered_map<void*, int> sDoor20ExecuteModes;
 uint32_t sDoor20StopOpenDepth = 0;
 std::vector<bool> sInfoSwitchWasSetStack;
@@ -600,6 +602,17 @@ bool is_unsynced_switch_bit(int stage, int flag) {
            (stage == dStage_SaveTbl_LANAYRU && flag == 0x1E);
 }
 
+bool is_lakebed_staircase_switch(int stage, int flag) {
+    return stage == dStage_SaveTbl_LV3 && flag >= 0 && flag <= 3;
+}
+
+bool is_local_lakebed_staircase_switch_write(int stage, int flag) {
+    if (!is_lakebed_staircase_switch(stage, flag) ||
+        dComIfGp_roomControl_getStayNo() != 3) return false;
+    const char* stageName = dComIfGp_getStartStageName();
+    return stageName != nullptr && std::strcmp(stageName, "D_MN01") == 0;
+}
+
 enum class RemoteSwitchPolicyMode { ApplyImmediately, DeferUntilRoomInit, SuppressRemote };
 
 struct RemoteSwitchPolicy {
@@ -644,6 +657,61 @@ bool is_web_switch_actor(int actorName) {
     return actorName == fpcNm_OBJ_WEB0_e || actorName == fpcNm_OBJ_WEB1_e;
 }
 
+bool is_permanent_room_actor(int actorName) {
+    switch (actorName) {
+    case fpcNm_BkyRock_e:
+    case fpcNm_Obj_HBombkoya_e:
+    case fpcNm_Obj_RfHole_e:
+    case fpcNm_Obj_BmWindow_e:
+    case fpcNm_Obj_WellCover_e:
+    case fpcNm_Obj_BBox_e:
+    case fpcNm_Obj_Lv5FBoard_e:
+    case fpcNm_Obj_Lv4DigSand_e:
+    case fpcNm_Obj_Picture_e:
+    case fpcNm_Obj_IceWall_e:
+    case fpcNm_Obj_Lv5SwIce_e:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_room_action_actor(int actorName) {
+    return is_permanent_room_actor(actorName) || actorName == fpcNm_Obj_Movebox_e ||
+           actorName == fpcNm_Obj_RotStair_e || actorName == fpcNm_Obj_IceBlock_e;
+}
+
+int permanent_room_actor_switch_flag(int actorName, uint32_t params) {
+    switch (actorName) {
+    case fpcNm_BkyRock_e:
+    case fpcNm_Obj_Picture_e:
+        return static_cast<int>((params >> 4) & 0xFF);
+    case fpcNm_Obj_HBombkoya_e:
+        return static_cast<int>((params >> 8) & 0xFF);
+    default:
+        return is_permanent_room_actor(actorName) ? static_cast<int>(params & 0xFF) : -1;
+    }
+}
+
+bool valid_room_actor_action(int actorName, RoomActorAction action) {
+    switch (actorName) {
+    case fpcNm_BkyRock_e:
+        return action == RoomActorAction::DamageStage || action == RoomActorAction::Break;
+    case fpcNm_Obj_Lv4DigSand_e:
+        return action == RoomActorAction::DigStart || action == RoomActorAction::Break;
+    case fpcNm_Obj_IceWall_e:
+        return action == RoomActorAction::PartialBreak || action == RoomActorAction::Break;
+    case fpcNm_Obj_Movebox_e:
+        return action == RoomActorAction::MoveStep;
+    case fpcNm_Obj_RotStair_e:
+        return action == RoomActorAction::RotateTo;
+    case fpcNm_Obj_IceBlock_e:
+        return action == RoomActorAction::Slide;
+    default:
+        return is_permanent_room_actor(actorName) && action == RoomActorAction::Break;
+    }
+}
+
 bool is_group2_lifecycle_actor(int actorName) {
     return actorName == fpcNm_Tag_Mhint_e || actorName == fpcNm_Tag_Mmsg_e ||
            actorName == fpcNm_Tag_Mstop_e || actorName == fpcNm_Tag_TheBHint_e ||
@@ -665,11 +733,50 @@ void* exact_local_switch_actor_context(bool set) {
             !(actor == fpcNm_DOOR20_e && sDoor20StopOpenDepth != 0)) {
             return process;
         }
-        if (is_web_switch_actor(actor)) return process;
-    } else if (actor == fpcNm_Obj_Timer_e) {
-        return process;
+        if (is_web_switch_actor(actor) || is_room_action_actor(actor)) return process;
+    } else {
+        if (actor == fpcNm_Obj_Timer_e || actor == fpcNm_Obj_Movebox_e ||
+            actor == fpcNm_Obj_RotStair_e || actor == fpcNm_Obj_IceBlock_e) return process;
     }
     return nullptr;
+}
+
+bool valid_stage(int stage);
+int current_stage_table();
+
+void publish_room_actor_action(void* process, RoomActorAction action, int actionArgument = 0) {
+    if (sActiveAdapter == nullptr || sActiveAdapter->applying_remote() || process == nullptr ||
+        !fopAcM_IsActor(process)) return;
+    const int actorName = fpcM_GetName(process);
+    if (!is_room_action_actor(actorName) || !valid_room_actor_action(actorName, action)) return;
+    const int stage = current_stage_table();
+    const int room = fopAcM_GetRoomNo(static_cast<fopAc_ac_c*>(process));
+    const char* stageName = dComIfGp_getStartStageName();
+    if (!valid_stage(stage) || room < 0 || room >= 64 || stageName == nullptr) return;
+    sActiveAdapter->publish_local({
+        {"type", "room_actor_action"}, {"stage", stage}, {"room", room},
+        {"source_actor", actorName}, {"source_params", fopAcM_GetParam(process)},
+        {"source_stage", stageName}, {"action", static_cast<int>(action)},
+        {"action_arg", actionArgument},
+    });
+}
+
+void publish_lakebed_staircase_switch_state(void* process, int target) {
+    if (sActiveAdapter == nullptr || sActiveAdapter->applying_remote() || process == nullptr ||
+        !fopAcM_IsActor(process) || fpcM_GetName(process) != fpcNm_Obj_RotStair_e ||
+        target < 0 || target >= 4) return;
+    const int stage = current_stage_table();
+    if (stage != dStage_SaveTbl_LV3) return;
+    // The room action is queued first. These durable state messages then reach
+    // every peer, including peers outside the room, without starting their
+    // loaded staircase before the safe action has initialized it.
+    for (int i = 0; i < 4; ++i) {
+        if (i == target) continue;
+        sActiveAdapter->publish_local(
+            {{"type", "switch_bit"}, {"stage", stage}, {"flag", i}, {"set", false}});
+    }
+    sActiveAdapter->publish_local(
+        {{"type", "switch_bit"}, {"stage", stage}, {"flag", target}, {"set", true}});
 }
 
 bool is_sewers_progression_switch(int stage, int flag) {
@@ -1344,14 +1451,15 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
     const int flag = mods::arg<int>(args, 1);
     if (!valid_stage(stage) || flag < 0 || flag >= dSv_info_c::MEMORY_SWITCH ||
         is_unsynced_switch_bit(stage, flag)) return;
+    if (is_local_lakebed_staircase_switch_write(stage, flag)) return;
     nlohmann::json message =
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", true}};
     if (void* process = exact_local_switch_actor_context(true); process != nullptr) {
         const int actor = fpcM_GetName(process);
-        // Web timer synchronization supplies the native effect; retain this
-        // exact completion edge as a fallback for destruction paths which do
-        // not initialize the timer.
-        if (is_web_switch_actor(actor)) return;
+        // Room-scoped actor messages own both the native action and their
+        // exact completion fallback. Do not also leak the same mutation into
+        // the stage-wide generic switch channel.
+        if (is_web_switch_actor(actor) || is_room_action_actor(actor)) return;
         const auto* source = static_cast<const fopAc_ac_c*>(process);
         const int room = fopAcM_GetHomeRoomNo(source);
         const uint32_t params = fpcM_GetParam(process);
@@ -1394,10 +1502,13 @@ void memory_switch_off_post(ModContext*, void* args, void*, void*) {
     const int flag = mods::arg<int>(args, 1);
     if (!valid_stage(stage) || flag < 0 || flag >= dSv_info_c::MEMORY_SWITCH ||
         is_unsynced_switch_bit(stage, flag)) return;
+    if (is_local_lakebed_staircase_switch_write(stage, flag)) return;
     nlohmann::json message =
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", false}};
     if (void* process = exact_local_switch_actor_context(false); process != nullptr) {
         const int actor = fpcM_GetName(process);
+        if (actor == fpcNm_Obj_Movebox_e || actor == fpcNm_Obj_RotStair_e ||
+            actor == fpcNm_Obj_IceBlock_e) return;
         const int room = fopAcM_GetHomeRoomNo(static_cast<const fopAc_ac_c*>(process));
         const uint32_t params = fpcM_GetParam(process);
         if (is_group2_lifecycle_actor(actor) && !is_sewers_progression_switch(stage, flag)) return;
@@ -1558,6 +1669,14 @@ HookAction process_execute_pre(ModContext*, void* args, void*, void*) {
     void* process = mods::arg<void*>(args, 0);
     sExecutingProcessStack.push_back(process);
     sWebDeleteTimerStack.push_back(web_delete_timer(process));
+    sRoomActorActionStateStack.push_back(room_actor_action_state(process));
+    int preservePushPullKeep = -1;
+    if (remote_movebox_action_active(process)) {
+        const auto* player = static_cast<const daPy_py_c*>(dComIfGp_getPlayer(0));
+        preservePushPullKeep = player != nullptr &&
+            player->checkNoResetFlg0(daPy_py_c::FLG0_PUSH_PULL_KEEP) != 0;
+    }
+    sRemoteMoveboxPushPullKeepStack.push_back(preservePushPullKeep);
     if (process != nullptr && fpcM_GetName(process) == fpcNm_DOOR20_e) {
         sDoor20ExecuteModes.erase(process);
     }
@@ -1643,6 +1762,53 @@ void door20_stop_open_post(ModContext*, void*, void*, void*) {
 
 void process_execute_post(ModContext*, void* args, void*, void*) {
     void* process = mods::arg<void*>(args, 0);
+    const int preservePushPullKeep = sRemoteMoveboxPushPullKeepStack.empty()
+                                         ? -1
+                                         : sRemoteMoveboxPushPullKeepStack.back();
+    if (!sRemoteMoveboxPushPullKeepStack.empty()) {
+        sRemoteMoveboxPushPullKeepStack.pop_back();
+    }
+    if (preservePushPullKeep >= 0) {
+        auto* player = static_cast<daPy_py_c*>(dComIfGp_getPlayer(0));
+        if (player != nullptr) {
+            if (preservePushPullKeep != 0) player->onPushPullKeep();
+            else player->offPushPullKeep();
+        }
+        // Erases the remote marker on the exact frame the native walk mode
+        // returns to wait; no stale actor pointer survives room teardown.
+        (void)remote_movebox_action_active(process);
+    }
+    const int previousActorState = sRoomActorActionStateStack.empty()
+                                       ? -1
+                                       : sRoomActorActionStateStack.back();
+    if (!sRoomActorActionStateStack.empty()) sRoomActorActionStateStack.pop_back();
+    const int actorState = room_actor_action_state(process);
+    if (previousActorState == 0 && actorState == 1 && process != nullptr &&
+        !sExecutingProcessStack.empty() && sExecutingProcessStack.back() == process) {
+        const int actorName = fpcM_GetName(process);
+        if (actorName == fpcNm_BkyRock_e) {
+            publish_room_actor_action(process, RoomActorAction::DamageStage);
+        } else if (actorName == fpcNm_Obj_Lv4DigSand_e) {
+            publish_room_actor_action(process, RoomActorAction::DigStart);
+        } else if (actorName == fpcNm_Obj_Movebox_e) {
+            const int actionArgument = room_actor_action_argument(process);
+            if (actionArgument >= 0) {
+                publish_room_actor_action(process, RoomActorAction::MoveStep, actionArgument);
+            }
+        } else if (actorName == fpcNm_Obj_RotStair_e) {
+            const int actionArgument = room_actor_action_argument(process);
+            if (actionArgument >= 0 && actionArgument < 4) {
+                publish_room_actor_action(process, RoomActorAction::RotateTo, actionArgument);
+                publish_lakebed_staircase_switch_state(process, actionArgument);
+            }
+        } else if (actorName == fpcNm_Obj_IceBlock_e) {
+            const int actionArgument = room_actor_action_argument(process);
+            if (actionArgument >= 4 && actionArgument <= 11) {
+                publish_room_actor_action(process, RoomActorAction::Slide, actionArgument);
+            }
+        }
+    }
+    finish_remote_iceblock_action(process);
     const int previousWebTimer = sWebDeleteTimerStack.empty()
                                      ? -1
                                      : sWebDeleteTimerStack.back();
@@ -1690,7 +1856,22 @@ HookAction info_switch_on_pre(ModContext*, void* args, void*, void*) {
     const int flag = mods::arg<int>(args, 1);
     const int room = mods::arg<int>(args, 2);
     const bool valid = info != nullptr && flag >= 0 && flag != 255 && room >= 0 && room < 64;
-    sInfoSwitchWasSetStack.push_back(valid && info->isSwitch(flag, room));
+    const bool wasSet = valid && info->isSwitch(flag, room);
+    sInfoSwitchWasSetStack.push_back(wasSet);
+    if (valid && sActiveAdapter != nullptr && !sActiveAdapter->applying_remote()) {
+        void* process = exact_local_switch_actor_context(true);
+        if (process != nullptr) {
+            const int actorName = fpcM_GetName(process);
+            if (is_permanent_room_actor(actorName) &&
+                permanent_room_actor_switch_flag(actorName, fopAcM_GetParam(process)) == flag) {
+                if (actorName == fpcNm_Obj_IceWall_e) {
+                    publish_room_actor_action(process, room_actor_switch_action(process, wasSet));
+                } else if (!wasSet) {
+                    publish_room_actor_action(process, RoomActorAction::Break);
+                }
+            }
+        }
+    }
     return HOOK_CONTINUE;
 }
 
@@ -1707,9 +1888,12 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
     if (process == nullptr) return;
     const int actorName = fpcM_GetName(process);
     const bool webSwitch = is_web_switch_actor(actorName);
+    const bool permanentActor = is_permanent_room_actor(actorName);
     if (flag < 0 || flag >= 0xFF || room < 0 || room >= 64 ||
-        (!is_small_key_door_switch_actor(actorName) && !webSwitch) ||
-        (!webSwitch && flag < dSv_info_c::MEMORY_SWITCH)) return;
+        (!is_small_key_door_switch_actor(actorName) && !webSwitch && !permanentActor) ||
+        (!webSwitch && !permanentActor && flag < dSv_info_c::MEMORY_SWITCH) ||
+        (permanentActor &&
+         permanent_room_actor_switch_flag(actorName, fopAcM_GetParam(process)) != flag)) return;
     const int stage = current_stage_table();
     if (!valid_stage(stage)) return;
     const char* stageName = dComIfGp_getStartStageName();
@@ -1717,6 +1901,9 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
         {"type", "room_switch_bit"}, {"stage", stage}, {"flag", flag}, {"room", room},
         {"source_actor", actorName}, {"source_room", room},
         {"source_params", fpcM_GetParam(process)},
+        {"source_action", permanentActor
+                              ? static_cast<int>(room_actor_switch_action(process, wasSet))
+                              : 0},
         {"source_stage", stageName != nullptr ? stageName : ""},
     });
 }
@@ -2117,6 +2304,8 @@ void GameAdapter::shutdown_hooks() {
     uninstall_remote_actor_profile();
     sExecutingProcessStack.clear();
     sWebDeleteTimerStack.clear();
+    sRoomActorActionStateStack.clear();
+    sRemoteMoveboxPushPullKeepStack.clear();
     sDoor20ExecuteModes.clear();
     sDoor20StopOpenDepth = 0;
     sInfoSwitchWasSetStack.clear();
@@ -4280,6 +4469,40 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
                    ? ApplyResult::Applied
                    : ApplyResult::IgnoredByPolicy;
     }
+    if (type == "room_actor_action") {
+        const int stage = message.value("stage", -1);
+        const int room = message.value("room", -1);
+        const int actorName = message.value("source_actor", -1);
+        const uint32_t params = message.value("source_params", 0xFFFFFFFFU);
+        const int actionValue = message.value("action", -1);
+        const int actionArgument = message.value("action_arg", 0);
+        if (!valid_stage(stage) || room < 0 || room >= 64 || actionValue < 1 ||
+            actionValue > 7 || !is_room_action_actor(actorName)) {
+            return reject("invalid room_actor_action payload");
+        }
+        const auto action = static_cast<RoomActorAction>(actionValue);
+        if (!valid_room_actor_action(actorName, action)) {
+            return reject("invalid room_actor_action actor/action");
+        }
+        const char* currentStage = dComIfGp_getStartStageName();
+        if (stage != current_stage_table() || currentStage == nullptr ||
+            message.value("source_stage", std::string()) != currentStage ||
+            dComIfGp_roomControl_getStayNo() != room) {
+            return ApplyResult::IgnoredByPolicy;
+        }
+        if ((action == RoomActorAction::MoveStep &&
+             (actionArgument < 8 || (actionArgument >> 3) > 300)) ||
+            (action == RoomActorAction::RotateTo &&
+             (actionArgument < 0 || actionArgument >= 4)) ||
+            (action == RoomActorAction::Slide &&
+             (actionArgument < 4 || actionArgument > 11 ||
+              (actionArgument >> 2) > 2))) {
+            return reject("invalid room_actor_action argument");
+        }
+        return apply_remote_room_actor_action(actorName, room, params, action, actionArgument)
+                   ? ApplyResult::Applied
+                   : ApplyResult::IgnoredByPolicy;
+    }
     if (type == "room_switch_bit") {
         const int stage = message.value("stage", -1);
         const int flag = message.value("flag", -1);
@@ -4289,23 +4512,40 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return reject("invalid room_switch_bit bounds");
         }
         const bool webSwitch = is_web_switch_actor(sourceActor);
-        if (!is_small_key_door_switch_actor(sourceActor) && !webSwitch) {
+        const bool permanentActor = is_permanent_room_actor(sourceActor);
+        if (!is_small_key_door_switch_actor(sourceActor) && !webSwitch && !permanentActor) {
             return ApplyResult::IgnoredByPolicy;
         }
-        if (!webSwitch && flag < dSv_info_c::MEMORY_SWITCH) {
+        if (!webSwitch && !permanentActor && flag < dSv_info_c::MEMORY_SWITCH) {
             return reject("invalid key-door room_switch_bit flag");
         }
         if (stage != current_stage_table()) return ApplyResult::IgnoredByPolicy;
-        if (webSwitch) {
+        if (webSwitch || permanentActor) {
             const char* currentStage = dComIfGp_getStartStageName();
             const std::string sourceStage = message.value("source_stage", std::string());
             const uint32_t sourceParams = message.value("source_params", 0xFFFFFFFFU);
             const int sourceRoom = message.value("source_room", -1);
             if (currentStage == nullptr || sourceStage != currentStage || sourceRoom != room ||
-                static_cast<int>((sourceParams >> 24) & 0xFF) != flag ||
+                (webSwitch && static_cast<int>((sourceParams >> 24) & 0xFF) != flag) ||
+                (permanentActor &&
+                 permanent_room_actor_switch_flag(sourceActor, sourceParams) != flag) ||
                 dComIfGp_roomControl_getStayNo() != room) {
                 return ApplyResult::IgnoredByPolicy;
             }
+        }
+        if (permanentActor) {
+            const int fallbackValue = message.value("source_action", -1);
+            if (fallbackValue < 1 || fallbackValue > 4 ||
+                !valid_room_actor_action(sourceActor,
+                                         static_cast<RoomActorAction>(fallbackValue))) {
+                return reject("invalid room actor switch fallback");
+            }
+            return apply_remote_room_actor_switch(
+                       sourceActor, room, flag,
+                       message.value("source_params", 0xFFFFFFFFU),
+                       static_cast<RoomActorAction>(fallbackValue))
+                       ? ApplyResult::Applied
+                       : ApplyResult::IgnoredByPolicy;
         }
         dComIfGs_onSwitch(flag, room);
         if (webSwitch) {
