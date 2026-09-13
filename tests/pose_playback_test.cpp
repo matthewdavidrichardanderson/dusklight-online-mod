@@ -130,6 +130,36 @@ int main() {
     }
     assert(adaptive.delay_ticks() == 1);
 
+    // A shorter delivery path must not leave a permanent pose backlog.
+    for (int advance : {1, 6, 12}) for (int delay : {1, 3}) {
+        PosePlayback<int> route(delay, false);
+        int received = 100, displayed = 0;
+        for (int tick = 0; tick < 30; ++tick) {
+            route.push(received, received); ++received;
+            if (auto sample = route.update()) displayed = *sample;
+        }
+        assert(received - 1 - displayed == delay);
+        for (int n = 0; n < advance; ++n) { route.push(received, received); ++received; }
+        for (int tick = 0; tick < 120; ++tick) {
+            route.push(received, received); ++received;
+            if (auto sample = route.update()) {
+                assert(*sample > displayed && *sample - displayed <= 2);
+                displayed = *sample;
+            }
+        }
+        assert(received - 1 - displayed == delay);
+        assert(route.delay_ticks() == delay);
+    }
+    // A transient early burst, followed by the corresponding arrival gap,
+    // must retain every sample rather than trigger catch-up.
+    PosePlayback<int> burst(1, false);
+    int lastBurst = 0;
+    for (int tick = 1; tick <= 60; ++tick) {
+        if (tick == 20) for (int seq = 20; seq <= 23; ++seq) burst.push(seq, seq);
+        else if (tick < 20 || tick > 23) burst.push(tick, tick);
+        if (auto sample = burst.update()) { assert(*sample == lastBurst + 1); lastBurst = *sample; }
+    }
+
     // Missing packets do not block playback or repeat events.
     PosePlayback<int> loss(3, false);
     int previous = 0, received = 0;
