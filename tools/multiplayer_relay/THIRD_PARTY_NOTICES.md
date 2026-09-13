@@ -1,5 +1,12 @@
 # Third-party notices
 
+## libjuice v1.6.2
+
+Copyright (c) Paul-Louis Ageneau and contributors. Licensed under MPL-2.0;
+see `licenses/LIBJUICE_LICENSE.txt`. Built from unmodified source at
+https://github.com/paullouisageneau/libjuice/tree/85efaa9b5e1cb3d4d534fc85d69cc9f7b76a66d7
+Source archive: https://github.com/paullouisageneau/libjuice/archive/85efaa9b5e1cb3d4d534fc85d69cc9f7b76a66d7.tar.gz
+
 Dusklight Online Relay uses
 [JSON for Modern C++](https://github.com/nlohmann/json), version 3.12.0, under
 the MIT License.

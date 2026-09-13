@@ -68,6 +68,8 @@ else ()
 endif ()
 
 
+include("${DUSKLIGHT_ONLINE_ROOT}/cmake/LibJuice.cmake")
+
 function(configure_relay_target target pdb_name)
     target_compile_features(${target} PRIVATE cxx_std_20)
     target_include_directories(${target} PRIVATE
@@ -75,7 +77,7 @@ function(configure_relay_target target pdb_name)
         "${DUSKLIGHT_ONLINE_ROOT}/src"
         "${DUSKLIGHT_ONLINE_ROOT}/vendor/kcp"
     )
-    target_link_libraries(${target} PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+    target_link_libraries(${target} PRIVATE nlohmann_json::nlohmann_json Threads::Threads juice-static)
     target_compile_definitions(${target} PRIVATE
         DUSKLIGHT_RELAY_VERSION="${PROJECT_VERSION}")
     if (MSVC)
@@ -95,6 +97,7 @@ set(DUSKLIGHT_RELAY_COMMON_SOURCES
 
 add_executable(dusklight_online_relay
     relay.cpp
+    "${DUSKLIGHT_ONLINE_ROOT}/src/net/ice_agent.cpp"
     "${DUSKLIGHT_ONLINE_ROOT}/src/net/reliable_udp.cpp"
     "${DUSKLIGHT_ONLINE_ROOT}/src/net/datagram_scheduler.cpp"
     "${DUSKLIGHT_ONLINE_ROOT}/src/net/udp_connection.cpp"
@@ -130,6 +133,7 @@ if (DUSKLIGHT_RELAY_BUILD_TESTS)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_library(dusklight_online_udp_test_client SHARED
+        "${DUSKLIGHT_ONLINE_ROOT}/src/net/ice_agent.cpp"
         "${DUSKLIGHT_ONLINE_ROOT}/tests/udp_test_client.cpp"
         "${DUSKLIGHT_ONLINE_ROOT}/src/net/reliable_udp.cpp"
         "${DUSKLIGHT_ONLINE_ROOT}/src/net/datagram_scheduler.cpp"
@@ -165,6 +169,7 @@ install(FILES
 )
 install(FILES PROTOCOL.md DEPLOYMENT.md SYNCING.md DESTINATION docs COMPONENT Relay)
 install(FILES "${DUSKLIGHT_ONLINE_ROOT}/vendor/kcp/LICENSE" DESTINATION licenses RENAME KCP.txt COMPONENT Relay)
+install(FILES "${DUSKLIGHT_ONLINE_ROOT}/res/LIBJUICE_LICENSE.txt" DESTINATION licenses COMPONENT Relay)
 
 set(CPACK_GENERATOR ZIP)
 set(CPACK_PACKAGE_NAME "dusklight-online-relay")

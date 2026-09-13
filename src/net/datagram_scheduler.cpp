@@ -1,4 +1,5 @@
 #include "dusklight_online/net/datagram_scheduler.hpp"
+#include "dusklight_online/net/peer_tunnel.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -8,6 +9,16 @@
 
 namespace dusklight_online::net {
 DatagramKind datagram_kind(std::span<const uint8_t> bytes) {
+    if (const auto header = peer_group_header(bytes)) {
+        const auto payload = bytes.subspan(header);
+        return std::memcmp(payload.data(), "DMPU", 4) == 0 ? DatagramKind::Realtime : DatagramKind::Invalid;
+    }
+    if (is_peer_tunnel(bytes)) {
+        // Exactly one envelope. Nested wrappers cannot consume recursive stack.
+        const auto inner = bytes.subspan(20);
+        if (is_peer_tunnel(inner)) return DatagramKind::Invalid;
+        return datagram_kind(inner);
+    }
     if (bytes.size() >= 58 && bytes.size() <= 2048 && std::memcmp(bytes.data(), "DMPU", 4) == 0)
         return DatagramKind::Realtime;
     if (bytes.size() >= 38 && bytes.size() <= ReliableUdp::maxDatagramBytes &&

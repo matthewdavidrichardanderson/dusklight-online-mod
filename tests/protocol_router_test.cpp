@@ -1,4 +1,5 @@
 #include "dusklight_online/game/protocol_router.hpp"
+#include "cave_map_packet.hpp"
 
 #include <cassert>
 #include <array>
@@ -19,10 +20,12 @@ class Consumer final : public MessageConsumer {
 public:
     bool ready = false;
     std::vector<std::string> types;
+    std::vector<nlohmann::json> payloads;
 
     bool stage_ready() const override { return ready; }
     ApplyResult consume(const RoutedMessage& message) override {
         types.push_back(message.payload.at("type").get<std::string>());
+        payloads.push_back(message.payload);
         return ApplyResult::Applied;
     }
     ApplyResult consume_udp(const Event&) override { return ApplyResult::Applied; }
@@ -112,6 +115,20 @@ int main() {
 
     assert(router.route(message("event_bit", false), false) == ApplyResult::IgnoredByPolicy);
     assert(consumer.types.size() == 2);
+
+    // Cave-section switch messages need the normal stage-readiness fence and retain
+    // the source metadata used by the adapter's narrow trigger exception.
+    Event cave = message("switch_bit");
+    cave.message = cave_map_packet();
+    assert(router.route(cave, true) == ApplyResult::Deferred);
+    assert(router.stats().pendingMessages == 1);
+    consumer.ready = true;
+    router.flush(true);
+    assert(router.stats().pendingMessages == 0);
+    assert(consumer.types.back() == "switch_bit");
+    assert(consumer.payloads.back() == cave.message);
+    cave.ingress.settings.syncFlags = false;
+    assert(router.route(cave, false) == ApplyResult::IgnoredByPolicy);
     assert(router.route(message("future_unreviewed_lane"), true) == ApplyResult::Unsupported);
 
     Event malformed;

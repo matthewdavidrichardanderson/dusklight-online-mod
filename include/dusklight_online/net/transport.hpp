@@ -96,6 +96,7 @@ enum class EventKind : uint8_t {
     UdpRemoteObject,
     UdpAck,
     Error,
+    RouteChanged,
 };
 
 struct EventContext {

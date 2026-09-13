@@ -4,6 +4,7 @@
 #include "dusklight_online/game/poe_sync.hpp"
 #include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/bottle_sync.hpp"
+#include "dusklight_online/game/cave_map_sync.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -638,6 +639,10 @@ bool is_small_key_door_switch_actor(int actorName) {
     }
 }
 
+bool is_web_switch_actor(int actorName) {
+    return actorName == fpcNm_OBJ_WEB0_e || actorName == fpcNm_OBJ_WEB1_e;
+}
+
 bool is_group2_lifecycle_actor(int actorName) {
     return actorName == fpcNm_Tag_Mhint_e || actorName == fpcNm_Tag_Mmsg_e ||
            actorName == fpcNm_Tag_Mstop_e || actorName == fpcNm_Tag_TheBHint_e ||
@@ -659,6 +664,7 @@ void* exact_local_switch_actor_context(bool set) {
             !(actor == fpcNm_DOOR20_e && sDoor20StopOpenDepth != 0)) {
             return process;
         }
+        if (is_web_switch_actor(actor)) return process;
     } else if (actor == fpcNm_Obj_Timer_e) {
         return process;
     }
@@ -1341,13 +1347,27 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", true}};
     if (void* process = exact_local_switch_actor_context(true); process != nullptr) {
         const int actor = fpcM_GetName(process);
-        const int room = fopAcM_GetHomeRoomNo(static_cast<const fopAc_ac_c*>(process));
+        // Web completion is a co-located interaction like unlocking a keyed
+        // door. Its enclosing dSv_info_c::onSwitch hook publishes the exact
+        // room-scoped edge instead of this durable, global switch message.
+        if (is_web_switch_actor(actor)) return;
+        const auto* source = static_cast<const fopAc_ac_c*>(process);
+        const int room = fopAcM_GetHomeRoomNo(source);
         const uint32_t params = fpcM_GetParam(process);
+        const char* stageName = dComIfGp_getStartStageName();
+        const int angleX = static_cast<uint16_t>(source->shape_angle.x);
+        const bool caveMap = is_cave_map_reveal(actor == fpcNm_SWC00_e,
+            stageName != nullptr ? stageName : "", stage, room, flag, params,
+            angleX, wasSet, bits->isSwitch(flag));
         if (is_group2_lifecycle_actor(actor) &&
             !is_sewers_progression_switch(stage, flag) &&
-            !is_eldin_gorge_bridge_completion(stage, flag, actor, room, params)) return;
+            !is_eldin_gorge_bridge_completion(stage, flag, actor, room, params) &&
+            !caveMap) return;
         message.update({{"source_actor", actor}, {"source_room", room},
                         {"source_params", params}});
+        if (caveMap) {
+            message.update({{"source_stage", stageName}, {"source_angle_x", angleX}});
+        }
     }
     sActiveAdapter->publish_local(std::move(message));
 }
@@ -1660,15 +1680,18 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
     void* process = exact_local_switch_actor_context(true);
     if (process == nullptr) return;
     const int actorName = fpcM_GetName(process);
-    if (flag < dSv_info_c::MEMORY_SWITCH || room < 0 || room >= 64 ||
-        !is_small_key_door_switch_actor(actorName)) return;
+    const bool webSwitch = is_web_switch_actor(actorName);
+    if (flag < 0 || flag >= 0xFF || room < 0 || room >= 64 ||
+        (!is_small_key_door_switch_actor(actorName) && !webSwitch) ||
+        (!webSwitch && flag < dSv_info_c::MEMORY_SWITCH)) return;
     const int stage = current_stage_table();
     if (!valid_stage(stage)) return;
-    const auto* actor = static_cast<const fopAc_ac_c*>(process);
+    const char* stageName = dComIfGp_getStartStageName();
     sActiveAdapter->publish_local({
         {"type", "room_switch_bit"}, {"stage", stage}, {"flag", flag}, {"room", room},
-        {"source_actor", actorName}, {"source_room", fopAcM_GetHomeRoomNo(actor)},
+        {"source_actor", actorName}, {"source_room", room},
         {"source_params", fpcM_GetParam(process)},
+        {"source_stage", stageName != nullptr ? stageName : ""},
     });
 }
 
@@ -3754,7 +3777,14 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
         const uint32_t sourceParams = message.value("source_params", 0U);
         const bool bridgeCompletion = message.contains("source_params") &&
             is_eldin_gorge_bridge_completion(stage, flag, sourceActor, sourceRoom, sourceParams);
-        if (!bridgeCompletion && !is_sewers_progression_switch(stage, flag))
+        // Validate against the sender's cave, not the recipient's current
+        // stage, so a reveal also survives travel or arrives while elsewhere.
+        // The sender already checked the false-to-true edge; applying it twice
+        // is harmless and must never turn a section back off.
+        const bool caveMap = is_cave_map_reveal(sourceActor == fpcNm_SWC00_e,
+            message.value("source_stage", std::string()), stage, sourceRoom, flag,
+            sourceParams, message.value("source_angle_x", -1), false, set);
+        if (!bridgeCompletion && !is_sewers_progression_switch(stage, flag) && !caveMap)
             return ApplyResult::IgnoredByPolicy;
     }
 
@@ -4207,13 +4237,35 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         const int flag = message.value("flag", -1);
         const int room = message.value("room", -1);
         const int sourceActor = message.value("source_actor", -1);
-        if (!valid_stage(stage) || flag < dSv_info_c::MEMORY_SWITCH || flag >= 0xFF ||
-            room < 0 || room >= 64) {
+        if (!valid_stage(stage) || flag < 0 || flag >= 0xFF || room < 0 || room >= 64) {
             return reject("invalid room_switch_bit bounds");
         }
-        if (!is_small_key_door_switch_actor(sourceActor)) return ApplyResult::IgnoredByPolicy;
+        const bool webSwitch = is_web_switch_actor(sourceActor);
+        if (!is_small_key_door_switch_actor(sourceActor) && !webSwitch) {
+            return ApplyResult::IgnoredByPolicy;
+        }
+        if (!webSwitch && flag < dSv_info_c::MEMORY_SWITCH) {
+            return reject("invalid key-door room_switch_bit flag");
+        }
         if (stage != current_stage_table()) return ApplyResult::IgnoredByPolicy;
+        if (webSwitch) {
+            const char* currentStage = dComIfGp_getStartStageName();
+            const std::string sourceStage = message.value("source_stage", std::string());
+            const uint32_t sourceParams = message.value("source_params", 0xFFFFFFFFU);
+            const int sourceRoom = message.value("source_room", -1);
+            if (currentStage == nullptr || sourceStage != currentStage || sourceRoom != room ||
+                static_cast<int>((sourceParams >> 24) & 0xFF) != flag) {
+                return ApplyResult::IgnoredByPolicy;
+            }
+            if (dComIfGp_roomControl_getStayNo() != room) {
+                return ApplyResult::IgnoredByPolicy;
+            }
+        }
         dComIfGs_onSwitch(flag, room);
+        if (webSwitch) {
+            repair_remote_web_actor(sourceActor, room, flag,
+                                    message.value("source_params", 0xFFFFFFFFU));
+        }
         return ApplyResult::Applied;
     }
     if (type == "ooccoo_state") {

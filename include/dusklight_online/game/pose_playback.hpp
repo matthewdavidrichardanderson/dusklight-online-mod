@@ -24,7 +24,7 @@ public:
             pending_.clear(); previous_.reset(); latest_.reset();
             cursor_ = tick - delay_;
             started_ = true;
-            lateTicks_ = stableTicks_ = 0;
+            lateTicks_ = stableTicks_ = excessTicks_ = 0;
         }
         pending_.emplace_back(tick, std::move(pose));
         while (pending_.size() > capacity) pending_.pop_front();
@@ -38,6 +38,15 @@ public:
     std::optional<Pose> update(Predictor predict) {
         predicted_ = false;
         if (!started_) return std::nullopt;
+        // A shorter path can move the arrival clock ahead without starving
+        // playback. Recover that excess separately from adaptive jitter delay.
+        // Six consecutive updates distinguish sustained backlog from brief
+        // bursts; advance at most one extra tick per six updates.
+        if (!pending_.empty() && pending_.back().first - cursor_ > delay_) {
+            if (++excessTicks_ >= 6) { ++cursor_; excessTicks_ = 0; }
+        } else {
+            excessTicks_ = 0;
+        }
         std::optional<Pose> result;
         while (!pending_.empty() && pending_.front().first <= cursor_) {
             previous_ = std::move(latest_);
@@ -75,7 +84,7 @@ private:
     bool started_ = false, predicted_ = false;
     int64_t cursor_ = 0, delay_ = 1;
     bool adaptive_ = true;
-    uint32_t lateTicks_ = 0, stableTicks_ = 0;
+    uint32_t lateTicks_ = 0, stableTicks_ = 0, excessTicks_ = 0;
     std::deque<std::pair<int64_t, Pose>> pending_;
     std::optional<std::pair<int64_t, Pose>> previous_, latest_;
 };

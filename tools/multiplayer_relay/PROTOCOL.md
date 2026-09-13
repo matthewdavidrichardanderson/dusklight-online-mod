@@ -3,6 +3,106 @@
 This document defines the contract between the game client and standalone
 relay.
 
+## Traversal extension (relay 2.5.0)
+
+Coordinated client/relay deployment is required. Reliable gameplay is ordered per peer;
+settings transitions coordinate those streams explicitly. `welcome.stun_port` supplies
+the relay's public UDP port, shared by STUN discovery and gameplay traffic.
+The native relay socket answers bounded unauthenticated STUN Binding requests
+with XOR-MAPPED-ADDRESS and FINGERPRINT. Malformed packets, invalid fingerprints
+and unsupported comprehension-required attributes are discarded. This discovery
+endpoint is not TURN or an authenticated ICE peer. It uses fixed-memory response
+budgets (1024 requests/s globally and 64/s per hashed source bucket), with no
+peer allocations. Libjuice still handles all actual peer ICE exchanges.
+Peer roster entries also include `want_puppet` and `stage` for direct filtering.
+
+`ice_signal` carries `target_client_id`, integer `kind` (0 description, 1
+candidate, 2 gathering done), `data`, and unsigned `generation`. The relay stamps
+`client_id` and admits only same-room targets. Data limits are respectively
+4095, 255 and 0 bytes, with a 64 KiB/s signaling budget per client. Each pair's
+lower numeric member ID initiates retries. A new generation replaces only ICE;
+it does not replace the logical session. Old-generation signals are ignored.
+
+`DPF1` datagrams contain little-endian source and destination uint64 client
+numbers (the decimal portion of `client_N`) followed by the original datagram.
+The fixed header is 20 bytes. `DPG1` realtime uploads contain a uint64 source,
+one-byte recipient count (1–7), and that many uint64 destinations, followed by
+one original visual datagram. The relay expands a grouped upload into validated
+DPF1 deliveries without sending it to omitted peers. Nested wrappers are rejected.
+Maximum sizes are 1220 bytes for DPF1 and 1227 bytes for DPG1.
+
+Direct ICE carries the original DMPU datagrams. The admitted agent supplies peer
+identity; it must match the inner sender before reassembly. Native fallback is
+accepted only from the relay endpoint with matching local recipient and admitted
+sender. Both paths enter the same decoder/ACK history. Peer KCP uses a stable
+logical session across direct/fallback switches and never handles sockets or ICE.
+
+Direct readiness uses a 13-byte `DPI1` probe: type byte (1 ping, 2 echo) and a
+little-endian uint64 monotonic millisecond value. The native worker probes every
+250 ms. Only an echoed round trip promotes a route; silence expires readiness
+after max(750 ms, min(3000 ms, 4*RTT)). Retries back off from 30 to 120 seconds.
+
+## Reliable peer gameplay and settings transitions
+
+Eligible gameplay bodies are `{generation,payload}`. Direct peer KCP carries
+`{sequence,body}` frames and cumulative `{ack}` receipts. Sender identity comes
+from the admitted logical connection, never the payload. Targets must match the
+receiver and only gameplay message types are accepted.
+For relay fallback, the sender uploads `peer_reliable {recipients:[{id,sequence}],body}`
+once. The relay validates every recipient against the sender's room and emits
+`peer_reliable {client_id,frame:{sequence,body}}` through each recipient's native
+KCP connection. A `peer_receipt {target_client_id,frame:{ack}}` is routed back with
+the relay-stamped sender identity. Packet loss is recovered independently on
+each relay leg rather than waiting for a complete peer-to-peer round trip.
+Sequences start at one per admitted peer and include targeted gameplay and
+settings barriers. At a carrier change, unacknowledged frames are replayed on
+the selected path. Receivers hold gaps, consume only contiguous sequences and
+discard already consumed duplicates before gameplay sees them. Receipts release
+retained sender entries; they never gate application of an in-order message.
+Receipts cannot acknowledge unsent sequence numbers. Gaps and sender journals
+are bounded to 4096 entries per peer and share the 4 MiB retained-data budget
+with pending settings/gameplay. Peer departure and room reconnect clear them.
+There are no per-message offers, relay tickets, digests or dispatch approvals.
+Transport frames have 2 KiB of decoding headroom above the existing 512 KiB
+payload limit; gameplay payloads retain that limit.
+
+`welcome.settings_generation` initializes the current settings generation.
+`welcome.settings_pending` atomically freezes a concurrent joiner until the
+current transition commits. The joiner is an observer of that transition, so
+older members do not wait for a marker from a newly joined peer.
+
+An owner's `room_settings` request starts `settings_prepare` from the relay,
+containing the next `generation` and the existing `participants`. The owner
+queues subsequent gameplay/settings commands from the moment it requests the
+change. Other members pause new reliable gameplay when prepare arrives. Each
+participant sends a `{barrier:next_generation}` body through each participant's
+ordered delivery sequence, after all old-generation gameplay on that sequence.
+After receiving every expected marker, a client sends `settings_ready` to the
+relay. Only after all current participants are ready does the relay apply the
+settings and broadcast `room_settings` with the new `settings_generation`.
+Queued gameplay resumes, preserving settings changes interleaved with sends.
+
+A faster peer can receive a commit before another peer. Next-generation bodies
+are retained until the local authoritative commit; early markers for the next
+transition are bounded and retained too. Old-generation traffic after a peer's
+barrier is rejected. A peer cannot create settings or inject lobby controls.
+Disconnected participants are removed from the barrier, and new joins do not
+invalidate its participant snapshot. Retained outgoing/future gameplay has a
+4 MiB aggregate budget and bounded entry counts. A transition that cannot
+complete within 30 seconds fails closed instead of applying partial settings.
+Realtime traffic is not paused by settings coordination.
+
+Membership/settings, ICE signaling and presence remain on the relay connection.
+`peer_stage` updates the sender's relay-side filtering metadata only when its
+stage changes; direct progression readiness does not wait for that update.
+Ordinary reliable gameplay never waits for a relay exchange. Direct gameplay
+requires matching clients; older clients do not implement these barriers.
+
+Reliable relay fallback uses the relay's existing KCP connections, while direct
+delivery uses peer KCP. Delivery sequences span both paths. Residual peer KCP
+packets may still use datagram fallback while an old in-flight direct frame
+finishes; duplicate application is prevented by the delivery sequence.
+
 ## Framing and limits
 
 - Reliable transport: KCP over UDP; no transport encryption.

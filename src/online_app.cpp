@@ -653,6 +653,9 @@ void OnlineApp::update() {
             wasRelayOwner_ = isOwner;
         }
         switch (event.kind) {
+        case net::EventKind::RouteChanged:
+            log_info("MP_PEER_ROUTE peer=" + event.peerId + " realtime=" + event.detail + " reliable=" + event.detail);
+            break;
         case net::EventKind::Connected:
             connectedLobbyName_ = transport_.status().room;
             statusMessage_ = "Connected to " + connectedLobbyName_;

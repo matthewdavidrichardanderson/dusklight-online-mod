@@ -7,9 +7,31 @@ latency-sensitive visual datagrams on the same UDP port.
 The server does not require Dusklight, the game, the mod SDK, or a game
 installation at runtime. It does not persist saves or gameplay state.
 
-Relay 2.1.1 updates reliable-UDP recovery without changing the 2.1.0 wire
-format. Existing 2.1.0 UDP clients/relays can connect; update both ends for
-the recovery improvement in both directions. TCP-era relays remain incompatible.
+Relay 2.5.0 adds libjuice signaling and recipient-specific UDP fallback, with
+STUN discovery sharing the existing UDP port.
+Update the relay and every client together. Clients must implement the settings
+transition protocol. Older UDP clients are not supported on this release, even
+if their initial lobby connection succeeds.
+TCP-era relays remain incompatible.
+
+Realtime poses, animations, their ACKs and remote-object datagrams use direct
+peer links when reachable. Reliable hits, flags, progression readiness and
+catch-up payloads use peer KCP over the same direct links, with no per-message
+relay approval, ticket, digest or ordering record. Ordinary gameplay latency
+therefore follows the peer path, not the route through the relay.
+
+The relay retains lobby membership/settings, ICE signaling and presence/stage
+metadata. Only a settings change pauses new reliable gameplay briefly: peers
+finish the previous generation, then the relay commits the new settings. The
+relay remains necessary to maintain the lobby, but is not in the application
+path of each direct gameplay packet.
+
+Every pair falls back independently. Reliable fallback uploads a broadcast body
+once; the relay distributes it over its existing per-client KCP connections.
+Direct gameplay uses peer KCP. Bounded delivery sequences and receipts preserve
+ordering and suppress duplicates when messages cross between these paths.
+Realtime fallback remains grouped.
+Manual direct hosting keeps its existing transport.
 
 
 ## Download and run on Windows
@@ -33,6 +55,21 @@ The command-line equivalent is:
 Open the selected port for UDP. `--host` is the local bind address;
 `--public-host` is the endpoint encoded into the relay code and does not need to
 be a local interface.
+
+Only the selected UDP port needs forwarding. STUN address discovery, lobby
+traffic and gameplay fallback share that same socket; there is no second port
+or external STUN service to configure. Enter the public hostname and forwarded
+UDP port in the launcher, then press Start Relay and share its code. If the
+public and local ports differ, the command-line `--public-port` setting is also
+used for discovery. Peers that cannot connect directly keep using the relay.
+This is UDP fallback, so it cannot bypass a network blocking UDP.
+
+Direct routes are selected only after an application round trip through the
+ICE link. A missing response causes fallback after 0.75–3 seconds depending on
+measured RTT. Re-establishment retries back off from 30 to 120 seconds. Route
+changes appear in the game log as `MP_PEER_ROUTE`, with direct/relay values for
+both realtime and reliable payloads. Settings coordination remains relayed.
+Fallback poses for multiple recipients share a single client upload.
 
 The launcher writes verbose output to
 `%APPDATA%\TwilitRealm\Dusklight\relay\relay.log`. Its **Open Log Folder** button

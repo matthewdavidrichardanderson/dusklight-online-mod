@@ -1,3 +1,4 @@
+#include "dusklight_online/net/peer_delivery.hpp"
 #include "dusklight_online/net/reliable_json.hpp"
 #include <cassert>
 #include <fstream>
@@ -18,6 +19,16 @@ int main(int argc, char** argv) {
     auto packed = encode_reliable_json(big);
     assert(packed.starts_with("Z1") && packed.size() < 1000);
     assert(decode_reliable_json(packed) == big);
+    // An allowed gameplay body must remain encodable after routing metadata
+    // takes its frame just above the gameplay (not frame) limit.
+    json boundary = {{"type","save_snapshot"},{"state",""}};
+    boundary["state"] = std::string(reliableJsonLimit-boundary.dump().size(),'x');
+    assert(boundary.dump().size()==reliableJsonLimit);
+    json frame={{"sequence",uint64_t(1)},{"body",{{"generation",uint64_t(0)},{"payload",boundary}}}};
+    auto boundaryWire=encode_reliable_json(frame,reliablePeerFrameLimit);
+    assert(boundaryWire.starts_with("Z1"));
+    assert(decode_reliable_json(boundaryWire,reliablePeerFrameLimit)==frame);
+    rejects(boundaryWire); // default gameplay decoding still enforces its bound
     rejects(packed.substr(0, packed.size()-2));
     rejects(packed + "00");
     rejects("Z1"); rejects("Z1000"); rejects("Z1gg"); rejects("Z10000");

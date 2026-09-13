@@ -12,6 +12,9 @@ import subprocess
 import sys
 import time
 import unittest
+import zlib
+from collections import deque
+import ctypes
 from pathlib import Path
 from typing import Any
 sys.dont_write_bytecode = True
@@ -108,16 +111,22 @@ def reserve_port() -> int:
 
 
 class RelayClient:
+    instances = set()
     def __init__(self, port: int) -> None:
         self.sock = ReliableSocket(port, timeout=2.0)
         self.sock.settimeout(2.0)
         self.buffer = bytearray()
+        self.inbox = deque()
+        self.closed = False
+        self.auto_barriers = True
+        self.instances.add(self)
         self.port = port
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind(("127.0.0.1", 0))
         self.udp.settimeout(0.3)
 
     def close(self) -> None:
+        self.instances.discard(self)
         self.sock.close()
         self.udp.close()
 
@@ -128,20 +137,35 @@ class RelayClient:
     def send_bytes(self, payload: bytes) -> None:
         self.sock.sendall(payload)
 
+    @classmethod
+    def service(cls):
+        ReliableSocket.pump()
+        for client in tuple(cls.instances):
+            data = ctypes.create_string_buffer(65536)
+            for _ in range(64):
+                count = ReliableSocket.library.udp_test_receive(client.sock.handle, data, len(data))
+                if count <= 0:
+                    if count == 0: client.closed = True
+                    break
+                client.buffer.extend(data.raw[:count])
+            while b"\n" in client.buffer:
+                line, _, rest = client.buffer.partition(b"\n")
+                client.buffer = bytearray(rest)
+                message = json.loads(ReliableSocket.decode(line))
+                if message.get("type") == "settings_prepare" and client.auto_barriers:
+                    # These server-only tests contain no peer gameplay. The
+                    # production Transport tests exercise actual stream drains.
+                    client.send({"type":"settings_ready","generation":message["generation"]})
+                else: client.inbox.append(message)
+
     def receive(self, timeout: float = 2.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
-        while b"\n" not in self.buffer:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("timed out waiting for relay message")
-            self.sock.settimeout(remaining)
-            chunk = self.sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("relay closed the connection")
-            self.buffer.extend(chunk)
-        line, _, rest = self.buffer.partition(b"\n")
-        self.buffer = bytearray(rest)
-        return json.loads(ReliableSocket.decode(line))
+        while True:
+            self.service()
+            if self.inbox: return self.inbox.popleft()
+            if self.closed: raise ConnectionError("relay closed the connection")
+            if time.monotonic() >= deadline: raise TimeoutError("timed out waiting for relay message")
+            time.sleep(0.001)
 
     def expect_type(self, message_type: str, timeout: float = 2.0) -> dict[str, Any]:
         message = self.receive(timeout)
@@ -277,6 +301,121 @@ class RelayTests(unittest.TestCase):
         client = self.client()
         client.sock.sendall(b"Z1gg\n")
         client.expect_error("invalid_compressed_json")
+
+    def test_stun_shares_gameplay_port(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.settimeout(0.3)
+            destination = ("127.0.0.1", self.relay.port)
+            transaction = bytes.fromhex("0102030405060708090a0b0c")
+            request = struct.pack("!HHI12s", 1, 0, 0x2112A442, transaction)
+            sock.sendto(request, destination)
+            response, source = sock.recvfrom(512)
+            self.assertEqual(source, destination)
+            self.assertEqual(response[:20], struct.pack("!HHI12s", 0x101, 20, 0x2112A442, transaction))
+            kind, length, reserved, family, xport, xip = struct.unpack("!HHBBHI", response[20:32])
+            self.assertEqual((kind, length, reserved, family), (0x20, 8, 0, 1))
+            self.assertEqual(xport ^ 0x2112, sock.getsockname()[1])
+            self.assertEqual(socket.inet_ntoa(struct.pack("!I", xip ^ 0x2112A442)), "127.0.0.1")
+            self.assertEqual(response[32:36], b"\x80\x28\x00\x04")
+            self.assertEqual(struct.unpack("!I", response[36:])[0], zlib.crc32(response[:32]) ^ 0x5354554E)
+            # libjuice-style optional SOFTWARE and FINGERPRINT attributes.
+            header = struct.pack("!HHI12s", 1, 16, 0x2112A442, transaction)
+            software = b"\x80\x22\x00\x04test"
+            fingerprint = zlib.crc32(header + software) ^ 0x5354554E
+            with_fp = header + software + struct.pack("!HHI", 0x8028, 4, fingerprint)
+            sock.sendto(with_fp, destination)
+            self.assertEqual(sock.recvfrom(512)[0], response)
+            for bad in (request[:-1], request[:4] + b"xxxx" + request[8:],
+                        with_fp[:-1] + bytes([with_fp[-1] ^ 1]),
+                        struct.pack("!HHI12sHH", 1, 4, 0x2112A442, transaction, 0x8022, 100)):
+                sock.sendto(bad, destination)
+                with self.assertRaises(socket.timeout):
+                    sock.recvfrom(512)
+        client, welcome = self.join("OnePort", "one-port")
+        self.assertEqual(welcome["stun_port"], self.relay.port)
+        client.send({"type": "ping"})
+        client.expect_type("pong")
+
+    def test_settings_barrier_requires_all_current_members(self):
+        owner, ow = self.join("Owner", "barrier")
+        peer, pw = self.join("Peer", "barrier")
+        owner.expect_type("peer_joined")
+        owner.auto_barriers = peer.auto_barriers = False
+        owner.send({"type":"room_settings","settings":{"sync_flags":False}})
+        a = owner.expect_type("settings_prepare")
+        b = peer.expect_type("settings_prepare")
+        self.assertEqual(a["generation"],1)
+        self.assertEqual(set(a["participants"]),{ow["client_id"],pw["client_id"]})
+        peer.send({"type":"settings_ready","generation":999})
+        owner.send({"type":"settings_ready","generation":a["generation"]})
+        with self.assertRaises(TimeoutError): owner.receive(0.1)
+        observer, welcome = self.join("Observer", "barrier")
+        self.assertTrue(welcome["settings_pending"])
+        self.assertEqual(welcome["settings_generation"],0)
+        owner.expect_type("peer_joined"); peer.expect_type("peer_joined")
+        peer.send({"type":"settings_ready","generation":b["generation"]})
+        for client in (owner,peer,observer):
+            commit = client.expect_type("room_settings")
+            self.assertEqual(commit["settings_generation"],1)
+            self.assertFalse(commit["settings"]["sync_flags"])
+
+    def test_peer_traversal_signaling_and_recipient_fallback(self):
+        sender, sw = self.join("IceSender", "ice-routing")
+        target, tw = self.join("IceTarget", "ice-routing")
+        sender.expect_type("peer_joined")
+        excluded, ew = self.join("IceExcluded", "ice-routing")
+        sender.expect_type("peer_joined")
+        target.expect_type("peer_joined")
+        outsider, ow = self.join("IceOutsider", "ice-other-room")
+        for client, welcome in ((sender, sw), (target, tw), (excluded, ew), (outsider, ow)):
+            client.register_udp(welcome)
+        signal = {"type": "ice_signal", "client_id": ow["client_id"],
+                  "target_client_id": tw["client_id"], "kind": 0, "data": "offer", "generation": 0}
+        sender.send(signal)
+        routed = target.expect_type("ice_signal")
+        self.assertEqual(routed["client_id"], sw["client_id"])
+        signal["target_client_id"] = ow["client_id"]
+        sender.send(signal)
+        with self.assertRaises(TimeoutError):
+            outsider.receive(0.1)
+        signal["target_client_id"] = tw["client_id"]
+        signal["data"] = "x" * 4096
+        sender.send(signal)
+        with self.assertRaises(TimeoutError):
+            target.receive(0.1)
+
+        number = lambda w: int(w["client_id"].split("_", 1)[1])
+        pose = udp_packet(2, sw["client_id"], b"pose", 123)
+        envelope = b"DPF1" + struct.pack("<QQ", number(sw), number(tw)) + pose
+        sender.udp.sendto(envelope, ("127.0.0.1", self.relay.port))
+        self.assertEqual(target.udp.recvfrom(2048)[0], envelope)
+        with self.assertRaises(socket.timeout):
+            excluded.udp.recvfrom(2048)
+        # A single grouped upload excludes the pair using its direct path.
+        group = b"DPG1" + struct.pack("<QBQ", number(sw), 1, number(tw)) + pose
+        sender.udp.sendto(group, ("127.0.0.1", self.relay.port))
+        self.assertEqual(target.udp.recvfrom(2048)[0], envelope)
+        with self.assertRaises(socket.timeout):
+            excluded.udp.recvfrom(2048)
+        # Wrong endpoint, wrong room, conflicting inner sender, nested envelope.
+        excluded.udp.sendto(envelope, ("127.0.0.1", self.relay.port))
+        forged = b"DPF1" + struct.pack("<QQ", number(sw), number(tw)) + udp_packet(2, ow["client_id"], b"spoof", 124)
+        sender.udp.sendto(forged, ("127.0.0.1", self.relay.port))
+        nested = b"DPF1" + struct.pack("<QQ", number(sw), number(tw)) + envelope
+        sender.udp.sendto(nested, ("127.0.0.1", self.relay.port))
+        with self.assertRaises(socket.timeout):
+            target.udp.recvfrom(2048)
+        other = b"DPF1" + struct.pack("<QQ", number(sw), number(ow)) + pose
+        sender.udp.sendto(other, ("127.0.0.1", self.relay.port))
+        with self.assertRaises(socket.timeout):
+            outsider.udp.recvfrom(2048)
+        target.send({"type": "puppet_preference", "want_puppet": False})
+        sender.expect_type("puppet_preference")
+        excluded.expect_type("puppet_preference")
+        sender.udp.sendto(group, ("127.0.0.1", self.relay.port))
+        with self.assertRaises(socket.timeout):
+            target.udp.recvfrom(2048)
 
     def test_relay_operator_receives_endpoint_code(self) -> None:
         self.assertTrue(self.relay.relay_code_line.startswith("Relay code: TP1-"))
@@ -529,6 +668,35 @@ class RelayTests(unittest.TestCase):
         outsider.send({"type": "ping"})
         outsider.expect_type("pong")
 
+    def test_peer_fallback_fanout_identity_and_receipt(self) -> None:
+        sender, sw = self.join("Sender", "peer-fanout")
+        first, fw = self.join("First", "peer-fanout")
+        second, tw = self.join("Second", "peer-fanout")
+        sender.expect_type("peer_joined")
+        sender.expect_type("peer_joined")
+        first.expect_type("peer_joined")
+        body = {"generation": 0, "payload": {"type": "pvp_hit", "damage": 4}}
+        sender.send({"type": "peer_reliable", "client_id": "forged",
+                     "recipients": [{"id": fw["client_id"], "sequence": 1},
+                                    {"id": tw["client_id"], "sequence": 7}], "body": body})
+        for client, sequence in [(first, 1), (second, 7)]:
+            message = client.expect_type("peer_reliable")
+            self.assertEqual(message["client_id"], sw["client_id"])
+            self.assertEqual(message["frame"], {"sequence": sequence, "body": body})
+        first.send({"type": "peer_receipt", "client_id": "forged", "target_client_id": sw["client_id"], "frame": {"ack": 1}})
+        receipt = sender.expect_type("peer_receipt")
+        self.assertEqual(receipt["client_id"], fw["client_id"])
+        self.assertEqual(receipt["frame"], {"ack": 1})
+
+    def test_peer_fallback_rejects_cross_room(self) -> None:
+        sender, _ = self.join("Sender", "peer-private")
+        outsider, ow = self.join("Outsider", "peer-other")
+        sender.send({"type": "peer_reliable", "recipients": [{"id": ow["client_id"], "sequence": 1}],
+                     "body": {"generation": 0, "payload": {"type": "pvp_hit"}}})
+        sender.expect_error("invalid_peer_delivery")
+        outsider.send({"type": "ping"})
+        outsider.expect_type("pong")
+
     def test_reliable_deduplication_and_ack(self) -> None:
         first, _ = self.join("ReliableSender", "reliable")
         second, _ = self.join("ReliableReceiver", "reliable")
@@ -573,7 +741,7 @@ class RelayTests(unittest.TestCase):
         # Authenticate first so the deliberately short hello deadline does not
         # race a paced half-megabyte transfer. Hello timeout is tested separately.
         client, _ = self.join("Oversize", "oversize-line")
-        client.send_bytes(b"x" * (512 * 1024 + 1) + b"\n")
+        client.send_bytes(b"x" * (512 * 1024 + 2048 + 1) + b"\n")
         client.expect_error("message_too_large", 2.0)
         with self.assertRaises(ConnectionError):
             client.receive(1.0)

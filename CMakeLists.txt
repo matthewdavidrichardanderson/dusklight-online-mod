@@ -41,6 +41,7 @@ else ()
 endif ()
 
 include(FetchContent)
+include(cmake/LibJuice.cmake)
 if (NOT TARGET nlohmann_json::nlohmann_json)
     FetchContent_Declare(
         nlohmann_json
@@ -242,13 +243,17 @@ configure_file(
 set(ONLINE_INVITE_SOURCES
     src/net/invite_code.cpp
 )
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/LIBJUICE_LICENSE.txt"
+    "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/LIBJUICE_LICENSE.txt" COPYONLY)
 
 set(ONLINE_CONNECTION_SOURCES
+    src/net/ice_agent.cpp
     src/net/reliable_udp.cpp
     src/net/datagram_scheduler.cpp
     src/net/udp_connection.cpp
     vendor/kcp/ikcp.c
 )
+link_libraries(juice-static)
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/vendor/kcp")
 
 set(ONLINE_CORE_SOURCES
@@ -368,6 +373,16 @@ endif ()
 option(DUSKLIGHT_ONLINE_BUILD_TESTS "Build standalone online core tests" ${PROJECT_IS_TOP_LEVEL})
 if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     enable_testing()
+    add_executable(dusklight_online_mesh_transport_test
+        tests/mesh_transport_test.cpp ${ONLINE_CONNECTION_SOURCES} src/net/udp_codec.cpp)
+    target_include_directories(dusklight_online_mesh_transport_test PRIVATE include)
+    target_compile_features(dusklight_online_mesh_transport_test PRIVATE cxx_std_20)
+    target_link_libraries(dusklight_online_mesh_transport_test PRIVATE nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
+    if (WIN32)
+        target_link_libraries(dusklight_online_mesh_transport_test PRIVATE ws2_32)
+    endif ()
+    add_test(NAME dusklight_online_mesh_transport COMMAND dusklight_online_mesh_transport_test)
+    set_tests_properties(dusklight_online_mesh_transport PROPERTIES TIMEOUT 180)
     add_executable(dusklight_online_player_color_test tests/player_color_test.cpp src/game/player_color.cpp)
     target_compile_features(dusklight_online_player_color_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_player_color_test PRIVATE include)
@@ -382,6 +397,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_compile_features(dusklight_online_bomb_bag_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_bomb_bag_sync_test PRIVATE include)
     add_test(NAME dusklight_online_bomb_bag_sync COMMAND dusklight_online_bomb_bag_sync_test)
+
+    add_executable(dusklight_online_cave_map_sync_test tests/cave_map_sync_test.cpp)
+    target_compile_features(dusklight_online_cave_map_sync_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_cave_map_sync_test PRIVATE include)
+    add_test(NAME dusklight_online_cave_map_sync COMMAND dusklight_online_cave_map_sync_test)
 
     add_executable(dusklight_online_poe_sync_test tests/poe_sync_test.cpp)
     target_compile_features(dusklight_online_poe_sync_test PRIVATE cxx_std_20)
@@ -477,6 +497,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${ONLINE_CORE_SOURCES}
     )
     target_compile_features(dusklight_online_relay_transport_client_test PRIVATE cxx_std_20)
+    target_compile_definitions(dusklight_online_relay_transport_client_test PRIVATE DUSKLIGHT_TRANSPORT_TESTING=1)
     target_include_directories(dusklight_online_relay_transport_client_test PRIVATE include src)
     target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE
         nlohmann_json::nlohmann_json
@@ -484,6 +505,18 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     )
     if (WIN32)
         target_link_libraries(dusklight_online_relay_transport_client_test PRIVATE ws2_32 winmm)
+    endif ()
+
+    # Opt-in measurement target: run with an external relay and controlled
+    # network impairment. It is not a timing assertion in the default suite.
+    add_executable(dusklight_online_relay_fanout_benchmark EXCLUDE_FROM_ALL
+        tests/reliable_udp/relay_fanout_benchmark.cpp ${ONLINE_CORE_SOURCES})
+    target_compile_features(dusklight_online_relay_fanout_benchmark PRIVATE cxx_std_20)
+    target_compile_definitions(dusklight_online_relay_fanout_benchmark PRIVATE DUSKLIGHT_TRANSPORT_TESTING=1)
+    target_include_directories(dusklight_online_relay_fanout_benchmark PRIVATE include src)
+    target_link_libraries(dusklight_online_relay_fanout_benchmark PRIVATE nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
+    if (WIN32)
+        target_link_libraries(dusklight_online_relay_fanout_benchmark PRIVATE ws2_32 winmm)
     endif ()
 
     add_executable(dusklight_online_pose_ack_history_test tests/pose_ack_history_test.cpp)
@@ -555,5 +588,22 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 $<TARGET_FILE:dusklight_online_relay_transport_client_test>
         )
         set_tests_properties(dusklight_online_relay_transport PROPERTIES TIMEOUT 60)
+        foreach (case IN ITEMS fallback_local fallback_wan fallback_loss direct_wan direct_asymmetric)
+            if (case STREQUAL "fallback_local")
+                set(case_args --fallback)
+            elseif (case STREQUAL "fallback_wan")
+                set(case_args --fallback 140 0.02)
+            elseif (case STREQUAL "direct_wan")
+                set(case_args --direct-wan 140 0.02)
+            elseif (case STREQUAL "direct_asymmetric")
+                set(case_args --direct-asymmetric 140 0.02)
+            else ()
+                set(case_args --fallback 70 0.05)
+            endif ()
+            add_test(NAME dusklight_online_delivery_${case}
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_relay_transport_test.py"
+                    $<TARGET_FILE:dusklight_online_relay> $<TARGET_FILE:dusklight_online_relay_transport_client_test> ${case_args})
+            set_tests_properties(dusklight_online_delivery_${case} PROPERTIES TIMEOUT 100)
+        endforeach ()
     endif ()
 endif ()

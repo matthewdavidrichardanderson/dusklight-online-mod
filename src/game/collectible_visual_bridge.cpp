@@ -27,6 +27,8 @@
 #include "d/actor/d_a_obj_so.h"
 #include "d/actor/d_a_obj_smallkey.h"
 #include "d/actor/d_a_obj_sword.h"
+#include "d/actor/d_a_obj_web0.h"
+#include "d/actor/d_a_obj_web1.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_door_param2.h"
 #include "d/d_path.h"
@@ -181,6 +183,31 @@ void* repair_sky_cannon(void* actor, void* data) {
     cannon->mMode = daSCannon_c::MODE_END;
     cannon->setModelMtx();
     fopAcM_SetMtx(cannon, cannon->mpModels[cannon->mIsRepaired]->getBaseTRMtx());
+    return actor;
+}
+
+struct WebRepairSearch {
+    int actorName;
+    int room;
+    int flag;
+    uint32_t params;
+};
+
+void* repair_web(void* actor, void* data) {
+    if (actor == nullptr || data == nullptr) return nullptr;
+    const auto& search = *static_cast<const WebRepairSearch*>(data);
+    auto* web = static_cast<fopAc_ac_c*>(actor);
+    if (fpcM_GetName(actor) != search.actorName || fopAcM_GetRoomNo(web) != search.room ||
+        fopAcM_GetParam(actor) != search.params || search.flag == 0xFF ||
+        static_cast<int>((search.params >> 24) & 0xFF) != search.flag ||
+        !dComIfGs_isSwitch(search.flag, search.room)) {
+        return nullptr;
+    }
+
+    // Both web actors only inspect their completion switch during creation.
+    // A remote edge received after creation therefore has to remove the live
+    // MoveBG actor; its native delete callback releases the collision object.
+    fopAcM_delete(web);
     return actor;
 }
 
@@ -362,6 +389,15 @@ bool repair_remote_switch_actors(int stage, int flag) {
         }
     }
     return repaired;
+}
+
+bool repair_remote_web_actor(int actorName, int room, int flag, uint32_t params) {
+    if ((actorName != fpcNm_OBJ_WEB0_e && actorName != fpcNm_OBJ_WEB1_e) ||
+        room < 0 || room >= 64 || room != dComIfGp_roomControl_getStayNo()) {
+        return false;
+    }
+    WebRepairSearch search{actorName, room, flag, params};
+    return fopAcIt_Judge(repair_web, &search) != nullptr;
 }
 
 void repair_current_stage_collectibles() {
