@@ -13,7 +13,14 @@ void repair_remote_memory_item_collectible(int stage, int flag);
 // alone while their room is already loaded.
 bool repair_remote_switch_actors(int stage, int flag);
 
-// Remove the exact loaded web which originated a room-scoped switch edge.
+// Read a loaded web's native destruction timer, or -1 for another actor.
+int web_delete_timer(void* actor);
+
+// Start the exact loaded web's native destruction sequence. The actor owns
+// the animation, completion switch, collision release, and deletion.
+bool apply_remote_web_timer(int actorName, int room, uint32_t params, int timer);
+
+// Apply a web's authoritative completion switch and remove the exact actor.
 bool repair_remote_web_actor(int actorName, int room, int flag, uint32_t params);
 
 // Actors can spawn after a snapshot or live bit is applied, so repeat the

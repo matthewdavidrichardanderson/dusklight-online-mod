@@ -46,6 +46,7 @@ constexpr std::array kEntries = {
     Entry{"tbox_bit", {Domain::Progression, true, true}},
     Entry{"switch_bit", {Domain::Progression, true, true}},
     Entry{"room_switch_bit", {Domain::Progression, true, true}},
+    Entry{"web_timer", {Domain::Progression, true, true}},
     Entry{"item_bit", {Domain::Progression, true, true}},
     Entry{"dungeon_item_bit", {Domain::Progression, true, true}},
     Entry{"item_get", {Domain::Progression, false, true}},

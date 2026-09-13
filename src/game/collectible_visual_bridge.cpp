@@ -186,16 +186,48 @@ void* repair_sky_cannon(void* actor, void* data) {
     return actor;
 }
 
-struct WebRepairSearch {
+struct WebTimerSearch {
+    int actorName;
+    int room;
+    uint32_t params;
+    int timer;
+};
+
+void* start_web_timer(void* actor, void* data) {
+    if (actor == nullptr || data == nullptr) return nullptr;
+    const auto& search = *static_cast<const WebTimerSearch*>(data);
+    auto* web = static_cast<fopAc_ac_c*>(actor);
+    if (fpcM_GetName(actor) != search.actorName || fopAcM_GetRoomNo(web) != search.room ||
+        fopAcM_GetParam(actor) != search.params) {
+        return nullptr;
+    }
+
+    if (search.actorName == fpcNm_OBJ_WEB0_e) {
+        auto* wallWeb = static_cast<obj_web0_class*>(actor);
+        if (wallWeb->mDeleteTimer != 0 || (search.timer != 1 && search.timer != 41)) {
+            return nullptr;
+        }
+        wallWeb->mDeleteTimer = static_cast<u8>(search.timer);
+    } else if (search.actorName == fpcNm_OBJ_WEB1_e) {
+        auto* floorWeb = static_cast<obj_web1_class*>(actor);
+        if (floorWeb->mDeleteTimer != 0 || search.timer != 1) return nullptr;
+        floorWeb->mDeleteTimer = 1;
+    } else {
+        return nullptr;
+    }
+    return actor;
+}
+
+struct WebSwitchSearch {
     int actorName;
     int room;
     int flag;
     uint32_t params;
 };
 
-void* repair_web(void* actor, void* data) {
+void* repair_web_switch(void* actor, void* data) {
     if (actor == nullptr || data == nullptr) return nullptr;
-    const auto& search = *static_cast<const WebRepairSearch*>(data);
+    const auto& search = *static_cast<const WebSwitchSearch*>(data);
     auto* web = static_cast<fopAc_ac_c*>(actor);
     if (fpcM_GetName(actor) != search.actorName || fopAcM_GetRoomNo(web) != search.room ||
         fopAcM_GetParam(actor) != search.params || search.flag == 0xFF ||
@@ -204,9 +236,8 @@ void* repair_web(void* actor, void* data) {
         return nullptr;
     }
 
-    // Both web actors only inspect their completion switch during creation.
-    // A remote edge received after creation therefore has to remove the live
-    // MoveBG actor; its native delete callback releases the collision object.
+    // The timer message normally owns the live effect. Retain the completion
+    // switch as the authoritative fallback for paths which skip that timer.
     fopAcM_delete(web);
     return actor;
 }
@@ -391,13 +422,34 @@ bool repair_remote_switch_actors(int stage, int flag) {
     return repaired;
 }
 
+int web_delete_timer(void* actor) {
+    if (actor == nullptr || !fopAcM_IsActor(actor)) return -1;
+    switch (fpcM_GetName(actor)) {
+    case fpcNm_OBJ_WEB0_e:
+        return static_cast<obj_web0_class*>(actor)->mDeleteTimer;
+    case fpcNm_OBJ_WEB1_e:
+        return static_cast<obj_web1_class*>(actor)->mDeleteTimer;
+    default:
+        return -1;
+    }
+}
+
+bool apply_remote_web_timer(int actorName, int room, uint32_t params, int timer) {
+    if ((actorName != fpcNm_OBJ_WEB0_e && actorName != fpcNm_OBJ_WEB1_e) ||
+        room < 0 || room >= 64 || room != dComIfGp_roomControl_getStayNo()) {
+        return false;
+    }
+    WebTimerSearch search{actorName, room, params, timer};
+    return fopAcIt_Judge(start_web_timer, &search) != nullptr;
+}
+
 bool repair_remote_web_actor(int actorName, int room, int flag, uint32_t params) {
     if ((actorName != fpcNm_OBJ_WEB0_e && actorName != fpcNm_OBJ_WEB1_e) ||
         room < 0 || room >= 64 || room != dComIfGp_roomControl_getStayNo()) {
         return false;
     }
-    WebRepairSearch search{actorName, room, flag, params};
-    return fopAcIt_Judge(repair_web, &search) != nullptr;
+    WebSwitchSearch search{actorName, room, flag, params};
+    return fopAcIt_Judge(repair_web_switch, &search) != nullptr;
 }
 
 void repair_current_stage_collectibles() {

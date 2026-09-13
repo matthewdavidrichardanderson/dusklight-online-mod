@@ -246,6 +246,7 @@ constexpr std::string_view kPvpReactionGreatSpin = "great_spin";
 constexpr std::string_view kPvpReactionShieldBash = "shield_bash";
 GameAdapter* sActiveAdapter = nullptr;
 std::vector<void*> sExecutingProcessStack;
+std::vector<int> sWebDeleteTimerStack;
 std::unordered_map<void*, int> sDoor20ExecuteModes;
 uint32_t sDoor20StopOpenDepth = 0;
 std::vector<bool> sInfoSwitchWasSetStack;
@@ -1347,9 +1348,9 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", true}};
     if (void* process = exact_local_switch_actor_context(true); process != nullptr) {
         const int actor = fpcM_GetName(process);
-        // Web completion is a co-located interaction like unlocking a keyed
-        // door. Its enclosing dSv_info_c::onSwitch hook publishes the exact
-        // room-scoped edge instead of this durable, global switch message.
+        // Web timer synchronization supplies the native effect; retain this
+        // exact completion edge as a fallback for destruction paths which do
+        // not initialize the timer.
         if (is_web_switch_actor(actor)) return;
         const auto* source = static_cast<const fopAc_ac_c*>(process);
         const int room = fopAcM_GetHomeRoomNo(source);
@@ -1556,6 +1557,7 @@ void player_mirror_set_post(ModContext*, void* args, void*, void*) {
 HookAction process_execute_pre(ModContext*, void* args, void*, void*) {
     void* process = mods::arg<void*>(args, 0);
     sExecutingProcessStack.push_back(process);
+    sWebDeleteTimerStack.push_back(web_delete_timer(process));
     if (process != nullptr && fpcM_GetName(process) == fpcNm_DOOR20_e) {
         sDoor20ExecuteModes.erase(process);
     }
@@ -1641,6 +1643,30 @@ void door20_stop_open_post(ModContext*, void*, void*, void*) {
 
 void process_execute_post(ModContext*, void* args, void*, void*) {
     void* process = mods::arg<void*>(args, 0);
+    const int previousWebTimer = sWebDeleteTimerStack.empty()
+                                     ? -1
+                                     : sWebDeleteTimerStack.back();
+    if (!sWebDeleteTimerStack.empty()) sWebDeleteTimerStack.pop_back();
+    const int webTimer = web_delete_timer(process);
+    if (previousWebTimer == 0 && (webTimer == 1 || webTimer == 41) &&
+        sActiveAdapter != nullptr && !sActiveAdapter->applying_remote()) {
+        const int actorName = fpcM_GetName(process);
+        // WEB1 has no Ball-and-Chain branch; only WEB0 may begin at 41.
+        if (is_web_switch_actor(actorName) &&
+            (webTimer == 1 || actorName == fpcNm_OBJ_WEB0_e)) {
+            const int stage = current_stage_table();
+            const int room = fopAcM_GetRoomNo(static_cast<fopAc_ac_c*>(process));
+            const char* stageName = dComIfGp_getStartStageName();
+            if (valid_stage(stage) && room >= 0 && room < 64 && stageName != nullptr) {
+                sActiveAdapter->publish_local({
+                    {"type", "web_timer"}, {"stage", stage}, {"room", room},
+                    {"source_actor", actorName},
+                    {"source_params", fopAcM_GetParam(process)},
+                    {"source_stage", stageName}, {"timer", webTimer},
+                });
+            }
+        }
+    }
     const bool isDoor20 = process != nullptr && fpcM_GetName(process) == fpcNm_DOOR20_e;
     const auto doorMode = isDoor20 ? sDoor20ExecuteModes.find(process) : sDoor20ExecuteModes.end();
     if (!isDoor20 || (doorMode != sDoor20ExecuteModes.end() && doorMode->second == 2)) {
@@ -2090,6 +2116,7 @@ void GameAdapter::shutdown_hooks() {
     uninstall_audio_hooks();
     uninstall_remote_actor_profile();
     sExecutingProcessStack.clear();
+    sWebDeleteTimerStack.clear();
     sDoor20ExecuteModes.clear();
     sDoor20StopOpenDepth = 0;
     sInfoSwitchWasSetStack.clear();
@@ -4232,6 +4259,27 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
     if (type == "dark_clear_lv") return apply_dark_clear(message.value("no", -1));
 
     if (type == "switch_bit") return apply_switch_bit(message, routed.peerId);
+    if (type == "web_timer") {
+        const int stage = message.value("stage", -1);
+        const int room = message.value("room", -1);
+        const int actorName = message.value("source_actor", -1);
+        const uint32_t params = message.value("source_params", 0xFFFFFFFFU);
+        const int timer = message.value("timer", -1);
+        if (!valid_stage(stage) || room < 0 || room >= 64 ||
+            !is_web_switch_actor(actorName) ||
+            (timer != 1 && !(actorName == fpcNm_OBJ_WEB0_e && timer == 41))) {
+            return reject("invalid web_timer payload");
+        }
+        const char* currentStage = dComIfGp_getStartStageName();
+        if (stage != current_stage_table() || currentStage == nullptr ||
+            message.value("source_stage", std::string()) != currentStage ||
+            dComIfGp_roomControl_getStayNo() != room) {
+            return ApplyResult::IgnoredByPolicy;
+        }
+        return apply_remote_web_timer(actorName, room, params, timer)
+                   ? ApplyResult::Applied
+                   : ApplyResult::IgnoredByPolicy;
+    }
     if (type == "room_switch_bit") {
         const int stage = message.value("stage", -1);
         const int flag = message.value("flag", -1);
@@ -4254,10 +4302,8 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             const uint32_t sourceParams = message.value("source_params", 0xFFFFFFFFU);
             const int sourceRoom = message.value("source_room", -1);
             if (currentStage == nullptr || sourceStage != currentStage || sourceRoom != room ||
-                static_cast<int>((sourceParams >> 24) & 0xFF) != flag) {
-                return ApplyResult::IgnoredByPolicy;
-            }
-            if (dComIfGp_roomControl_getStayNo() != room) {
+                static_cast<int>((sourceParams >> 24) & 0xFF) != flag ||
+                dComIfGp_roomControl_getStayNo() != room) {
                 return ApplyResult::IgnoredByPolicy;
             }
         }
