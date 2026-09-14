@@ -597,7 +597,8 @@ bool is_faron_warp_sequence_switch(int stage, int flag) {
 }
 
 bool is_unsynced_switch_bit(int stage, int flag) {
-    return (stage == dStage_SaveTbl_ORDON && (flag == 0x68 || flag == 0x2F)) ||
+    // Keep the post-Goats-2 Ranch exit trigger available for each player.
+    return (stage == dStage_SaveTbl_ORDON && (flag == 0x68 || flag == 0x2F || flag == 0x16)) ||
            (stage == dStage_SaveTbl_PRISON && flag == 0x1F) ||
            (stage == dStage_SaveTbl_LANAYRU && flag == 0x1E);
 }
