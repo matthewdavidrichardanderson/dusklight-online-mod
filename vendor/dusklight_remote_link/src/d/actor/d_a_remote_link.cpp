@@ -7717,6 +7717,22 @@ int daRemoteLink_c::Draw() {
         return TRUE;
     }
 
+    // The custom actor box contains only mpBodyModel. Travelling equipment
+    // and its chains are submitted below by this same Draw, so the engine
+    // must not reject the entire actor merely because Link is off-screen.
+    // Keep the original body-box test when nothing can extend beyond it.
+    // Include both semantic visuals and matrix-streamed attachment flags.
+    const bool hasExtendedEquipment =
+        mRemoteBoomerangVisualValid || mRemoteHookshotVisualValid ||
+        mRemoteIronBallVisualValid || mRemoteCopyRodVisualValid ||
+        mRemoteFishingRodVisualValid || mRemoteSpinnerVisualValid ||
+        mHookTipMatrixValid || mHookSubTipMatrixValid ||
+        mArrowMatrixValid || mItemActorMatrixValid || mRideActorMatrixValid;
+    if (!hasExtendedEquipment && dComIfGp_event_moveApproval(this) != 2 &&
+        fopAcM_cullingCheck(this)) {
+        return TRUE;
+    }
+
     // Remote matrix packets can arrive less often than the 30 Hz simulation.
     // Only use the fallback after an observed multi-tick packet gap, leaving the
     // normal 30 Hz path byte-for-byte on its existing matrices.
@@ -7968,7 +7984,9 @@ DUSK_PROFILE actor_process_profile_definition DUSK_CONST g_profile_REMOTE_LINK =
     /* Actor SubMtd */ &l_daRemoteLink_Method,
     // Continue pose/animation updates during the two allowed event types.
     // Execute and Draw still apply the event visibility gate every frame.
-    /* Status       */ fopAcStts_CULL_e | fopAcStts_UNK_0x40000_e | fopAcStts_NOPAUSE_e,
+    // Draw owns culling: the engine's body-only box would also cull equipment
+    // that can travel into the camera independently of Link.
+    /* Status       */ fopAcStts_UNK_0x40000_e | fopAcStts_NOPAUSE_e,
     /* Group        */ fopAc_ACTOR_e,
     /* Cull Type    */ fopAc_CULLBOX_CUSTOM_e,
 };
