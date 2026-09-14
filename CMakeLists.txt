@@ -312,6 +312,7 @@ target_link_libraries(dusklight_online PRIVATE
     dusklight_online_imgui
     ${CMAKE_DL_LIBS}
 )
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InterpolationSDKStub.cmake")
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
     if (PROJECT_IS_TOP_LEVEL)

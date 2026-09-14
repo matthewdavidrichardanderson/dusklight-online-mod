@@ -1,0 +1,8 @@
+_ZN10J3DAnmBase8setFrameEf
+_ZN12J3DFrameCtrl8setFrameEf
+_ZN12J3DFrameCtrlD0Ev
+_ZN12J3DFrameCtrlD1Ev
+_ZN12J3DFrameCtrlD2Ev
+_ZTV12J3DFrameCtrl
+_ZTI12J3DFrameCtrl
+_ZTS12J3DFrameCtrl
