@@ -15,6 +15,11 @@ set(_interp_script "${CMAKE_CURRENT_LIST_DIR}/refresh_interpolation_stub.py")
 set(_interp_exports "${CMAKE_CURRENT_BINARY_DIR}/interpolation_sdk_exports.exp")
 get_filename_component(_interp_stub_name "${_original_interp_stub}" NAME)
 set(_interp_stub "${CMAKE_CURRENT_BINARY_DIR}/interpolation-${_interp_stub_name}")
+if (ANDROID)
+    # CMake can turn an ELF stub path into -l<name>. Keep the conventional
+    # lib prefix so that lookup finds the generated file in either form.
+    set(_interp_stub "${CMAKE_CURRENT_BINARY_DIR}/libinterpolation-${_interp_stub_name}")
+endif ()
 
 if (APPLE)
     set(_interp_format macho)
