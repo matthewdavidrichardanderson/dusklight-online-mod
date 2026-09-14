@@ -2172,7 +2172,12 @@ void Transport::disconnect() {
 }
 
 Status Transport::status() const {
-    return impl_->status;
+    Status result = impl_->status;
+    for (const auto& [id, direct] : impl_->meshRoutes) {
+        if (direct) ++result.natPeerCount;
+        else ++result.relayPeerCount;
+    }
+    return result;
 }
 
 VisualSendStats Transport::last_visual_send_stats() const {

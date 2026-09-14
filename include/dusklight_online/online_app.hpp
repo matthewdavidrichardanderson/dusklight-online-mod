@@ -67,6 +67,8 @@ private:
     UiStyleHandle overlayStyle_ = 0;
     UiElementHandle panelStatus_ = 0;
     UiElementHandle windowStatus_ = 0;
+    UiElementHandle windowPlayers_ = 0;
+    std::string windowRenderedPlayers_;
     UiElementHandle sessionActionsHeading_ = 0;
     std::string panelRenderedStatus_;
     std::string windowRenderedStatus_;
@@ -110,6 +112,7 @@ private:
     net::RoomSettings displayed_settings() const;
     std::string status_text() const;
     std::string dashboard_rml() const;
+    std::string connected_players_rml() const;
     void open_window();
     void open_settings_window();
     void open_player_options_window();

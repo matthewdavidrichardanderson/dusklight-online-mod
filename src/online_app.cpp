@@ -31,6 +31,14 @@ namespace {
 
 constexpr uint32_t kManualSyncCooldownTicks = 5 * 30;
 
+const char* connection_label(const net::Status& status) {
+    if (status.mode != net::Mode::Relay) return "Direct";
+    if (status.natPeerCount && status.relayPeerCount) return "NAT/Relay (mixed)";
+    if (status.natPeerCount) return "NAT";
+    if (status.relayPeerCount) return "Relay";
+    return "NAT/Relay";
+}
+
 ModResult add_config(const char* name, ConfigVarType type, const char* defaultString,
                      int64_t defaultInt, bool defaultBool, ConfigVarHandle& output,
                      ModError* error) {
@@ -840,6 +848,7 @@ void OnlineApp::shutdown() {
     }
     panelStatus_ = 0;
     windowStatus_ = 0;
+    windowPlayers_ = 0;
     router_.reset();
     game_.reset();
     livePublishInitialized_ = false;
@@ -978,15 +987,11 @@ net::RoomSettings OnlineApp::displayed_settings() const {
 
 std::string OnlineApp::status_text() const {
     const net::Status status = transport_.status();
-    std::string activity = "Not connected";
     std::string connection = "—";
     std::string session = "—";
     std::string health = "Disconnected";
     if (status.enabled) {
-        const bool hosting = status.mode == net::Mode::DirectHost ||
-            (status.mode == net::Mode::Relay && (relayHostIntent_ || status.isOwner));
-        activity = hosting ? "Hosting" : "Joining";
-        connection = status.mode == net::Mode::Relay ? "Relay" : "Direct";
+        connection = connection_label(status);
         const size_t playerCount = transport_.peers().size() + 1u;
         session = (status.room.empty() ? std::string("Unnamed lobby") : status.room) +
             " — " + std::to_string(playerCount) + (playerCount == 1 ? " player" : " players");
@@ -1019,10 +1024,9 @@ std::string OnlineApp::status_text() const {
             "</span><span style=\"display: block; flex: 1 1 auto; min-width: 0;\">" +
             rml_escape(value) + "</span></div>";
     };
-    return summary_row("Activity", activity) +
-        summary_row("Connection", connection) +
-        summary_row("Session", session) +
-        summary_row("Status", health);
+    return summary_row("Status", health) +
+        summary_row("Lobby", session) +
+        summary_row("Connection", connection);
 }
 
 std::string OnlineApp::dashboard_rml() const {
@@ -1033,15 +1037,11 @@ std::string OnlineApp::dashboard_rml() const {
             rml_escape(value) + "</span></div>";
     };
 
-    std::string activity = "Not connected";
     std::string connection = "—";
     std::string session = "—";
     std::string health = "Disconnected";
     if (status.enabled) {
-        const bool hosting = status.mode == net::Mode::DirectHost ||
-            (status.mode == net::Mode::Relay && (relayHostIntent_ || status.isOwner));
-        activity = hosting ? "Hosting" : "Joining";
-        connection = status.mode == net::Mode::Relay ? "Relay" : "Direct";
+        connection = connection_label(status);
         const size_t playerCount = transport_.peers().size() + 1u;
         session = (status.room.empty() ? std::string("Unnamed lobby") : status.room) +
             " — " + std::to_string(playerCount) + (playerCount == 1 ? " player" : " players");
@@ -1067,10 +1067,9 @@ std::string OnlineApp::dashboard_rml() const {
     }
 
     std::string rml;
-    rml += detail_row("Activity", activity);
-    rml += detail_row("Connection", connection);
-    rml += detail_row("Session", session);
     rml += detail_row("Status", health);
+    rml += detail_row("Lobby", session);
+    rml += detail_row("Connection", connection);
     return rml;
 }
 
@@ -1090,7 +1089,7 @@ void OnlineApp::open_window() {
     tabs[1].build = &OnlineApp::build_direct_tab;
     tabs[1].user_data = this;
     tabs[2] = UI_TAB_DESC_INIT;
-    tabs[2].title = "Relay";
+    tabs[2].title = "NAT/Relay";
     tabs[2].build = &OnlineApp::build_relay_tab;
     tabs[2].user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
@@ -1318,10 +1317,10 @@ void OnlineApp::host_relay() {
     std::string error;
     const auto endpoint = dusk::multiplayer::decode_invite_code(code, &error);
     if (!endpoint || endpoint->transport != "relay") {
-        statusMessage_ = "Relay host failed: " +
+        statusMessage_ = "NAT/Relay host failed: " +
                          (error.empty() ? std::string("not a relay code") : error);
         game::push_online_notification(
-            failure_message("Could not create the relay lobby",
+            failure_message("Could not create the NAT/Relay lobby",
                             error.empty() ? "The invite code is not for a relay." : error),
             5.0f, true);
         return;
@@ -1332,16 +1331,16 @@ void OnlineApp::host_relay() {
     config.sessionId = endpoint->sessionId;
     config.sessionKey = endpoint->sessionKey;
     if (!transport_.start_relay(config, &error)) {
-        statusMessage_ = "Relay host failed: " + error;
+        statusMessage_ = "NAT/Relay host failed: " + error;
         game::push_online_notification(
-            failure_message("Could not create the relay lobby", error), 5.0f, true);
+            failure_message("Could not create the NAT/Relay lobby", error), 5.0f, true);
     } else {
-        begin_lobby_attempt("Could not create the relay lobby");
+        begin_lobby_attempt("Could not create the NAT/Relay lobby");
         relayHostIntent_ = true;
         activeCode_ = code;
         statusMessage_ = useLocalRelay
-            ? "Creating relay lobby using the relay on this PC"
-            : "Creating relay lobby using the server in the relay code";
+            ? "Creating NAT/Relay lobby using the relay on this PC"
+            : "Creating NAT/Relay lobby using the server in the relay code";
     }
 }
 
@@ -1351,10 +1350,10 @@ void OnlineApp::join_relay() {
     std::string error;
     const auto endpoint = dusk::multiplayer::decode_invite_code(code, &error);
     if (!endpoint || endpoint->transport != "relay") {
-        statusMessage_ = "Relay join failed: " +
+        statusMessage_ = "NAT/Relay join failed: " +
                          (error.empty() ? std::string("not a relay code") : error);
         game::push_online_notification(
-            failure_message("Could not join the relay lobby",
+            failure_message("Could not join the NAT/Relay lobby",
                             error.empty() ? "The invite code is not for a relay." : error),
             5.0f, true);
         return;
@@ -1372,16 +1371,16 @@ void OnlineApp::join_relay() {
     config.settings = configured_settings();
     config.wantPuppet = bool_value(config_.dummyModel, true);
     if (!transport_.start_relay(config, &error)) {
-        statusMessage_ = "Relay join failed: " + error;
+        statusMessage_ = "NAT/Relay join failed: " + error;
         game::push_online_notification(
-            failure_message("Could not join the relay lobby", error), 5.0f, true);
+            failure_message("Could not join the NAT/Relay lobby", error), 5.0f, true);
     } else {
-        begin_lobby_attempt("Could not join the relay lobby");
+        begin_lobby_attempt("Could not join the NAT/Relay lobby");
         relayHostIntent_ = false;
         activeCode_ = code;
         statusMessage_ = useLocalRelay
-            ? "Joining relay lobby using the relay on this PC"
-            : "Joining relay lobby using the server in the relay code";
+            ? "Joining NAT/Relay lobby using the relay on this PC"
+            : "Joining NAT/Relay lobby using the server in the relay code";
     }
 }
 
@@ -1459,6 +1458,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                                        UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.windowStatus_ = 0;
+    app.windowPlayers_ = 0;
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
@@ -1490,24 +1490,29 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
 
     svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
     svc_ui->pane_add_section(mod_ctx, right, "Connected players");
-    if (!app.manualPeerLabels_.empty()) {
+    const std::string players = app.connected_players_rml();
+    svc_ui->pane_add_rml(mod_ctx, right, players.c_str(), &app.windowPlayers_);
+    app.windowRenderedPlayers_ = players;
+    return MOD_OK;
+}
+
+std::string OnlineApp::connected_players_rml() const {
+    if (!transport_.peers().empty()) {
         std::string players = "<div class=\"online-player-list\">";
-        for (const std::string& name : app.manualPeerLabels_) {
+        for (const auto& [id, name] : transport_.peers()) {
             players += "<div class=\"online-player-row\"><span class=\"online-player-indicator\"></span>"
-                       "<span class=\"online-player-name\">" + rml_escape(name) +
+                       "<span class=\"online-player-name\">" + rml_escape(name.empty() ? "Player" : name) +
                        "</span></div>";
         }
         players += "</div>";
-        svc_ui->pane_add_rml(mod_ctx, right, players.c_str(), nullptr);
+        return players;
     } else {
-        svc_ui->pane_add_rml(
-            mod_ctx, right,
+        return
             "<div class=\"online-player-empty\">"
             "<span class=\"online-player-empty-title\">No other players are connected.</span>"
             "<span class=\"online-player-empty-detail\">Players will appear here after joining.</span>"
-            "</div>", nullptr);
+            "</div>";
     }
-    return MOD_OK;
 }
 
 ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiElementHandle left,
@@ -1621,6 +1626,7 @@ ModResult OnlineApp::build_direct_tab(ModContext*, UiWindowHandle, UiElementHand
     auto& app = *static_cast<OnlineApp*>(data);
     // Activating any tab destroys the previous tab's elements.
     app.windowStatus_ = 0;
+    app.windowPlayers_ = 0;
     app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
     svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
@@ -1656,11 +1662,12 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     auto& app = *static_cast<OnlineApp*>(data);
     // Activating any tab destroys the previous tab's elements.
     app.windowStatus_ = 0;
+    app.windowPlayers_ = 0;
     app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
     svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
-    svc_ui->pane_add_section(mod_ctx, left, "Host relay");
-    add_button(left, "Host relay lobby", &OnlineApp::host_relay_pressed, &app,
+    svc_ui->pane_add_section(mod_ctx, left, "Host NAT/Relay");
+    add_button(left, "Host NAT/Relay lobby", &OnlineApp::host_relay_pressed, &app,
                &OnlineApp::session_active, nullptr, "online-primary-action");
     add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
                &OnlineApp::relay_host_inactive, nullptr, "online-danger-action");
@@ -1674,8 +1681,8 @@ ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandl
     add_bound_control(left, UI_CONTROL_TOGGLE,
                       "Use relay on this PC", app.config_.relayLocal,
                       0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
-    svc_ui->pane_add_section(mod_ctx, right, "Join relay");
-    add_button(right, "Join relay lobby", &OnlineApp::join_relay_pressed, &app,
+    svc_ui->pane_add_section(mod_ctx, right, "Join NAT/Relay");
+    add_button(right, "Join NAT/Relay lobby", &OnlineApp::join_relay_pressed, &app,
                &OnlineApp::session_active, nullptr, "online-primary-action");
     add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
                &OnlineApp::relay_join_inactive, nullptr, "online-danger-action");
@@ -1703,6 +1710,15 @@ void OnlineApp::player_options_pressed(ModContext*, void* data) {
 
 ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
+    if (app.windowPlayers_ != 0) {
+        const std::string players = app.connected_players_rml();
+        if (players != app.windowRenderedPlayers_) {
+            if (svc_ui->elem_set_rml(mod_ctx, app.windowPlayers_, players.c_str()) != MOD_OK) {
+                app.windowPlayers_ = 0;
+            }
+            app.windowRenderedPlayers_ = players;
+        }
+    }
     if (app.windowStatus_ != 0) {
         const std::string status = app.dashboard_rml();
         if (status != app.windowRenderedStatus_ &&
@@ -1710,6 +1726,7 @@ ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
             // A tab rebuild invalidates every element handle from its prior
             // generation. Stop immediately if the host rebuilt underneath us.
             app.windowStatus_ = 0;
+            app.windowPlayers_ = 0;
         }
         app.windowRenderedStatus_ = status;
     }
@@ -1731,6 +1748,7 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.window_ = 0;
     app.windowStatus_ = 0;
+    app.windowPlayers_ = 0;
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;

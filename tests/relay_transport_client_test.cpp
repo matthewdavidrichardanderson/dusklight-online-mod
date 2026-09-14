@@ -130,6 +130,15 @@ int main(int argc, char** argv) {
         return ownerDirect && joinerDirect;
     }, 10000)) fail("real relay signaling did not establish bidirectional ICE paths");
 
+    for (Transport* client : {&owner, &joiner}) {
+        const auto status = client->status();
+        const bool relayOnly = std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") != nullptr;
+        if (status.natPeerCount != (relayOnly ? 0u : 1u) ||
+            status.relayPeerCount != (relayOnly ? 1u : 0u)) {
+            fail("connection status did not reflect the active peer route");
+        }
+    }
+
     // Run in every carrier configuration, including forced relay, ICE direct,
     // loss and asymmetric delay. The game needs these exact source fields.
     const auto checkCaveDelivery = [&] {

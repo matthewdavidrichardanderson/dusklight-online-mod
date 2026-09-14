@@ -122,6 +122,8 @@ struct Event {
 };
 
 struct Status {
+    uint32_t natPeerCount = 0;
+    uint32_t relayPeerCount = 0;
     Mode mode = Mode::Disabled;
     State state = State::Disconnected;
     bool enabled = false;
