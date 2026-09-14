@@ -7120,8 +7120,8 @@ void daRemoteLink_c::updateRemoteWaterDrops() {
     if (mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) return;
     const bool wolf = mVisualState.form == FORM_WOLF;
     const u16 effects[2] = {
-        wolf ? ID_ZI_J_WL_NUREPOTA_BACKBONE1 : ID_ZI_J_LK_NUREPOTA_BACKBONE2,
-        wolf ? ID_ZI_J_WL_NUREPOTA_BACKBONE2 : ID_ZI_J_LK_NUREPOTA_WAIST};
+        static_cast<u16>(wolf ? ID_ZI_J_WL_NUREPOTA_BACKBONE1 : ID_ZI_J_LK_NUREPOTA_BACKBONE2),
+        static_cast<u16>(wolf ? ID_ZI_J_WL_NUREPOTA_BACKBONE2 : ID_ZI_J_LK_NUREPOTA_WAIST)};
     const u16 joints[2] = {static_cast<u16>(wolf ? 1 : 2), static_cast<u16>(wolf ? 2 : 16)};
     for (size_t part = 0; part < 2; ++part) {
         // Native particles drip only during the positive countdown, not while
