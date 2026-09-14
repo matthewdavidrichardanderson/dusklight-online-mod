@@ -1,5 +1,7 @@
-# Upstream 83f50329 adds these virtual methods, but the published Windows
-# SDK import stub predates them. Supplement it with ordinary imports of
+# Upstream 83f50329 adds line interpolation methods, and d34226ad's headers
+# require out-of-line animation frame setters and controller destruction.
+# The published Windows SDK import stub predates these symbols.
+# Supplement it with ordinary imports of
 # upstream's implementations; no game code or fork library is included.
 set(_line_import_def "${CMAKE_CURRENT_LIST_DIR}/line_interpolation.def")
 set(_line_import_lib "${CMAKE_CURRENT_BINARY_DIR}/line_interpolation_imports.lib")

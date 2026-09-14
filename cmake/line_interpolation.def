@@ -1,3 +1,6 @@
 EXPORTS
     ?captureInterpPoints@mDoExt_3DlineMat0_c@@UEAAXXZ
     ?refreshGeometryForPresentation@mDoExt_3DlineMat0_c@@UEAAXXZ
+    ?setFrame@J3DFrameCtrl@@QEAAXM@Z
+    ?setFrame@J3DAnmBase@@QEAAXM@Z
+    ??1J3DFrameCtrl@@UEAA@XZ

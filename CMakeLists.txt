@@ -29,7 +29,7 @@ endif ()
 # Pin the SDK/ABI used for release builds. Compatibility with other builds is
 # negotiated at runtime through versioned services and the GameService epoch.
 if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "83f50329d84c89722f5fa65e084a157d8cb4b9a1")
+    set(DUSKLIGHT_VERSION "d34226ad1dcd261dcb738d27daa808bcf81e44dd")
 endif ()
 
 if (PROJECT_IS_TOP_LEVEL)
