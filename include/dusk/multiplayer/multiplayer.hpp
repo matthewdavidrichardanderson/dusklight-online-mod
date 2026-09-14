@@ -214,6 +214,9 @@ struct PeerPoseSnapshot {
     std::array<int16_t, 6> armRotB{};
     std::array<int16_t, 3> fishingArm1Angle{};
     std::array<int16_t, 3> fishingArm2Angle{};
+    // Upper/lower anchors: pose sequence, native timer, initial fade.
+    std::array<int64_t, 6> waterDropState{};
+    bool waterDropStrong = false;
     bool isWolf = false;
     bool isTransforming = false;
     bool transformFromWolf = false;

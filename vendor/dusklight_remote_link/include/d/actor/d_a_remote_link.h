@@ -7,6 +7,7 @@
 #include "d/d_kankyo.h"
 #include "dusk/multiplayer/multiplayer.hpp"
 #include "dusklight_online/game/audio_lifetime.hpp"
+#include "dusklight_online/game/wet_state.hpp"
 #include "f_op/f_op_actor_mng.h"
 #include "m_Do/m_Do_ext.h"
 #include "Z2AudioLib/Z2SoundObject.h"
@@ -120,6 +121,7 @@ public:
                                              bool i_senderWolf, int i_procVar1,
                                              int i_procVar3, int i_procVar5,
                                              f32 i_frame, const cXyz& i_pos);
+    void setRemoteWaterDropState(const std::array<int64_t, 6>& state, uint32_t sequence, bool strong);
     void handoffRemoteTransformEffectsTo(daRemoteLink_c* i_target);
     void setRemoteBombObjectState(const dusk::multiplayer::RemoteBombObjectSnapshot& i_bomb);
     void setRemoteHatState(const std::array<int16_t, 10>& i_rotA,
@@ -745,6 +747,10 @@ private:
     bool mRemoteTransformSenderWolf;
     int mRemoteTransformEffectProcVar1;
     int mRemoteTransformEffectColor;
+    std::array<int64_t, 6> mRemoteWaterDropAnchors{};
+    std::array<dusklight_online::game::WetState, 2> mRemoteWetState{};
+    bool mRemoteWaterDropStrong = false;
+
     int mRemoteTransformEffectProcVar5;
     f32 mRemoteTransformEffectFrame;
     cXyz mRemoteTransformEffectPos;

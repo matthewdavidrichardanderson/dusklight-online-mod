@@ -1,3 +1,4 @@
+#include "dusklight_online/game/wet_state.hpp"
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/local_event_visibility.hpp"
@@ -46,6 +47,7 @@ struct WeightState {
 };
 
 std::array<WeightState, 21> sWeightStates{};
+std::array<int64_t, 6> sWaterDropState{};
 bool sLocalTransformObserved = false;
 bool sLocalTransformFromWolf = false;
 bool sLocalTransformToWolf = false;
@@ -521,6 +523,23 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     };
     J3DAnmTransform* faceBck = link->mFaceBck.getBckAnm();
     const int clothesVariant = clothes_variant();
+    const bool waterDropEnabled = !wolf &&
+        !link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_80000) &&
+        !link->checkZoraWearAbility() && !link->checkMagicArmorWearAbility();
+    for (size_t part = 0; part < 2; ++part) {
+        const size_t i = part * 3;
+        const WetState actual = waterDropEnabled
+            ? WetState{link->field_0x32c0[part], link->field_0x32a0[part].a} : WetState{};
+        const auto tick = static_cast<uint32_t>(sWaterDropState[i]);
+        const WetState expected = advance_wet_state(
+            {static_cast<int>(sWaterDropState[i + 1]), static_cast<int>(sWaterDropState[i + 2])},
+            sequence >= tick ? sequence - tick : 0);
+        if (tick == 0 || sequence < tick || actual.timer != expected.timer || actual.fade != expected.fade) {
+            sWaterDropState[i] = sequence;
+            sWaterDropState[i + 1] = actual.timer;
+            sWaterDropState[i + 2] = actual.fade;
+        }
+    }
     const char* stageName = dComIfGp_getStartStageName();
     const bool finalGanondorfReady = stageName != nullptr &&
         std::strcmp(stageName, "D_MN09B") == 0 && dComIfGs_isSaveDunSwitch(1);
@@ -605,6 +624,8 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         // semantic animation needs the two joint corrections explicitly.
         {"fishing_arm_1", csxyz_array(link->mFishingArm1Angle)},
         {"fishing_arm_2", csxyz_array(link->field_0x3160)},
+        {"water_drop_state", sWaterDropState},
+        {"water_drop_strong", bool(link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_100000))},
         {"is_wolf", wolf}, {"is_transforming", transforming},
         {"transform_from_wolf", transformFromWolf},
         {"transform_to_wolf", transformToWolf},
@@ -983,6 +1004,7 @@ bool matrix_streaming_enabled() {
 }
 
 void reset_local_pose_state() {
+    sWaterDropState = {};
     sWeightStates = {};
     sLocalTransformObserved = false;
     sLocalTransformFromWolf = false;

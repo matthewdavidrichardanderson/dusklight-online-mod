@@ -809,6 +809,23 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
         parse_i16_array(state, "arm_rot_b", pose.armRotB);
         parse_i16_array(state, "fishing_arm_1", pose.fishingArm1Angle);
         parse_i16_array(state, "fishing_arm_2", pose.fishingArm2Angle);
+        if (state.contains("water_drop_state")) {
+            const auto& wet = state["water_drop_state"];
+            if (!wet.is_array() || wet.size() != 6) {
+                error = "pose contains invalid wet timer state";
+                return false;
+            }
+            for (size_t i = 0; i < 6; ++i) {
+                const int64_t minimum = i % 3 == 0 ? 0 : (i % 3 == 1 ? -1 : -20);
+                const int64_t maximum = i % 3 == 0 ? pose.sequence : (i % 3 == 1 ? 150 : 0);
+                if (!wet[i].is_number_integer() || wet[i] < minimum || wet[i] > maximum) {
+                    error = "pose contains invalid wet timer state";
+                    return false;
+                }
+                pose.waterDropState[i] = wet[i].get<int64_t>();
+            }
+        }
+        pose.waterDropStrong = state.value("water_drop_strong", false);
         pose.isWolf = state.value("is_wolf", false);
         pose.isTransforming = state.value("is_transforming", false);
         pose.transformFromWolf = state.value("transform_from_wolf", pose.isWolf);

@@ -4090,6 +4090,10 @@ int daRemoteLink_c::Execute() {
         return TRUE;
     }
 
+    for (auto& wet : mRemoteWetState) {
+        wet = dusklight_online::game::advance_wet_state(wet, 1);
+    }
+
     // Refresh lighting inputs on simulation ticks, never retain a collision
     // polygon across frames or query the scene during teardown.
     tevStr.room_no = fopAcM_GetRoomNo(this);
@@ -7097,6 +7101,22 @@ void daRemoteLink_c::drawModel(J3DModel* i_model) {
     mDoExt_modelEntryDL(i_model);
 }
 
+void daRemoteLink_c::setRemoteWaterDropState(const std::array<int64_t, 6>& state,
+                                             uint32_t sequence, bool strong) {
+    mRemoteWaterDropStrong = strong;
+    for (size_t part = 0; part < 2; ++part) {
+        const size_t i = part * 3;
+        if (state[i] == mRemoteWaterDropAnchors[i] &&
+            state[i + 1] == mRemoteWaterDropAnchors[i + 1] &&
+            state[i + 2] == mRemoteWaterDropAnchors[i + 2]) continue;
+        const auto tick = static_cast<uint32_t>(state[i]);
+        mRemoteWetState[part] = dusklight_online::game::advance_wet_state(
+            {static_cast<int>(state[i + 1]), static_cast<int>(state[i + 2])},
+            sequence >= tick ? sequence - tick : 0);
+        for (size_t field = i; field < i + 3; ++field) mRemoteWaterDropAnchors[field] = state[field];
+    }
+}
+
 void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
     if (mVisualState.form == FORM_WOLF || mpBodyModel == NULL || mpHeadModel == NULL) {
         return;
@@ -7109,11 +7129,21 @@ void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
     }
 
     static const GXColorS10 noColor = {0, 0, 0, 0};
+    const float wetScale = mRemoteWaterDropStrong ? 0.65f : 0.4f;
+    const s16 upperTint = static_cast<s16>(mRemoteWetState[0].fade * wetScale);
+    const s16 lowerTint = static_cast<s16>(mRemoteWetState[1].fade * wetScale);
+    const GXColorS10 upperWet = {upperTint, upperTint, upperTint, static_cast<s16>(mRemoteWetState[0].fade)};
+    const GXColorS10 lowerWet = {lowerTint, lowerTint, lowerTint, static_cast<s16>(mRemoteWetState[1].fade)};
+    // Native wet tint applies to Hero/Casual clothes, not Zora/Magic Armor.
+    // Transformation colour retains priority over wetness.
+    const bool wetClothes = mClothesVariant == 0 || mClothesVariant == 1;
     const J3DGXColorS10* color =
         i_active ? reinterpret_cast<const J3DGXColorS10*>(&tevStr.TevColor)
-                 : reinterpret_cast<const J3DGXColorS10*>(&noColor);
+                 : reinterpret_cast<const J3DGXColorS10*>(wetClothes ? &upperWet : &noColor);
+    const J3DGXColorS10* lowerColor =
+        !i_active && wetClothes ? reinterpret_cast<const J3DGXColorS10*>(&lowerWet) : color;
 
-    const auto setMaterialColor = [color](J3DModelData* i_modelData, u16 i_index) {
+    const auto setMaterialColor = [&color](J3DModelData* i_modelData, u16 i_index) {
         if (i_modelData == NULL || i_index >= i_modelData->getMaterialNum()) {
             return;
         }
@@ -7144,6 +7174,7 @@ void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
     case 1: // Casual clothes
         setMaterialColor(bodyData, 7);
         setMaterialColor(headData, 0);
+        color = lowerColor;
         setMaterialColor(bodyData, 5);
         break;
     case 2: // Zora Armor
@@ -7168,6 +7199,7 @@ void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
         setMaterialColor(bodyData, 1);
         setMaterialColor(bodyData, 2);
         setMaterialColor(headData, 0);
+        color = lowerColor;
         setMaterialColor(bodyData, 16);
         setMaterialColor(bodyData, 15);
         setMaterialColor(bodyData, 14);

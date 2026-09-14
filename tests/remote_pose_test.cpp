@@ -1,3 +1,4 @@
+#include "dusklight_online/game/wet_state.hpp"
 #include "dusklight_online/game/remote_pose.hpp"
 #include "dusklight_online/game/remote_visibility.hpp"
 
@@ -97,6 +98,38 @@ bool decode_and_enforce(const json& message, const PeerPoseSnapshot* previous,
 int main() {
     std::string error;
     PeerPoseSnapshot pose;
+
+    using dusklight_online::game::advance_wet_state;
+    static_assert(advance_wet_state({-1, 0}, 10).fade == -20);
+    static_assert(advance_wet_state({150, -20}, 149).timer == 1);
+    static_assert(advance_wet_state({150, -20}, 149).fade == -20);
+    static_assert(advance_wet_state({150, -20}, 150).fade == -19);
+    static_assert(advance_wet_state({150, -20}, 169).fade == 0);
+    static_assert(advance_wet_state({-1, -20}, 1000).timer == -1);
+    auto wetMessage = pose_message(10, "semantic_gameplay");
+    wetMessage["state"]["water_drop_state"] = {1, 150, -20, 10, -1, -10};
+    PeerPoseSnapshot wetPose;
+    if (!decode_and_enforce(wetMessage, nullptr, wetPose, error) ||
+        wetPose.waterDropState != std::array<int64_t, 6>{1, 150, -20, 10, -1, -10}) {
+        std::cerr << "wet timer anchors failed to decode\n";
+        return 1;
+    }
+    wetMessage["sequence"] = 11;
+    wetMessage["state"].erase("water_drop_state");
+    if (!decode_and_enforce(wetMessage, &wetPose, pose, error) ||
+        pose.waterDropState != std::array<int64_t, 6>{}) {
+        std::cerr << "missing wet timer state did not reset\n";
+        return 1;
+    }
+    for (const auto& bad : {json::array({1, 150}), json::array({12, 150, -20, 0, 0, 0}),
+                            json::array({1, 151, -20, 0, 0, 0}), json::array({1, 150, -21, 0, 0, 0}),
+                            json::array({1, 150, 0.5, 0, 0, 0})}) {
+        wetMessage["state"]["water_drop_state"] = bad;
+        if (decode_and_enforce(wetMessage, nullptr, pose, error)) {
+            std::cerr << "invalid wet timer state was accepted\n";
+            return 1;
+        }
+    }
 
     auto audioMessage = pose_message(1, "semantic_gameplay");
     audioMessage["state"]["active_audio_events"] = json::array({

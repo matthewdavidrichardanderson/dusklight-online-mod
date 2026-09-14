@@ -1327,6 +1327,7 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         }
         actor->setRemoteTransformBridgeState(false, pose.isWolf, actorPos, 0,
                                              static_cast<s16>(pose.angleY), 0, 0);
+        actor->setRemoteWaterDropState(pose.waterDropState, pose.sequence, pose.waterDropStrong);
         actor->setRemotePresentationVisible(true);
         const bool matricesRequired =
             presentationMode == ReceiverPresentationMode::FullMatrices;
