@@ -15,6 +15,7 @@
 
 #include "d/actor/d_a_remote_link.h"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
+#include "dusklight_online/game/local_event_visibility.hpp"
 
 #include "JSystem/J3DGraphAnimator/J3DAnimation.h"
 #include "JSystem/J3DGraphAnimator/J3DJoint.h"
@@ -232,6 +233,10 @@ static bool isRemoteDeadProc(int i_procId) {
 }
 
 static bool isRemoteLinkSceneUnsafe() {
+    return dusklight_online::game::local_scene_hides_remote_link();
+}
+
+static bool isRemoteLinkInteractionUnsafe() {
     return dComIfGp_isEnableNextStage() || fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq() ||
            dComIfGp_event_runCheck();
 }
@@ -3548,7 +3553,7 @@ void daRemoteLink_c::updatePvpTargetCollision() {
     }
 
     if (!mRemotePresentationVisible || !dusk::multiplayer::pvp_enabled() ||
-        isRemoteLinkSceneUnsafe() ||
+        isRemoteLinkInteractionUnsafe() ||
         isRemotePvpKnockdownProc(mRemoteProcId) || isRemoteDeadProc(mRemoteProcId))
     {
         mPvpTargetCyl.OffTgSetBit();
@@ -3617,7 +3622,7 @@ void daRemoteLink_c::updatePvpAttentionTarget() {
     attention_info.distances[fopAc_attn_BATTLE_e] = 3;
 
     if (mRemotePresentationVisible && mHasRemotePose && dusk::multiplayer::pvp_enabled() &&
-        !isRemoteLinkSceneUnsafe() && !isRemoteDeadProc(mRemoteProcId))
+        !isRemoteLinkInteractionUnsafe() && !isRemoteDeadProc(mRemoteProcId))
     {
         attention_info.flags = fopAc_AttnFlag_BATTLE_e;
     } else {
@@ -3630,7 +3635,7 @@ void daRemoteLink_c::updatePvpMidnaBindEffect() {
     daMidna_c* midna = player != NULL ? player->getMidnaActor() : NULL;
     const bool isLocked = mRemotePresentationVisible && mHasRemotePose &&
                           dusk::multiplayer::pvp_enabled() &&
-                          !isRemoteLinkSceneUnsafe() && midna != NULL &&
+                          !isRemoteLinkInteractionUnsafe() && midna != NULL &&
                           player->checkWolfLock(this);
     if (!isLocked) {
         if (mPvpMidnaBindActive) {
@@ -4146,7 +4151,11 @@ int daRemoteLink_c::Execute() {
     updatePvpAttentionTarget();
     updatePvpTargetCollision();
     updatePvpMidnaBindEffect();
-    updateRemoteBombActor();
+    if (isRemoteLinkInteractionUnsafe()) {
+        stopRemoteBombActor(false);
+    } else {
+        updateRemoteBombActor();
+    }
     mActiveSoundObj.framework(0, dComIfGp_getReverb(fopAcM_GetRoomNo(this)));
     for (ActiveRemoteSound& sound : mActiveSounds) {
         if (!sound.active) {
@@ -7930,7 +7939,9 @@ DUSK_PROFILE actor_process_profile_definition DUSK_CONST g_profile_REMOTE_LINK =
     /* Leaf SubMtd  */ &g_fopAc_Method.base,
     /* Draw Prio    */ fpcDwPi_ALINK_e,
     /* Actor SubMtd */ &l_daRemoteLink_Method,
-    /* Status       */ fopAcStts_CULL_e | fopAcStts_UNK_0x40000_e,
+    // Continue pose/animation updates during the two allowed event types.
+    // Execute and Draw still apply the event visibility gate every frame.
+    /* Status       */ fopAcStts_CULL_e | fopAcStts_UNK_0x40000_e | fopAcStts_NOPAUSE_e,
     /* Group        */ fopAc_ACTOR_e,
     /* Cull Type    */ fopAc_CULLBOX_CUSTOM_e,
 };

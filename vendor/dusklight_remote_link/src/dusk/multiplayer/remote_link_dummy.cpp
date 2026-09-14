@@ -15,6 +15,8 @@
 #include "d/d_com_inf_game.h"
 #include "dusk/logging.h"
 #include "dusklight_online/logging.hpp"
+#include "dusklight_online/game/remote_visibility.hpp"
+#include "dusklight_online/game/local_event_visibility.hpp"
 #include "f_op/f_op_overlap_mng.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_layer.h"
@@ -219,6 +221,10 @@ bool phase3_semantic_pose_supported(const PeerPoseSnapshot& pose) {
 }
 
 ReceiverPresentationMode choose_presentation_mode(const PeerPoseSnapshot& pose) {
+    if (pose.visualUnsupportedReasons &
+        dusklight_online::game::kUnsupportedEventPresentation) {
+        return ReceiverPresentationMode::HiddenUnsupported;
+    }
     if (!semantic_rendering_enabled()) {
         return ReceiverPresentationMode::FullMatrices;
     }
@@ -874,7 +880,11 @@ void update_actor_dummy_collision(const std::string& peerId, const PeerPoseSnaps
 }
 
 bool remote_link_actor_pose_supported(const PeerPoseSnapshot& pose) {
-    return pose.valid && pose.ageTicks <= 30;
+    // Destroy the presentation during an authored event, including any
+    // transformation bridge that normally survives a model handoff.
+    return pose.valid && pose.ageTicks <= 30 &&
+           !(pose.visualUnsupportedReasons &
+             dusklight_online::game::kUnsupportedEventPresentation);
 }
 
 daRemoteLink_c* find_remote_link_actor_by_id(fpc_ProcID& actorId) {
@@ -951,8 +961,7 @@ fpc_ProcID create_remote_link_actor(u32 actorParams, cXyz* pos, s8 room, csXyz* 
 
 void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot>& poses) {
     const char* localStage = dComIfGp_getStartStageName();
-    if (localStage == nullptr || dComIfGp_isEnableNextStage() || fopOvlpM_IsPeek() ||
-        fopOvlpM_IsDoingReq())
+    if (localStage == nullptr || dusklight_online::game::local_transition_hides_remote_link())
     {
         destroy_all_remote_link_dummies();
         return;

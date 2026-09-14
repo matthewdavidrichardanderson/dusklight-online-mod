@@ -1,4 +1,5 @@
 #include "dusklight_online/game/remote_pose.hpp"
+#include "dusklight_online/game/remote_visibility.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -10,6 +11,51 @@
 #include <vector>
 
 namespace {
+
+using dusklight_online::game::remote_link_scene_hidden;
+static_assert(!remote_link_scene_hidden(false, false, false, false, false));
+static_assert(remote_link_scene_hidden(false, true, false, false, false));
+static_assert(!remote_link_scene_hidden(false, true, true, false, false));
+static_assert(!remote_link_scene_hidden(false, true, false, true, false));
+static_assert(!remote_link_scene_hidden(false, true, false, false, true));
+// A cinematic on either side overrides the other player's allowed event.
+static_assert(remote_link_scene_hidden(false, true, false, false, false) ||
+              remote_link_scene_hidden(false, true, true, false, false));
+static_assert(remote_link_scene_hidden(false, true, false, true, false) ||
+              remote_link_scene_hidden(false, true, false, false, false));
+static_assert(remote_link_scene_hidden(true, true, true, true, true));
+
+// TALK/START -> event status 2 (WAIT mode, Link already in gameplay) -> idle.
+// The middle frame must not destroy the actor and trigger spawn warmup.
+static_assert(!remote_link_scene_hidden(false, true, false, false, false, true));
+// A new authored event takes control immediately; there is no grace timer.
+static_assert(remote_link_scene_hidden(false, true, false, false, false, false));
+using dusklight_online::game::remote_link_transition_hidden;
+static_assert(!remote_link_transition_hidden(true, false, true)); // exit fade
+static_assert(remote_link_transition_hidden(true, true, true)); // scene swap
+static_assert(!remote_link_transition_hidden(false, false, false)); // arrival/cleanup
+static_assert(remote_link_transition_hidden(true, false, false)); // cinematic/warp
+
+constexpr bool check_event_visibility_lifecycle() {
+    dusklight_online::game::RemoteLinkEventVisibility visibility;
+    // Dialogue, its one-frame cleanup, then gameplay stay continuously visible.
+    if (visibility.hidden(false, true, false, true, false, false)) return false;
+    if (visibility.hidden(false, true, true, false, false, false)) return false;
+    if (visibility.hidden(false, false, true, false, false, false)) return false;
+    // Authored cinematics and THEIR cleanup remain hidden.
+    if (!visibility.hidden(false, true, false, false, false, false)) return false;
+    if (!visibility.hidden(false, true, true, false, false, false)) return false;
+    // A cinematic chained directly after a permitted arrival cancels it.
+    if (visibility.hidden(false, true, false, false, true, false)) return false;
+    if (!visibility.hidden(false, true, false, false, false, false)) return false;
+    if (!visibility.hidden(false, true, true, false, false, false)) return false;
+    // Exits cannot carry their exception across teardown or a missing player.
+    if (visibility.hidden(false, true, false, false, false, true)) return false;
+    if (!visibility.hidden(true, true, true, false, false, true)) return false;
+    if (!visibility.hidden(false, true, true, false, false, false)) return false;
+    return true;
+}
+static_assert(check_event_visibility_lifecycle());
 
 using dusk::multiplayer::PeerPoseSnapshot;
 using nlohmann::json;
@@ -508,7 +554,7 @@ int main() {
     // Hidden means no presentation payload at all, including cached matrices
     // hydrated from an earlier pose.
     json hidden = pose_message(8, "hidden_unsupported");
-    hidden["state"]["visual_unsupported_reasons"] = 1;
+    hidden["state"]["visual_unsupported_reasons"] = 1u << 3;
     PeerPoseSnapshot hiddenPose;
     if (!decode_and_enforce(hidden, &injectedPose, hiddenPose, error) ||
         hiddenPose.linkMatrices.valid || hiddenPose.linkMatricesFresh) {

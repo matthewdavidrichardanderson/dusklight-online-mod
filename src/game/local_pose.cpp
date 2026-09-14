@@ -1,5 +1,6 @@
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
+#include "dusklight_online/game/local_event_visibility.hpp"
 
 #include "d/dolzel.h"
 
@@ -312,11 +313,15 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
         kUnsupportedAnimationArchive = 1u << 2,
     };
     uint32_t visualUnsupportedReasons = 0;
-    if (dComIfGp_isEnableNextStage() || fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq()) {
+    if (local_transition_hides_remote_link()) {
         visualUnsupportedReasons |= kUnsupportedStageTransition;
     }
     if (link->mClothesChangeWaitTimer != 0) {
         visualUnsupportedReasons |= kUnsupportedModelRecreation;
+    }
+    const bool sceneHidesRemoteLink = local_scene_hides_remote_link();
+    if (dComIfGp_event_runCheck() && sceneHidesRemoteLink) {
+        visualUnsupportedReasons |= kUnsupportedEventPresentation;
     }
     const auto slotNeedsArchiveFallback = [](const PoseAnimSlot& slot) {
         return slot.ratio > 0.001f && slot.bck > 0 && slot.bck != 0xFFFF &&
