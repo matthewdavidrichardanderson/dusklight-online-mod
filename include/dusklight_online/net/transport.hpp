@@ -125,6 +125,7 @@ struct Status {
     Mode mode = Mode::Disabled;
     State state = State::Disconnected;
     bool enabled = false;
+    bool reconnecting = false;
     bool welcomed = false;
     bool udpReady = false;
     bool isOwner = false;

@@ -93,6 +93,17 @@ int main(int argc, char** argv) {
     RelayConfig joinConfig = ownerConfig;
     joinConfig.name = "Joiner";
     joinConfig.createRoom = false;
+    auto rejectedConfig = joinConfig;
+    rejectedConfig.password = "incorrect-password";
+    if (!joiner.start_relay(rejectedConfig, &error) ||
+        !wait_until(owner, joiner, [&] { return !joiner.status().enabled; })) {
+        fail("rejected lobby join remained enabled");
+    }
+    if (joiner.status().reconnecting || joiner.status().error.empty()) {
+        fail("rejected lobby join did not preserve a terminal failure");
+    }
+    for (int i = 0; i < 90; ++i) joiner.tick();
+    if (joiner.status().enabled) fail("rejected lobby join retried silently");
     if (!joiner.start_relay(joinConfig, &error)) {
         fail("joiner start: " + error);
     }

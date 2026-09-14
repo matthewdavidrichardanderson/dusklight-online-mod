@@ -656,10 +656,14 @@ void OnlineApp::update() {
         case net::EventKind::RouteChanged:
             log_info("MP_PEER_ROUTE peer=" + event.peerId + " realtime=" + event.detail + " reliable=" + event.detail);
             break;
-        case net::EventKind::Connected:
+        case net::EventKind::Connected: {
+            const bool reconnected = !connectedLobbyName_.empty();
             connectedLobbyName_ = transport_.status().room;
             statusMessage_ = "Connected to " + connectedLobbyName_;
-            game::push_online_notification("Joined lobby " + connectedLobbyName_ + ".");
+            game::push_online_notification(
+                std::string(reconnected ? "Reconnected to lobby " :
+                            relayHostIntent_ ? "Hosting lobby " : "Joined lobby ") +
+                connectedLobbyName_ + ".");
             pendingLobbyFailurePrefix_.clear();
             pendingLobbyFailureNotified_ = false;
             relayOwnerStateKnown_ = event.ingress.mode == net::Mode::Relay;
@@ -668,8 +672,12 @@ void OnlineApp::update() {
                     event.message.value("client_id", event.ingress.clientId);
             livePublishInitialized_ = false;
             break;
+        }
         case net::EventKind::Disconnected:
-            if (!connectedLobbyName_.empty()) {
+            if (transport_.status().reconnecting) {
+                statusMessage_ = "Connection lost — reconnecting to lobby " + connectedLobbyName_;
+                game::push_online_notification(statusMessage_ + ".", 5.0f, true);
+            } else if (!connectedLobbyName_.empty()) {
                 if (event.detail == "user requested") {
                     game::push_online_notification("Left lobby " + connectedLobbyName_ + ".");
                 } else {
@@ -679,19 +687,22 @@ void OnlineApp::update() {
                         5.0f, true);
                 }
                 connectedLobbyName_.clear();
-            } else if (!pendingLobbyFailurePrefix_.empty()) {
+            } else if (event.detail != "user requested" && !pendingLobbyFailurePrefix_.empty()) {
                 notify_lobby_attempt_failure(event.detail);
             }
             if (event.detail == "user requested" && !requestedDisconnectStatus_.empty()) {
                 statusMessage_ = requestedDisconnectStatus_;
-            } else {
+            } else if (!transport_.status().reconnecting) {
                 statusMessage_ = event.detail.empty() ? "Disconnected" :
                     "Disconnected: " + event.detail;
             }
             requestedDisconnectStatus_.clear();
             pendingLobbyFailurePrefix_.clear();
             pendingLobbyFailureNotified_ = false;
-            relayHostIntent_ = false;
+            if (!transport_.status().reconnecting) {
+                relayHostIntent_ = false;
+                activeCode_.clear();
+            }
             relayOwnerStateKnown_ = false;
             wasRelayOwner_ = false;
             manualSyncCooldownTicks_ = 0;
@@ -707,6 +718,9 @@ void OnlineApp::update() {
             if (!pendingLobbyFailurePrefix_.empty()) {
                 statusMessage_ = "Online error: " + event.detail;
                 notify_lobby_attempt_failure(event.detail);
+                // A failed attempt is terminal, including malformed handshake replies.
+                requestedDisconnectStatus_ = statusMessage_;
+                disconnect();
             } else if (!event.detail.empty()) {
                 statusMessage_ = "Online error: " + event.detail;
                 game::push_online_notification(
@@ -976,11 +990,16 @@ std::string OnlineApp::status_text() const {
         const size_t playerCount = transport_.peers().size() + 1u;
         session = (status.room.empty() ? std::string("Unnamed lobby") : status.room) +
             " — " + std::to_string(playerCount) + (playerCount == 1 ? " player" : " players");
-        if (!status.error.empty()) {
+        if (status.reconnecting) {
+            health = "Reconnecting";
+        } else if (!status.error.empty()) {
             health = "Error — " + friendly_status_text(status.error);
         } else {
             switch (status.state) {
-            case net::State::Connected: health = "Connected"; break;
+            case net::State::Connected:
+                health = status.mode == net::Mode::DirectHost || status.welcomed ?
+                    "Connected" : "Joining lobby";
+                break;
             case net::State::Connecting: health = "Connecting"; break;
             case net::State::Listening: health = "Ready — waiting for players"; break;
             default: health = "Disconnected"; break;
@@ -1026,11 +1045,16 @@ std::string OnlineApp::dashboard_rml() const {
         const size_t playerCount = transport_.peers().size() + 1u;
         session = (status.room.empty() ? std::string("Unnamed lobby") : status.room) +
             " — " + std::to_string(playerCount) + (playerCount == 1 ? " player" : " players");
-        if (!status.error.empty()) {
+        if (status.reconnecting) {
+            health = "Reconnecting";
+        } else if (!status.error.empty()) {
             health = "Error — " + friendly_status_text(status.error);
         } else {
             switch (status.state) {
-            case net::State::Connected: health = "Connected"; break;
+            case net::State::Connected:
+                health = status.mode == net::Mode::DirectHost || status.welcomed ?
+                    "Connected" : "Joining lobby";
+                break;
             case net::State::Connecting: health = "Connecting"; break;
             case net::State::Listening: health = "Ready — waiting for players"; break;
             default: health = "Disconnected"; break;
@@ -1163,6 +1187,8 @@ void OnlineApp::set_manual_sync_pending_visual(bool pending) {
 }
 
 void OnlineApp::begin_lobby_attempt(std::string failurePrefix) {
+    connectedLobbyName_.clear();
+    requestedDisconnectStatus_.clear();
     pendingLobbyFailurePrefix_ = std::move(failurePrefix);
     pendingLobbyFailureNotified_ = false;
 }
@@ -1239,6 +1265,9 @@ void OnlineApp::host_direct() {
     } else {
         svc_config->set_string(mod_ctx, config_.directInvite, activeCode_.c_str());
         statusMessage_ = "Hosting direct lobby";
+        begin_lobby_attempt({});
+        connectedLobbyName_ = transport_.status().room;
+        game::push_online_notification("Hosting lobby " + connectedLobbyName_ + ".");
     }
 }
 

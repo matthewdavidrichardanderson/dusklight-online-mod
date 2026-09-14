@@ -138,6 +138,48 @@ int main() {
     hostConfig.settings.pvp = true;
 
     std::string error;
+    {
+        Transport failedHost;
+        auto invalidHost = hostConfig;
+        invalidHost.bindHost = "256.0.0.1";
+        if (failedHost.start_direct_host(invalidHost, &error) || failedHost.status().enabled) {
+            fail("failed direct host remained enabled");
+        }
+        Transport failedJoin;
+        DirectJoinConfig unavailable;
+        unavailable.host = "256.0.0.1";
+        unavailable.port = port;
+        if (failedJoin.start_direct_join(unavailable, &error) || failedJoin.status().enabled) {
+            fail("synchronous join failure remained enabled");
+        }
+        unavailable.host = "127.0.0.1";
+        if (!failedJoin.start_direct_join(unavailable, &error)) {
+            fail("unavailable join did not start asynchronously");
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(18);
+        while (failedJoin.status().enabled && std::chrono::steady_clock::now() < deadline) {
+            failedJoin.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (failedJoin.status().enabled || failedJoin.status().reconnecting ||
+            failedJoin.status().error.empty()) {
+            fail("initial connection failure did not terminate the attempt");
+        }
+        bool disconnected = false;
+        while (failedJoin.has_events()) {
+            disconnected |= failedJoin.pop_event().kind == EventKind::Disconnected;
+        }
+        for (int i = 0; i < 90; ++i) failedJoin.tick();
+        if (!disconnected || failedJoin.status().enabled || failedJoin.has_events()) {
+            fail("failed join retried silently or omitted its disconnect event");
+        }
+        if (!failedJoin.start_direct_join(unavailable, &error)) fail("retry start failed");
+        failedJoin.disconnect();
+        for (int i = 0; i < 90; ++i) failedJoin.tick();
+        if (failedJoin.status().enabled || failedJoin.status().reconnecting) {
+            fail("cancelled attempt resumed");
+        }
+    }
     if (!host.start_direct_host(hostConfig, &error)) {
         fail("host start: " + error);
     }
@@ -362,6 +404,25 @@ int main() {
         fail("snapshot delta negotiation did not recover after unsupported peer left");
     }
 
+    host.disconnect();
+    const auto recoveryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(18);
+    while (!alice.status().reconnecting && std::chrono::steady_clock::now() < recoveryDeadline) {
+        alice.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!alice.status().enabled || !alice.status().reconnecting || alice.status().welcomed) {
+        fail("established connection loss did not expose reconnecting state");
+    }
+    if (!host.start_direct_host(hostConfig, &error)) fail("host restart failed");
+    const auto welcomeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(18);
+    while (!alice.status().welcomed && std::chrono::steady_clock::now() < welcomeDeadline) {
+        host.tick();
+        alice.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!alice.status().welcomed || alice.status().reconnecting) {
+        fail("established session did not recover and clear reconnecting state");
+    }
     alice.disconnect();
     host.disconnect();
     std::cout << "transport test passed\n";

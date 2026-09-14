@@ -245,6 +245,7 @@ struct Transport::Impl {
     uint32_t reconnectTicks = 0;
     uint32_t relayUdpRegisterTicks = 0;
     bool automaticReconnect = true;
+    bool sessionEstablished = false;
     bool helloSent = false;
     bool relayCreateRoom = false;
     bool relayMayRecreateRoom = false;
@@ -582,6 +583,7 @@ struct Transport::Impl {
         if (!keepConfiguration) {
             status = {};
             automaticReconnect = true;
+            sessionEstablished = false;
             relayCreateRoom = false;
             relayMayRecreateRoom = false;
             wantPuppet = true;
@@ -595,8 +597,8 @@ struct Transport::Impl {
 
     void fail(const std::string& reason, bool allowReconnect = true,
               bool preserveAcceptedEvents = true) {
-        const bool wasActive = status.state != State::Disconnected;
-        const bool reconnect = automaticReconnect && allowReconnect;
+        const bool wasActive = status.state != State::Disconnected || status.reconnecting;
+        const bool reconnect = sessionEstablished && automaticReconnect && allowReconnect;
         // A reconnect is a new transport epoch. Retaining UDP decoder
         // sequences, ACK baselines, peer identity or the old UDP endpoint can
         // make valid packets in the next connection look stale or route them
@@ -604,6 +606,8 @@ struct Transport::Impl {
         reset_runtime(true, preserveAcceptedEvents);
         status.error = reason;
         automaticReconnect = reconnect;
+        status.enabled = reconnect;
+        status.reconnecting = reconnect;
         if (wasActive) {
             emit(EventKind::Disconnected, {}, reason);
         }
@@ -820,6 +824,8 @@ struct Transport::Impl {
         }
         listening = true;
         status.state = State::Listening;
+        sessionEstablished = true;
+        status.reconnecting = false;
         status.error.clear();
         return open_udp(status.bindHost, status.port);
     }
@@ -1600,6 +1606,8 @@ struct Transport::Impl {
                     }
                 }
             }
+            sessionEstablished = true;
+            status.reconnecting = false;
             emit(EventKind::Connected, status.clientId, {}, message);
             emit(EventKind::Message, status.clientId, {}, message);
             return;
