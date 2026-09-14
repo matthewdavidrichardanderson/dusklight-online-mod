@@ -750,6 +750,9 @@ private:
     std::array<int64_t, 6> mRemoteWaterDropAnchors{};
     std::array<dusklight_online::game::WetState, 2> mRemoteWetState{};
     bool mRemoteWaterDropStrong = false;
+    std::array<u32, 2> mRemoteWaterDropEmitters{};
+    void updateRemoteWaterDrops();
+    void stopRemoteWaterDrops();
 
     int mRemoteTransformEffectProcVar5;
     f32 mRemoteTransformEffectFrame;

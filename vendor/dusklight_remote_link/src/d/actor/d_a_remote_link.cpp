@@ -4083,6 +4083,7 @@ void daRemoteLink_c::calcModels() {
 
 int daRemoteLink_c::Execute() {
     if (isRemoteLinkSceneUnsafe()) {
+        stopRemoteWaterDrops();
         stopRemoteLanternFlame(false);
         updatePvpAttentionTarget();
         mPvpMidnaBindActive = false;
@@ -4114,6 +4115,7 @@ int daRemoteLink_c::Execute() {
     }
 
     if (!mRemotePresentationVisible) {
+        stopRemoteWaterDrops();
         stopRemoteLanternFlame(false);
         if (mRemoteTransformBridgeVisible) {
             updateRemoteTransformParticles();
@@ -4150,6 +4152,7 @@ int daRemoteLink_c::Execute() {
         updateRemoteTransformEffectModel(false);
     }
     updateRemoteTransformParticles();
+    updateRemoteWaterDrops();
     // Model calc produces this simulation tick's neck matrix. Updating before
     // calc leaves the target marker one complete tick behind the rendered body.
     updatePvpAttentionTarget();
@@ -7101,6 +7104,41 @@ void daRemoteLink_c::drawModel(J3DModel* i_model) {
     mDoExt_modelEntryDL(i_model);
 }
 
+void daRemoteLink_c::stopRemoteWaterDrops() {
+    for (u32& id : mRemoteWaterDropEmitters) {
+        if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(id)) {
+            emitter->stopDrawParticle();
+            emitter->stopCreateParticle();
+            emitter->becomeInvalidEmitter();
+            emitter->quitImmortalEmitter();
+        }
+        id = 0;
+    }
+}
+
+void daRemoteLink_c::updateRemoteWaterDrops() {
+    if (mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) return;
+    const bool wolf = mVisualState.form == FORM_WOLF;
+    const u16 effects[2] = {
+        wolf ? ID_ZI_J_WL_NUREPOTA_BACKBONE1 : ID_ZI_J_LK_NUREPOTA_BACKBONE2,
+        wolf ? ID_ZI_J_WL_NUREPOTA_BACKBONE2 : ID_ZI_J_LK_NUREPOTA_WAIST};
+    const u16 joints[2] = {static_cast<u16>(wolf ? 1 : 2), static_cast<u16>(wolf ? 2 : 16)};
+    for (size_t part = 0; part < 2; ++part) {
+        // Native particles drip only during the positive countdown, not while
+        // submerged (-1), and stop emitting before the final colour fade.
+        if (mRemoteWetState[part].timer <= 0 ||
+            joints[part] >= mpBodyModel->getModelData()->getJointNum()) continue;
+        u32& id = mRemoteWaterDropEmitters[part];
+        id = dComIfGp_particle_setColor(id, effects[part], &current.pos, &tevStr,
+            NULL, NULL, 0.0f, -1, NULL, NULL, NULL, -1, NULL);
+        dComIfGp_particle_levelEmitterOnEventMove(id);
+        if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(id)) {
+            emitter->setGlobalRTMatrix(mpBodyModel->getAnmMtx(joints[part]));
+            emitter->playDrawParticle();
+        }
+    }
+}
+
 void daRemoteLink_c::setRemoteWaterDropState(const std::array<int64_t, 6>& state,
                                              uint32_t sequence, bool strong) {
     mRemoteWaterDropStrong = strong;
@@ -7969,6 +8007,7 @@ int daRemoteLink_c::Delete() {
         mpHeldItemModel != NULL ? (void*)mpHeldItemModel->getModelData() : NULL,
         mpItemActorModel != NULL ? (void*)mpItemActorModel->getModelData() : NULL,
         (void*)mpArcHeap);
+    stopRemoteWaterDrops();
     stopRemoteLanternFlame(true);
     stopRemoteBombActor(false);
     stopRemoteActiveSounds();

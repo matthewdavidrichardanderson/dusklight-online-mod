@@ -523,13 +523,9 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     };
     J3DAnmTransform* faceBck = link->mFaceBck.getBckAnm();
     const int clothesVariant = clothes_variant();
-    const bool waterDropEnabled = !wolf &&
-        !link->checkNoResetFlg2(daPy_py_c::FLG2_UNK_80000) &&
-        !link->checkZoraWearAbility() && !link->checkMagicArmorWearAbility();
     for (size_t part = 0; part < 2; ++part) {
         const size_t i = part * 3;
-        const WetState actual = waterDropEnabled
-            ? WetState{link->field_0x32c0[part], link->field_0x32a0[part].a} : WetState{};
+        const WetState actual{link->field_0x32c0[part], link->field_0x32a0[part].a};
         const auto tick = static_cast<uint32_t>(sWaterDropState[i]);
         const WetState expected = advance_wet_state(
             {static_cast<int>(sWaterDropState[i + 1]), static_cast<int>(sWaterDropState[i + 2])},
