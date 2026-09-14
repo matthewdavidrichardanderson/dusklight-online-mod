@@ -55,9 +55,17 @@ DEFINE_HOOK_SYMBOL("dusk::interp::get_interpolation_step",
                    float(), EngineInterpStepSymbol);
 DEFINE_HOOK_SYMBOL("dusk::interp::presentation_sync_active",
                    bool(), EngineInterpPresentationSyncSymbol);
-DEFINE_HOOK_SYMBOL("dusk::interp::add_interpolation_callback",
+// Upstream also provides an overload with shared ownership. The unqualified
+// manifest name is ambiguous; select the existing two-argument entry point.
+#if defined(_MSC_VER)
+#define ONLINE_INTERP_CALLBACK_SYMBOL "?add_interpolation_callback@interp@dusk@@YAXP6AXPEAX@Z0@Z"
+#else
+#define ONLINE_INTERP_CALLBACK_SYMBOL "_ZN4dusk6interp26add_interpolation_callbackEPFvPvES1_"
+#endif
+DEFINE_HOOK_SYMBOL(ONLINE_INTERP_CALLBACK_SYMBOL,
                    void(void (*)(void*), void*),
                    EngineInterpAddCallbackSymbol);
+#undef ONLINE_INTERP_CALLBACK_SYMBOL
 
 namespace {
 
