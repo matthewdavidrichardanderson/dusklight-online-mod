@@ -673,7 +673,8 @@ std::vector<RemoteAudioEvent> parse_audio(const json& state, const char* key, bo
         event.mapInfo = entry.value("mapinfo", 0U);
         event.reverb = int8_t(std::clamp(entry.value("reverb", -1), -1, 127));
         event.sourceKind = uint8_t(std::clamp(entry.value("source", 0), 0, 255));
-        event.level = active || entry.value("level", false);
+        event.tracked = active && entry.value("tracked", false) && event.sequence != 0;
+        event.level = !event.tracked && (active || entry.value("level", false));
         if (event.soundId != 0 && (active || event.sequence != 0)) out.push_back(event);
     }
     return out;

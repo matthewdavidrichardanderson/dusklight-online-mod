@@ -6,6 +6,7 @@
 #include "d/d_cc_d.h"
 #include "d/d_kankyo.h"
 #include "dusk/multiplayer/multiplayer.hpp"
+#include "dusklight_online/game/audio_lifetime.hpp"
 #include "f_op/f_op_actor_mng.h"
 #include "m_Do/m_Do_ext.h"
 #include "Z2AudioLib/Z2SoundObject.h"
@@ -754,6 +755,8 @@ private:
     bool mPvpMidnaBindActive;
     Z2SoundObjSimple mActiveSoundObj;
     std::array<ActiveRemoteSound, 8> mActiveSounds;
+    dusklight_online::game::AudioLifetimeTracker mTrackedAudio;
+    std::array<JAISoundHandle, 8> mTrackedSoundHandles;
     /* 0xC24 */ int mMidnaHairShape;
     /* 0xC28 */ bool mSlotReserved;
 };

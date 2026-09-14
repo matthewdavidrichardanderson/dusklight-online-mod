@@ -98,6 +98,22 @@ int main() {
     std::string error;
     PeerPoseSnapshot pose;
 
+    auto audioMessage = pose_message(1, "semantic_gameplay");
+    audioMessage["state"]["active_audio_events"] = json::array({
+        {{"seq", 10}, {"sound_id", 0x10000}, {"tracked", true}},
+        {{"seq", 11}, {"sound_id", 0x20025}, {"tracked", true}},
+        {{"sound_id", 0x20001}, {"level", true}}
+    });
+    PeerPoseSnapshot audioPose;
+    if (!decode_and_enforce(audioMessage, nullptr, audioPose, error) ||
+        audioPose.activeAudioEvents.size() != 3 ||
+        !audioPose.activeAudioEvents[0].tracked || audioPose.activeAudioEvents[0].level ||
+        !audioPose.activeAudioEvents[1].tracked || audioPose.activeAudioEvents[1].level ||
+        audioPose.activeAudioEvents[2].tracked || !audioPose.activeAudioEvents[2].level) {
+        std::cerr << "tracked one-shot/level audio decoding failed: " << error << '\n';
+        return 1;
+    }
+
     // Semantic rendering rejects even an explicitly empty matrix container: the
     // representation itself is matrix-free, not merely all-absent by habit.
     json empty = pose_message(1, "semantic_gameplay");

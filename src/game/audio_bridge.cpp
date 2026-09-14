@@ -48,6 +48,12 @@ int sLevelDepth = 0;
 int sLinkStarterDepth = 0;
 std::vector<RemoteAudioEvent> sPending;
 std::vector<RemoteAudioEvent> sActive;
+struct NativeSoundInstance {
+    JAISoundHandle* handle;
+    JAISound* sound;
+    RemoteAudioEvent event;
+};
+std::vector<NativeSoundInstance> sTracked;
 bool sRandomizerAudioFilter = false;
 
 uint8_t classify(JAISoundID soundId) {
@@ -108,13 +114,34 @@ void base_starter_sound_post(ModContext*, void* args, void* retval, void*) {
         return;
     }
     const JAISoundID sound = mods::arg<JAISoundID>(args, 1);
+    const uint32_t mapInfo = mods::arg<uint32_t>(args, 4);
+    const float fxMix = mods::arg<float>(args, 5);
+    const auto source = classify(sound);
+    if (source == dusk::multiplayer::REMOTE_AUDIO_SOURCE_LINK_VOICE ||
+        sound == Z2SE_SWORD_POWER_COME || sound == Z2SE_WOLF_POWER_COME) {
+        auto* handle = mods::arg<JAISoundHandle*>(args, 2);
+        if (handle == nullptr || !*handle) return;
+        // A successful native start gives this handle a new playback instance,
+        // even when the same sound ID or pool slot is reused.
+        std::erase_if(sTracked, [handle](const NativeSoundInstance& instance) {
+            return instance.handle == handle;
+        });
+        if (sTracked.size() >= 8) return;
+        RemoteAudioEvent event;
+        event.sequence = ++sAudioSequence;
+        event.soundId = static_cast<uint32_t>(sound);
+        event.mapInfo = mapInfo;
+        event.reverb = int8_t(std::clamp(int(fxMix * 127.0f), 0, 127));
+        event.sourceKind = source;
+        event.tracked = true;
+        sTracked.push_back({handle, handle->getSound(), event});
+        return; // Never also enqueue an uncontrolled one-shot copy.
+    }
     // JASGlobalInstance<T> accessors can bind to a mod-DLL-local template
     // static. Use the game's exported audio-manager pointer and tolerate the
     // short startup/teardown windows where audio is unavailable.
     Z2AudioMgr* audioMgr = Z2GetAudioMgr();
     if (audioMgr == nullptr || audioMgr->isLevelSe(sound)) return;
-    const uint32_t mapInfo = mods::arg<uint32_t>(args, 4);
-    const float fxMix = mods::arg<float>(args, 5);
     enqueue(static_cast<uint32_t>(sound), mapInfo,
             std::clamp(int(fxMix * 127.0f), 0, 127), classify(sound));
 }
@@ -193,7 +220,31 @@ std::vector<RemoteAudioEvent> drain_local_audio_events() {
 }
 
 std::vector<RemoteAudioEvent> drain_local_active_audio_events() {
-    std::vector<RemoteAudioEvent> out = std::move(sActive);
+    std::vector<RemoteAudioEvent> out;
+    auto* link = Z2GetLink();
+    std::erase_if(sTracked, [link](const NativeSoundInstance& instance) {
+        if (link == nullptr) return true;
+        // Resolve through live pools rather than dereferencing a saved handle
+        // after a scene unload. Observe stops, replacement voices and natural
+        // completion without changing the local audio engine's ownership.
+        Z2SoundHandles* pools[] = {&link->mSoundObjAnime, &link->mSoundObjSimple1,
+                                  &link->mSoundObjSimple2};
+        for (auto* pool : pools) {
+            for (int i = 0; i < pool->getNumHandles(); ++i) {
+                auto* handle = pool->getHandle(i);
+                if (handle != instance.handle) continue;
+                return !*handle || handle->getSound() != instance.sound ||
+                       (*handle)->getID() != instance.event.soundId ||
+                       (*handle)->isStopping();
+            }
+        }
+        return true;
+    });
+    for (const auto& instance : sTracked) out.push_back(instance.event);
+    for (const auto& event : sActive) {
+        if (out.size() == 8) break;
+        out.push_back(event);
+    }
     sActive.clear();
     return out;
 }
@@ -203,6 +254,7 @@ void clear_local_audio_events() {
     sLinkStarterDepth = 0;
     sPending.clear();
     sActive.clear();
+    sTracked.clear();
 }
 
 }  // namespace dusklight_online::game

@@ -248,7 +248,7 @@ json audio_json(const std::vector<dusk::multiplayer::RemoteAudioEvent>& events) 
     for (const auto& event : events) out.push_back({
         {"seq", event.sequence}, {"sound_id", event.soundId},
         {"mapinfo", event.mapInfo}, {"reverb", int(event.reverb)},
-        {"source", int(event.sourceKind)}, {"level", event.level},
+        {"source", int(event.sourceKind)}, {"level", event.level}, {"tracked", event.tracked},
     });
     return out;
 }

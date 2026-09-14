@@ -128,10 +128,10 @@ endfunction()
 
 dusklight_remote_link_require_sha256(
     "src/d/actor/d_a_remote_link.cpp"
-    "e0cbe5fc9a4fb0171916cc500454167c48f721a93fb20f1c4826d21c6945cce5")
+    "797916d3417aaefdf40baff25abd6be031f1607410027b16e1c1ecba526818f8")
 dusklight_remote_link_require_sha256(
     "include/d/actor/d_a_remote_link.h"
-    "1586BB1BA1110B05DE7B26B41B6EB78D850EB40BB0F7B4737D51B344C222ED04")
+    "78a7ed887a737cfd669b869510bea8d30edc92e9721c303373491ce138bf3615")
 dusklight_remote_link_require_sha256(
     "src/dusk/multiplayer/remote_link_dummy.cpp"
     "8df92df660bb1b07ea17567abbaa68ae479201500bc18e68da294406a24cda77")
@@ -493,6 +493,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         nlohmann_json::nlohmann_json
     )
     add_test(NAME dusklight_online_remote_pose COMMAND dusklight_online_remote_pose_test)
+
+    add_executable(dusklight_online_audio_lifetime_test tests/audio_lifetime_test.cpp)
+    target_compile_features(dusklight_online_audio_lifetime_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_audio_lifetime_test PRIVATE include)
+    add_test(NAME dusklight_online_audio_lifetime COMMAND dusklight_online_audio_lifetime_test)
 
     add_executable(dusklight_online_relay_transport_client_test
         tests/relay_transport_client_test.cpp

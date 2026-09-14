@@ -7631,8 +7631,28 @@ void daRemoteLink_c::playRemoteSound(const dusk::multiplayer::RemoteAudioEvent& 
 
 void daRemoteLink_c::syncRemoteActiveSounds(
     const std::vector<dusk::multiplayer::RemoteAudioEvent>& i_events) {
+    const auto changes = mTrackedAudio.update(i_events);
+    Z2AudioMgr* audioMgr = Z2GetAudioMgr();
+    for (size_t slot = 0; slot < mTrackedSoundHandles.size(); ++slot) {
+        auto& handle = mTrackedSoundHandles[slot];
+        if (changes.stop[slot] && handle) {
+            handle->stop(0);
+            handle.releaseSound();
+        }
+        if (changes.start[slot] < 0 || audioMgr == NULL) continue;
+        const auto& event = i_events[changes.start[slot]];
+        f32 volume, pan, dolby;
+        calcRemoteLinkAudioMix(current.pos, event, &volume, &pan, &dolby);
+        const s8 reverb = event.reverb < 0 ? 0 : event.reverb;
+        const JGeometry::TVec3<f32> soundPos(current.pos.x, current.pos.y, current.pos.z);
+        // One owned playback, never startLevelSound: a completed local sample
+        // must not restart while its last active snapshot is still arriving.
+        audioMgr->mSoundStarter.startSound(JAISoundID(event.soundId), &handle,
+            isRemoteLinkMotionAudio(event) ? NULL : &soundPos,
+            event.mapInfo, float(reverb) / 127.0f, 1.0f, volume, pan, dolby, 0);
+    }
     for (const dusk::multiplayer::RemoteAudioEvent& event : i_events) {
-        if (event.soundId == 0) {
+        if (event.soundId == 0 || event.tracked) {
             continue;
         }
 
@@ -7670,6 +7690,13 @@ void daRemoteLink_c::syncRemoteActiveSounds(
 }
 
 void daRemoteLink_c::stopRemoteActiveSounds() {
+    for (auto& handle : mTrackedSoundHandles) {
+        if (handle) {
+            handle->stop(0);
+            handle.releaseSound();
+        }
+    }
+    mTrackedAudio.clear();
     mActiveSoundObj.stopAllSounds(0);
     for (ActiveRemoteSound& sound : mActiveSounds) {
         sound.active = false;

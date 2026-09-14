@@ -58,6 +58,7 @@ struct RemoteAudioEvent {
     int8_t reverb = -1;
     uint8_t sourceKind = 0;
     bool level = false;
+    bool tracked = false; // One start per sequence; active snapshot owns its lifetime.
 };
 
 enum RemoteObjectKind : uint8_t {
