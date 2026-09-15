@@ -321,10 +321,9 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     if (link->mClothesChangeWaitTimer != 0) {
         visualUnsupportedReasons |= kUnsupportedModelRecreation;
     }
-    const bool sceneHidesRemoteLink = local_scene_hides_remote_link();
-    if (dComIfGp_event_runCheck() && sceneHidesRemoteLink) {
-        visualUnsupportedReasons |= kUnsupportedEventPresentation;
-    }
+    // Event visibility is a policy of the viewing client. Publishing the
+    // sender's local event as unsupported hides previously supported poses,
+    // including Link's compulsory death event, from every other player.
     const auto slotNeedsArchiveFallback = [](const PoseAnimSlot& slot) {
         return slot.ratio > 0.001f && slot.bck > 0 && slot.bck != 0xFFFF &&
                slot.arc != 0xFFFF;

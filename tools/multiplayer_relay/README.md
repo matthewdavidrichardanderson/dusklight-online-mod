@@ -117,6 +117,42 @@ The relay also remains a normal target of the main Online build:
 cmake --build .\build --config RelWithDebInfo --target dusklight_online_relay
 ```
 
+## Publishing relay updates
+
+This is the maintainer/agent workflow. The Dockge operator does not build the
+relay, edit server files or change Compose YAML for an ordinary relay update.
+
+1. Change `DUSKLIGHT_ONLINE_RELAY_VERSION` in `version.cmake`. Use the next
+   version, such as `0.1.1`; never move or reuse an existing release tag.
+2. Make and verify the relay/client changes together when their protocol or
+   capabilities changed. Do not launch the game as part of the release process.
+3. Commit the release changes and push the commit to `main`.
+4. Tag that exact commit with the same version prefixed by `v`, then push the
+   tag:
+
+   ```sh
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+5. Confirm the tagged **Build** workflow succeeds. It creates the GitHub
+   Release and publishes both container tags:
+
+   ```text
+   ghcr.io/matthewdavidrichardanderson/dusklight-online-relay:v0.1.1
+   ghcr.io/matthewdavidrichardanderson/dusklight-online-relay:latest
+   ```
+
+6. Tell the Dockge operator an update is ready. They press **Update** for the
+   stack, wait for the VPN and relay containers to become healthy, and copy the
+   newly printed `TP1-...` relay code. Restarting ends existing lobbies.
+
+The Dockge stack uses `:latest` with `pull_policy: always`, so routine releases
+need no operator-side YAML, `.env`, ZIP, SSH or directory changes. Send revised
+Compose instructions only when the container/VPN integration itself changes.
+The Proton WireGuard private key belongs only in the operator's Dockge `.env`;
+never request, commit, log or publish it.
+
 ## Verification
 
 The relay-only test suite checks invite codes, three-client lobby behavior,
@@ -151,5 +187,6 @@ Project code is released under the repository's CC0 license. The packaged relay
 also includes [third-party notices](THIRD_PARTY_NOTICES.md) for its MIT-licensed
 JSON and KCP dependencies.
 
-Relay 2.1.0 supports bounded lossless compression of reliable JSON. Deploy it
-with the matching Online build; 2.0.0 cannot decode the compressed lines.
+The relay supports bounded lossless compression of reliable JSON. Deploy it
+with the matching Online build; older incompatible clients cannot decode the
+compressed lines.
