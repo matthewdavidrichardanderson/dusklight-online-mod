@@ -3,7 +3,7 @@
 This document defines the contract between the game client and standalone
 relay.
 
-## Traversal extension (relay 2.5.0)
+## Traversal extension (relay 0.1.0)
 
 Coordinated client/relay deployment is required. Reliable gameplay is ordered per peer;
 settings transitions coordinate those streams explicitly. `welcome.stun_port` supplies

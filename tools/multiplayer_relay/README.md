@@ -7,7 +7,7 @@ latency-sensitive visual datagrams on the same UDP port.
 The server does not require Dusklight, the game, the mod SDK, or a game
 installation at runtime. It does not persist saves or gameplay state.
 
-Relay 2.5.0 adds libjuice signaling and recipient-specific UDP fallback, with
+Relay 0.1.0 adds libjuice signaling and recipient-specific UDP fallback, with
 STUN discovery sharing the existing UDP port.
 Update the relay and every client together. Clients must implement the settings
 transition protocol. Older UDP clients are not supported on this release, even

@@ -81,4 +81,3 @@ while :; do
     sleep "$poll_seconds" &
     wait "$!"
 done
-

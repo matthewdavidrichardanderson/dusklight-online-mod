@@ -1,9 +1,0 @@
-# Generated packages and local secrets must never be committed.
-/dist/
-/.env
-/dusklight_online_relay
-*.conf
-*.key
-*.tar
-*.tar.gz
-*.zip

@@ -142,6 +142,8 @@ jobs:
     name: Combine bundles
     needs: [build, relay]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -185,3 +187,51 @@ jobs:
         run: >-
           gh release create "$GITHUB_REF_NAME" combined/*.dusk relay/*.zip
           --verify-tag --generate-notes
+
+  relay-container:
+    name: Publish relay container
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: relay
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download Linux relay
+        uses: actions/download-artifact@v8
+        with:
+          name: relay-linux-x86_64
+          path: relay-artifact
+
+      - name: Prepare container context
+        shell: bash
+        run: |
+          mkdir -p relay-unpacked
+          unzip relay-artifact/*.zip -d relay-unpacked
+          relay_path=$(find relay-unpacked -type f -name dusklight_online_relay -print -quit)
+          test -n "$relay_path"
+          install -m 0755 "$relay_path" tools/multiplayer_relay/container/dusklight_online_relay
+
+      - name: Log in to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and publish relay image
+        shell: bash
+        run: |
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$owner/dusklight-online-relay"
+          version="${GITHUB_REF_NAME#v}"
+          docker build \
+            --build-arg "RELAY_VERSION=$version" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$version" \
+            --tag "$image:$GITHUB_REF_NAME" \
+            --tag "$image:latest" \
+            tools/multiplayer_relay/container
+          docker push "$image:$GITHUB_REF_NAME"
+          docker push "$image:latest"
