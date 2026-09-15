@@ -48,17 +48,19 @@ inline bool local_scene_hides_remote_link() {
     }
     // TALK is ordinary conversation, not dialogue embedded in a DEMO event.
     // START is the native post-load entrance; authored arrival movies use
-    // SYSTEM/TOOL instead. A door command/procedure seeds a local exception
-    // that remains tied to the current engine event through its handoff.
+    // SYSTEM/TOOL instead. Door traversal and the native item-get procedure
+    // seed a local exception tied to the current engine event through handoff.
+    // Do not whitelist a whole demo type or bypass transition/animation guards.
     const bool door = link->eventInfo.checkCommandDoor() ||
         link->mProcID == daAlink_c::PROC_DOOR_OPEN || local_link_in_load_exit(link);
+    const bool itemGet = link->mProcID == daAlink_c::PROC_GET_ITEM;
     return visibility.hidden(
         local_transition_hides_remote_link(),
         dComIfGp_event_runCheck(),
         dComIfGp_getEvent()->isOrderOK(),
         dComIfGp_event_getMode() == dEvt_mode_TALK_e,
         link->mDemo.getDemoType() == daPy_demo_c::DEMO_TYPE_START_e,
-        door,
+        door || itemGet,
         link->eventInfo.getEventId());
 }
 

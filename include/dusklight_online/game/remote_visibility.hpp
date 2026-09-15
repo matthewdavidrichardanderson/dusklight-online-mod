@@ -15,51 +15,51 @@ constexpr bool remote_link_transition_hidden(bool nextStageRequested,
 // previously observed permitted event, never just because isOrderOK is true.
 constexpr bool remote_link_scene_hidden(bool sceneChanging, bool eventRunning,
                                        bool talking, bool loadEntrance,
-                                       bool doorTraversal, bool allowedEventCleanup = false) {
+                                       bool eventPresentation, bool allowedEventCleanup = false) {
     return sceneChanging ||
-           (eventRunning && !allowedEventCleanup && !talking && !loadEntrance && !doorTraversal);
+           (eventRunning && !allowedEventCleanup && !talking && !loadEntrance && !eventPresentation);
 }
 
 struct RemoteLinkEventVisibility {
     bool allowedEvent = false;
     int allowedEventId = -1;
-    bool doorEventLatched = false;
+    bool presentationEventLatched = false;
 
     constexpr void reset() {
         allowedEvent = false;
         allowedEventId = -1;
-        doorEventLatched = false;
+        presentationEventLatched = false;
     }
 
     constexpr bool hidden(bool sceneChanging, bool eventRunning, bool eventOrderOK,
-                          bool talking, bool loadEntrance, bool doorTraversal,
+                          bool talking, bool loadEntrance, bool eventPresentation,
                           int eventId = -1) {
         if (sceneChanging || !eventRunning) {
             reset();
             return sceneChanging;
         }
 
-        // A door command/procedure can disappear during the same event's
+        // Door/item-get procedure markers can disappear during the same event's
         // handoff. Keep the exception tied to that event identity rather than
         // to the transient command or procedure marker. A different event
         // takes ownership immediately and cannot inherit the exception.
-        if (doorEventLatched && allowedEventId >= 0 && eventId >= 0 &&
+        if (presentationEventLatched && allowedEventId >= 0 && eventId >= 0 &&
             allowedEventId != eventId) {
             reset();
         }
-        if (doorTraversal) {
+        if (eventPresentation) {
             allowedEvent = true;
             if (eventId >= 0) {
-                doorEventLatched = true;
+                presentationEventLatched = true;
                 allowedEventId = eventId;
             }
-        } else if (doorEventLatched) {
-            // Keep a recognised door event visible while its command/procedure
-            // markers hand off, including the order-OK cleanup window.
+        } else if (presentationEventLatched) {
+            // Keep a recognised presentation event visible while its markers
+            // hand off, including the order-OK cleanup window.
             allowedEvent = true;
         } else if (!eventOrderOK) {
             // Preserve the existing one-sample TALK/START exceptions. Unlike a
-            // door event, they have no local ownership latch here.
+            // door/item-get event, they have no local ownership latch here.
             allowedEvent = !remote_link_scene_hidden(false, true, talking,
                                                       loadEntrance, false);
         }
