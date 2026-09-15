@@ -46,6 +46,12 @@ constexpr bool check_event_visibility_lifecycle() {
     // Authored cinematics and THEIR cleanup remain hidden.
     if (!visibility.hidden(false, true, false, false, false, false)) return false;
     if (!visibility.hidden(false, true, true, false, false, false)) return false;
+    // A door exception survives marker/procedure handoff for the same event,
+    // then a different event clears it without changing the wire payload.
+    if (visibility.hidden(false, true, false, false, false, true, 42)) return false;
+    if (visibility.hidden(false, true, false, false, false, false, 42)) return false;
+    if (visibility.hidden(false, true, true, false, false, false, 42)) return false;
+    if (!visibility.hidden(false, true, false, false, false, false, 43)) return false;
     // A cinematic chained directly after a permitted arrival cancels it.
     if (visibility.hidden(false, true, false, false, true, false)) return false;
     if (!visibility.hidden(false, true, false, false, false, false)) return false;

@@ -22,18 +22,46 @@ constexpr bool remote_link_scene_hidden(bool sceneChanging, bool eventRunning,
 
 struct RemoteLinkEventVisibility {
     bool allowedEvent = false;
+    int allowedEventId = -1;
+    bool doorEventLatched = false;
+
+    constexpr void reset() {
+        allowedEvent = false;
+        allowedEventId = -1;
+        doorEventLatched = false;
+    }
 
     constexpr bool hidden(bool sceneChanging, bool eventRunning, bool eventOrderOK,
-                          bool talking, bool loadEntrance, bool doorTraversal) {
+                          bool talking, bool loadEntrance, bool doorTraversal,
+                          int eventId = -1) {
         if (sceneChanging || !eventRunning) {
-            allowedEvent = false;
+            reset();
             return sceneChanging;
         }
-        // A new active event replaces the old exception immediately. No
-        // timeout or procedure-only carryover can expose a later cinematic.
-        if (!eventOrderOK) {
+
+        // A door command/procedure can disappear during the same event's
+        // handoff. Keep the exception tied to that event identity rather than
+        // to the transient command or procedure marker. A different event
+        // takes ownership immediately and cannot inherit the exception.
+        if (doorEventLatched && allowedEventId >= 0 && eventId >= 0 &&
+            allowedEventId != eventId) {
+            reset();
+        }
+        if (doorTraversal) {
+            allowedEvent = true;
+            if (eventId >= 0) {
+                doorEventLatched = true;
+                allowedEventId = eventId;
+            }
+        } else if (doorEventLatched) {
+            // Keep a recognised door event visible while its command/procedure
+            // markers hand off, including the order-OK cleanup window.
+            allowedEvent = true;
+        } else if (!eventOrderOK) {
+            // Preserve the existing one-sample TALK/START exceptions. Unlike a
+            // door event, they have no local ownership latch here.
             allowedEvent = !remote_link_scene_hidden(false, true, talking,
-                                                      loadEntrance, doorTraversal);
+                                                      loadEntrance, false);
         }
         return !allowedEvent;
     }

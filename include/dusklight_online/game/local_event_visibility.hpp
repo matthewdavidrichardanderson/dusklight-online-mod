@@ -48,14 +48,18 @@ inline bool local_scene_hides_remote_link() {
     }
     // TALK is ordinary conversation, not dialogue embedded in a DEMO event.
     // START is the native post-load entrance; authored arrival movies use
-    // SYSTEM/TOOL instead. Door opening is the native exit traversal procedure.
+    // SYSTEM/TOOL instead. A door command/procedure seeds a local exception
+    // that remains tied to the current engine event through its handoff.
+    const bool door = link->eventInfo.checkCommandDoor() ||
+        link->mProcID == daAlink_c::PROC_DOOR_OPEN || local_link_in_load_exit(link);
     return visibility.hidden(
         local_transition_hides_remote_link(),
         dComIfGp_event_runCheck(),
         dComIfGp_getEvent()->isOrderOK(),
         dComIfGp_event_getMode() == dEvt_mode_TALK_e,
         link->mDemo.getDemoType() == daPy_demo_c::DEMO_TYPE_START_e,
-        link->mProcID == daAlink_c::PROC_DOOR_OPEN || local_link_in_load_exit(link));
+        door,
+        link->eventInfo.getEventId());
 }
 
 } // namespace dusklight_online::game
