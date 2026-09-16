@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -25,6 +26,18 @@ void require_round_trip(const dusk::multiplayer::InviteCodePayload& source) {
     require(decoded->room == source.room, "room changed");
     require(decoded->sessionId == source.sessionId, "session id changed");
     require(decoded->sessionKey == source.sessionKey, "session key changed");
+
+    constexpr std::string_view prefix = "TP1-";
+    require(code.starts_with(prefix), "generated code has no TP1 prefix");
+    const auto bareDecoded = dusk::multiplayer::decode_invite_code(code.substr(prefix.size()), &error);
+    require(bareDecoded.has_value(), error.c_str());
+    require(bareDecoded->version == source.version, "bare-code version changed");
+    require(bareDecoded->transport == source.transport, "bare-code transport changed");
+    require(bareDecoded->host == source.host, "bare-code host changed");
+    require(bareDecoded->port == source.port, "bare-code port changed");
+    require(bareDecoded->room == source.room, "bare-code room changed");
+    require(bareDecoded->sessionId == source.sessionId, "bare-code session id changed");
+    require(bareDecoded->sessionKey == source.sessionKey, "bare-code session key changed");
 }
 
 }  // namespace
@@ -62,8 +75,7 @@ int main() {
 
     std::string error;
     require(!dusk::multiplayer::decode_invite_code("BAD-code", &error),
-            "invalid prefix was accepted");
-    require(error == "invalid prefix", "invalid-prefix error changed");
+            "invalid code was accepted");
 
     std::string tampered = dusk::multiplayer::create_invite_code({
         .sessionId = "tamper-session",

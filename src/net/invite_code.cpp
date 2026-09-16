@@ -260,12 +260,9 @@ std::string create_invite_code(const InviteCodePayload& payload) {
 }
 
 std::optional<InviteCodePayload> decode_invite_code(const std::string& code, std::string* errorOut) {
-    if (!code.starts_with(kPrefix)) {
-        set_error(errorOut, "invalid prefix");
-        return std::nullopt;
-    }
-
-    const std::string_view body(code.data() + kPrefix.size(), code.size() - kPrefix.size());
+    const std::string_view body = code.starts_with(kPrefix)
+                                      ? std::string_view(code).substr(kPrefix.size())
+                                      : std::string_view(code);
     const size_t dot = body.find('.');
     if (dot == std::string_view::npos) {
         const std::optional<std::vector<uint8_t>> bytes = base64url_decode(body);
