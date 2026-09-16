@@ -25,6 +25,7 @@
 #include "d/actor/d_a_spinner.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item.h"
+#include "d/d_meter2_info.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_op/f_op_overlap_mng.h"
 #include "f_pc/f_pc_name.h"
@@ -48,6 +49,8 @@ struct WeightState {
 
 std::array<WeightState, 21> sWeightStates{};
 std::array<int64_t, 6> sWaterDropState{};
+json sLastGameplayPose;
+LocalPoseDiagnostics sLastGameplayPoseDiagnostics;
 bool sLocalTransformObserved = false;
 bool sLocalTransformFromWolf = false;
 bool sLocalTransformToWolf = false;
@@ -265,6 +268,28 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     if (player == nullptr || fopAcM_GetName(player) != fpcNm_ALINK_e) return false;
     auto* link = static_cast<daAlink_c*>(player);
     if (link->mpLinkModel == nullptr) return false;
+
+    // The pause menu reuses and repositions the live Link actor for its 3D
+    // equipment preview. Those coordinates are menu-space, not a gameplay
+    // teleport. Keep publishing the last world pose so other players see Link
+    // freeze in place for the duration of the menu.
+    if (dComIfGp_isPauseFlag() || dMeter2Info_getPauseStatus() != 0) {
+        if (sLastGameplayPose.is_null()) return false;
+        (void)drain_local_audio_events();
+        poseMessage = sLastGameplayPose;
+        poseMessage["sequence"] = sequence;
+        json& frozenState = poseMessage["state"];
+        frozenState["audio_events"] = json::array();
+        frozenState["active_audio_events"] = json::array();
+        if (json* wet = frozenState.contains("water_drop_state") ?
+                            &frozenState["water_drop_state"] : nullptr;
+            wet != nullptr && wet->is_array() && wet->size() == 6) {
+            (*wet)[0] = sequence;
+            (*wet)[3] = sequence;
+        }
+        if (diagnostics != nullptr) *diagnostics = sLastGameplayPoseDiagnostics;
+        return true;
+    }
 
     const bool wolf = static_cast<bool>(link->checkWolf());
     const bool transforming = link->mProcID == daAlink_c::PROC_METAMORPHOSE ||
@@ -985,6 +1010,8 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     }
 
     poseMessage = {{"type", "pose"}, {"sequence", sequence}, {"state", std::move(state)}};
+    sLastGameplayPose = poseMessage;
+    sLastGameplayPoseDiagnostics = diagnostics != nullptr ? *diagnostics : LocalPoseDiagnostics{};
     return true;
 }
 
@@ -1003,6 +1030,8 @@ bool matrix_streaming_enabled() {
 void reset_local_pose_state() {
     sWaterDropState = {};
     sWeightStates = {};
+    sLastGameplayPose = json();
+    sLastGameplayPoseDiagnostics = {};
     sLocalTransformObserved = false;
     sLocalTransformFromWolf = false;
     sLocalTransformToWolf = false;
