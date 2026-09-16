@@ -271,6 +271,7 @@ set(ONLINE_GAME_SOURCES
     src/game/audio_bridge.cpp
     src/game/bomb_bridge.cpp
     src/game/collectible_visual_bridge.cpp
+    src/game/floor_switch_bridge.cpp
     src/game/game_adapter.cpp
     src/game/local_pose.cpp
     src/game/protocol_router.cpp
@@ -400,6 +401,17 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_compile_features(dusklight_online_bomb_bag_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_bomb_bag_sync_test PRIVATE include)
     add_test(NAME dusklight_online_bomb_bag_sync COMMAND dusklight_online_bomb_bag_sync_test)
+
+    add_executable(dusklight_online_floor_switch_sync_test tests/floor_switch_sync_test.cpp)
+    target_compile_features(dusklight_online_floor_switch_sync_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_floor_switch_sync_test PRIVATE include)
+    add_test(NAME dusklight_online_floor_switch_sync COMMAND dusklight_online_floor_switch_sync_test)
+
+    add_executable(dusklight_online_floor_switch_wire_test tests/floor_switch_wire_test.cpp)
+    target_compile_features(dusklight_online_floor_switch_wire_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_floor_switch_wire_test PRIVATE include)
+    target_link_libraries(dusklight_online_floor_switch_wire_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME dusklight_online_floor_switch_wire COMMAND dusklight_online_floor_switch_wire_test)
 
     add_executable(dusklight_online_ooccoo_sync_test tests/ooccoo_sync_test.cpp)
     target_compile_features(dusklight_online_ooccoo_sync_test PRIVATE cxx_std_20)

@@ -6,7 +6,7 @@ namespace dusklight_online::net {
 // bodies are eligible; a peer body can never masquerade as lobby control.
 inline bool peer_delivery_type(std::string_view type) {
     constexpr std::string_view types[] = {
-        "progression_state","sync_request","event_bit","tbox_bit","switch_bit","room_switch_bit","web_timer","room_actor_action","item_bit",
+        "progression_state","sync_request","event_bit","tbox_bit","switch_bit","room_switch_bit","web_timer","room_actor_action","floor_switch_state","item_bit",
         "dungeon_item_bit","save_snapshot","key_num","light_drop_num","light_drop_get_flag",
         "max_life_update","bottle_slots","bomb_bag_slot","rupee_count","rupee_delta","poe_count",
         "malo_fundraising","charlo_offering","fish_record","collect_smell","item_get","rando_item_get",

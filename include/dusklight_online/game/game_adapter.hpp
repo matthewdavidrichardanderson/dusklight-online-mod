@@ -47,6 +47,7 @@ public:
     [[nodiscard]] bool applying_remote() const;
     [[nodiscard]] bool randomizer_active() const;
     [[nodiscard]] bool ooccoo_sync_active() const;
+    [[nodiscard]] bool floor_switch_sync_active() const;
 
     [[nodiscard]] bool stage_ready() const override;
     [[nodiscard]] bool allow_stage_unready(const RoutedMessage& message) const override;

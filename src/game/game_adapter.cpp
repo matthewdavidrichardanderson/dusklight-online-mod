@@ -9,6 +9,7 @@
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
+#include "dusklight_online/game/floor_switch_bridge.hpp"
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/randomizer_item_names.hpp"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
@@ -740,6 +741,7 @@ void* exact_local_switch_actor_context(bool set) {
     void* process = sExecutingProcessStack.back();
     if (process == nullptr || !fopAcM_IsActor(process)) return nullptr;
     const int actor = fpcM_GetName(process);
+    if (is_floor_switch_actor(actor)) return process;
     if (set) {
         if (actor == fpcNm_Tag_Mhint_e || actor == fpcNm_Tag_Mmsg_e ||
             actor == fpcNm_NPC_BLUENS_e || actor == fpcNm_SWC00_e) {
@@ -1544,7 +1546,9 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         // Room-scoped actor messages own both the native action and their
         // exact completion fallback. Do not also leak the same mutation into
         // the stage-wide generic switch channel.
-        if (is_web_switch_actor(actor) || is_room_action_actor(actor)) return;
+        if (is_web_switch_actor(actor) || is_room_action_actor(actor) ||
+            is_floor_switch_momentary_output(actor, fpcM_GetParam(process), flag) ||
+            is_remote_floor_switch_execution(process)) return;
         const auto* source = static_cast<const fopAc_ac_c*>(process);
         const int room = fopAcM_GetHomeRoomNo(source);
         const uint32_t params = fpcM_GetParam(process);
@@ -1593,7 +1597,9 @@ void memory_switch_off_post(ModContext*, void* args, void*, void*) {
     if (void* process = exact_local_switch_actor_context(false); process != nullptr) {
         const int actor = fpcM_GetName(process);
         if (actor == fpcNm_Obj_Movebox_e || actor == fpcNm_Obj_RotStair_e ||
-            actor == fpcNm_Obj_IceBlock_e) return;
+            actor == fpcNm_Obj_IceBlock_e ||
+            is_floor_switch_momentary_output(actor, fpcM_GetParam(process), flag) ||
+            is_remote_floor_switch_execution(process)) return;
         const int room = fopAcM_GetHomeRoomNo(static_cast<const fopAc_ac_c*>(process));
         const uint32_t params = fpcM_GetParam(process);
         if (is_group2_lifecycle_actor(actor) && !is_sewers_progression_switch(stage, flag)) return;
@@ -1752,6 +1758,7 @@ void player_mirror_set_post(ModContext*, void* args, void*, void*) {
 HookAction process_execute_pre(ModContext*, void* args, void*, void*) {
     void* process = mods::arg<void*>(args, 0);
     sExecutingProcessStack.push_back(process);
+    floor_switch_process_pre(process);
     sWebDeleteTimerStack.push_back(web_delete_timer(process));
     sRoomActorActionStateStack.push_back(room_actor_action_state(process));
     int preservePushPullKeep = -1;
@@ -1932,6 +1939,7 @@ void process_execute_post(ModContext*, void* args, void*, void*) {
             sActiveAdapter->notify_room_scene_initialized(room);
         }
     }
+    floor_switch_process_post(process);
     if (!sExecutingProcessStack.empty()) sExecutingProcessStack.pop_back();
 }
 
@@ -2250,6 +2258,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
     transport_.set_visual_wire_diagnostics(visual_wire_trace_enabled());
     if (install_remote_actor_profile(error) != MOD_OK ||
         install_audio_hooks(error) != MOD_OK ||
+        install_floor_switch_hooks(*this, error) != MOD_OK ||
         install_bomb_hooks(transport_, error) != MOD_OK ||
         install_visual_hooks(error) != MOD_OK ||
         mods::hook::install<ToggleAutoSaveHook>() != MOD_OK ||
@@ -2333,6 +2342,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
 }
 
 void GameAdapter::shutdown_hooks() {
+    uninstall_floor_switch_hooks();
     if (sActiveAdapter == this) sActiveAdapter = nullptr;
     transport_.set_pose_delta_codec(nullptr, nullptr);
     dusk::multiplayer::set_remote_pvp_hit_callback(nullptr);
@@ -2569,6 +2579,7 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
 }
 
 void GameAdapter::clear_replaced_save_progression_state() {
+    reset_floor_switch_state();
     // These observations and deferred mutations belong to the save data that
     // was just replaced. Keeping them can resurrect another file's item bits
     // or apply an old story mutation after the new file becomes active.
@@ -3023,6 +3034,7 @@ void GameAdapter::consume_progression_prompt_input() {
 }
 
 void GameAdapter::clear_disabled_sync_flags_state() {
+    reset_floor_switch_state();
     ooccooState_.reset();
     ooccooBoundToSave_ = false;
     ooccooCatchupPending_ = true;
@@ -3449,6 +3461,10 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
 }
 
 void GameAdapter::capture_local_mutations_before_remote(bool syncFlagsEnabled) {
+    // Native contact capture precedes packet ingestion. Never echo injected
+    // peer pressure or enqueue transient holds behind stage readiness.
+    if (syncFlagsEnabled) flush_floor_switch_state();
+    else reset_floor_switch_state();
     const net::Status status = transport_.status();
     // The AIO hooked the inline wallet setter itself. Observe direct writes
     // here as well as queued meter changes, before incoming state can hide
@@ -3554,6 +3570,11 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
             return ApplyResult::Applied;
         case MessageDomain::Progression:
         {
+            if (type == "floor_switch_state") {
+                if (!syncFlagsEnabled_ || !peerNames_.contains(message.peerId))
+                    return ApplyResult::IgnoredByPolicy;
+                return receive_floor_switch_state(message.peerId, message.payload);
+            }
             RemoteApplicationGuard applying(applyingRemote_);
             const ApplyResult result = consume_progression(message);
             if (stage_ready() && !opening_or_title_active()) poll_local_state(false);
@@ -3889,6 +3910,7 @@ void GameAdapter::peer_joined(std::string_view peerId, std::string_view name) {
 }
 
 void GameAdapter::peer_left(std::string_view peerId) {
+    forget_floor_switch_peer(peerId);
     const std::string key(peerId);
     const auto nameIt = peerNames_.find(key);
     push_online_notification((nameIt != peerNames_.end() ? nameIt->second : key) +
@@ -3959,6 +3981,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
 }
 
 void GameAdapter::reset_session() {
+    reset_floor_switch_state(true);
     sVisualWireTrace = {};
     reset_local_pose_state();
     dusk::multiplayer::destroy_all_remote_link_dummies();
@@ -4077,7 +4100,8 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
     if (!valid_stage(stage) || flag < 0 || flag >= dSv_info_c::MEMORY_SWITCH) {
         return reject("invalid switch_bit bounds");
     }
-    if (is_unsynced_switch_bit(stage, flag)) return ApplyResult::IgnoredByPolicy;
+    if (is_unsynced_switch_bit(stage, flag) || loaded_floor_switch_owns_flag(stage, flag))
+        return ApplyResult::IgnoredByPolicy;
     const bool set = message.value("set", true);
 
     // Completion first lowers this client's participant state and advertises
@@ -4145,6 +4169,7 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
     }
     dComIfGs_onStageSwitch(stage, flag);
     repair_remote_switch_actors(stage, flag);
+    repair_floor_switch_completion(stage, flag);
     return ApplyResult::Applied;
 }
 
@@ -4152,7 +4177,8 @@ ApplyResult GameAdapter::apply_snapshot_switch_bit(int stage, int flag) {
     if (!valid_stage(stage) || flag < 0 || flag >= dSv_info_c::MEMORY_SWITCH) {
         return reject("invalid snapshot switch_bit bounds");
     }
-    if (is_unsynced_switch_bit(stage, flag)) return ApplyResult::IgnoredByPolicy;
+    if (is_unsynced_switch_bit(stage, flag) || loaded_floor_switch_owns_flag(stage, flag))
+        return ApplyResult::IgnoredByPolicy;
 
     // Snapshot hydration uses the audited remote-switch safety policy, but it
     // must not enter live progression prompts, Faron sequencing, or source-
@@ -4183,6 +4209,7 @@ ApplyResult GameAdapter::apply_snapshot_switch_bit(int stage, int flag) {
     }
     dComIfGs_onStageSwitch(stage, flag);
     repair_remote_switch_actors(stage, flag);
+    repair_floor_switch_completion(stage, flag);
     return ApplyResult::Applied;
 }
 
@@ -4202,9 +4229,14 @@ void GameAdapter::flush_deferred_switches() {
             ++it;
             continue;
         }
+        if (loaded_floor_switch_owns_flag(stage, flag)) {
+            it = deferredSwitches_.erase(it);
+            continue;
+        }
         if (it->value("set", true)) {
             dComIfGs_onStageSwitch(stage, flag);
             repair_remote_switch_actors(stage, flag);
+            repair_floor_switch_completion(stage, flag);
         } else {
             dComIfGs_offStageSwitch(stage, flag);
         }
@@ -5091,6 +5123,15 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
     return reject("unhandled progression type: " + type);
 }
 
+bool GameAdapter::floor_switch_sync_active() const {
+    // A native plate may itself request a pause/demo. Do not drop its pressure
+    // just because event_runCheck() becomes true; only transitions are unsafe.
+    return syncFlagsEnabled_ && transport_.status().welcomed && !opening_or_title_active() &&
+           !manualTransitionActive_ && !manualReloadPending_ &&
+           dComIfGp_getStageStagInfo() != nullptr && dComIfGp_getPlayer(0) != nullptr &&
+           !dComIfGp_isEnableNextStage() && !fopOvlpM_IsPeek() && !fopOvlpM_IsDoingReq();
+}
+
 bool GameAdapter::ooccoo_sync_active() const {
     return syncFlagsEnabled_ && transport_.status().welcomed && !opening_or_title_active();
 }
@@ -5200,7 +5241,8 @@ nlohmann::json GameAdapter::make_save_snapshot() {
 
         json switches = json::array();
         for (int flag = 0; flag < dSv_info_c::MEMORY_SWITCH; ++flag) {
-            if (!is_unsynced_switch_bit(stage, flag) && bits.isSwitch(flag)) {
+            if (!is_unsynced_switch_bit(stage, flag) && bits.isSwitch(flag) &&
+                !loaded_floor_switch_owns_flag(stage, flag)) {
                 switches.push_back(flag);
             }
         }
@@ -5332,6 +5374,7 @@ std::string GameAdapter::encode_manual_full_state() {
         return {};
 
     dSv_info_c snapshotInfo = g_dComIfG_gameInfo.info;
+    sanitize_floor_switch_snapshot(snapshotInfo);
     const int stage = current_stage_table();
     if (valid_stage(stage)) snapshotInfo.getSavedata().putSave(stage, snapshotInfo.getMemory());
 

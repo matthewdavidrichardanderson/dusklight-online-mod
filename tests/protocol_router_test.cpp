@@ -62,6 +62,7 @@ int main() {
         {"event_bit",Domain::Progression,false,true}, {"tbox_bit",Domain::Progression,true,true},
         {"switch_bit",Domain::Progression,true,true}, {"room_switch_bit",Domain::Progression,true,true},
         {"web_timer",Domain::Progression,true,true}, {"room_actor_action",Domain::Progression,true,true},
+        {"floor_switch_state",Domain::Progression,false,true},
         {"item_bit",Domain::Progression,true,true}, {"dungeon_item_bit",Domain::Progression,true,true},
         {"item_get",Domain::Progression,false,true}, {"item_first_bit",Domain::Progression,false,true},
         {"collect_crystal",Domain::Progression,false,true}, {"collect_mirror",Domain::Progression,false,true},
@@ -97,6 +98,30 @@ int main() {
     assert(!ProtocolRouter::classify("rando_item_get").stageDependent);
     assert(ProtocolRouter::classify("ganondorf_state").domain == MessageDomain::Ganondorf);
     assert(!ProtocolRouter::is_known_type("future_unreviewed_lane"));
+
+    // Latest pressure is metadata, never stage-deferred replay. A release
+    // arriving during a cutscene must replace the hold immediately.
+    {
+        Consumer floor;
+        ProtocolRouter pressureRouter(floor);
+        auto press = message("floor_switch_state");
+        press.message["sequence"] = 1;
+        auto release = press;
+        release.message["sequence"] = 2;
+        assert(pressureRouter.route(press, true) == ApplyResult::Applied);
+        assert(pressureRouter.route(release, true) == ApplyResult::Applied);
+        assert(pressureRouter.stats().pendingMessages == 0);
+        assert(floor.payloads.size() == 2);
+        assert(floor.payloads.back()["sequence"] == 2);
+        assert(pressureRouter.route(message("floor_switch_state", false), true) ==
+               ApplyResult::IgnoredByPolicy);
+        // Ingress settings, not the batch's final setting, own routing.
+        assert(pressureRouter.route(message("floor_switch_state", true), false) ==
+               ApplyResult::Applied);
+        floor.ready = true;
+        pressureRouter.flush(true);
+        assert(floor.payloads.size() == 3);
+    }
 
     Consumer consumer;
     ProtocolRouter router(consumer);
