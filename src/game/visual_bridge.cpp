@@ -26,6 +26,7 @@
 #include "d/d_camera.h"
 #include "d/d_msg_object.h"
 #include "d/d_s_play.h"
+#include "dusk/map_loader_definitions.h"
 #include "dusk/multiplayer/remote_link_dummy.hpp"
 #include "f_op/f_op_camera_mng.h"
 #include "m_Do/m_Do_graphic.h"
@@ -115,6 +116,7 @@ std::string sLocalStatus;
 std::string sLocalName;
 std::map<std::string, PeerPoseSnapshot> sPoses;
 std::map<std::string, std::string> sNames;
+std::map<std::string, PlayerLocationView> sLocations;
 std::unique_ptr<NameLabelFontAtlas> sFontAtlas;
 ProgressionPromptView sProgressionPrompt;
 std::vector<Notification> sNotifications;
@@ -398,8 +400,25 @@ f32 measure_text(const NameLabelFontAtlas& atlas, const char* text, size_t codeU
     return width;
 }
 
-ImVec4 player_status_color(bool local, bool recent, std::string_view status) {
-    if (local || recent || status == "connected") {
+std::string player_location_name(std::string_view stage, int room) {
+    if (stage.empty()) return "Unknown";
+
+    const MapEntry* stageFallback = nullptr;
+    for (const RegionEntry& region : gameRegions) {
+        for (const MapEntry& map : region.maps) {
+            if (stage != map.mapFile) continue;
+            if (stageFallback == nullptr) stageFallback = &map;
+            if (map.mapRooms.empty()) return map.mapName;
+            for (const RoomEntry& candidate : map.mapRooms) {
+                if (candidate.roomNo == room) return map.mapName;
+            }
+        }
+    }
+    return stageFallback != nullptr ? stageFallback->mapName : std::string(stage);
+}
+
+ImVec4 player_status_color(bool local, std::string_view status) {
+    if (local || status == "connected") {
         return ImVec4(0.34f, 0.92f, 0.44f, 1.0f);
     }
     if (status == "connecting" || status == "joined" || status == "waiting") {
@@ -424,26 +443,23 @@ void draw_imgui_player_list() {
         std::string status;
         std::string area;
         bool local = false;
-        bool recent = false;
     };
     std::vector<Row> rows;
     const char* localStage = dComIfGp_getStartStageName();
     rows.push_back({sLocalName.empty() ? "You" : sLocalName,
                     sLocalStatus.empty() ? "connected" : sLocalStatus,
                     localStage != nullptr && localStage[0] != '\0' ?
-                        std::string(localStage) + " / room " +
-                            std::to_string(int(dComIfGp_roomControl_getStayNo())) : "Unknown",
-                    true, true});
+                        player_location_name(localStage,
+                            int(dComIfGp_roomControl_getStayNo())) : "Unknown",
+                    true});
     for (const auto& [peerId, peerName] : sNames) {
-        const auto pose = sPoses.find(peerId);
-        const bool valid = pose != sPoses.end() && pose->second.valid;
-        const bool recent = valid && pose->second.ageTicks <= 90;
-        rows.push_back({peerName.empty() ? peerId : peerName,
-                        valid ? (recent ? "online" : "stale") : "waiting",
-                        valid && !pose->second.stage.empty() ?
-                            pose->second.stage + " / room " +
-                                std::to_string(pose->second.room) : "Unknown",
-                        false, recent});
+        const auto location = sLocations.find(peerId);
+        rows.push_back({
+            peerName.empty() ? peerId : peerName,
+            "connected",
+            location != sLocations.end() ?
+                player_location_name(location->second.stage, location->second.room) : "Unknown",
+            false});
     }
     if (rows.empty()) return;
 
@@ -481,7 +497,7 @@ void draw_imgui_player_list() {
             for (const Row& row : rows) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                draw_player_status_dot(player_status_color(row.local, row.recent, row.status));
+                draw_player_status_dot(player_status_color(row.local, row.status));
                 ImGui::SameLine();
                 ImGui::TextUnformatted(row.name.c_str());
                 if (row.local) {
@@ -765,6 +781,7 @@ void update_visual_overlays(
     std::string_view localName,
     const std::map<std::string, PeerPoseSnapshot>& poses,
     const std::map<std::string, std::string>& names,
+    const std::map<std::string, PlayerLocationView>& locations,
     const ProgressionPromptView& progressionPrompt) {
     sConnected = connected;
     sGameplayReady = gameplayReady;
@@ -776,6 +793,7 @@ void update_visual_overlays(
     sLocalName = localName;
     sPoses = poses;
     sNames = names;
+    sLocations = locations;
     sProgressionPrompt = progressionPrompt;
 }
 
@@ -807,6 +825,7 @@ void reset_visual_overlays() {
     sPlayerListEnabled = false;
     sPoses.clear();
     sNames.clear();
+    sLocations.clear();
     sRoom.clear();
     sLocalStatus.clear();
     sLocalName.clear();

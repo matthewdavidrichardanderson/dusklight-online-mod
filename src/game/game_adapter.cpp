@@ -3160,12 +3160,26 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     // peer has completed the welcome handshake. Passive local UI such as the
     // player list should work in that state; remote visuals remain separately
     // guarded by remoteGameplayReady.
+    std::map<std::string, PlayerLocationView> playerLocations;
+    for (const auto& [peerId, name] : transport_.peers()) {
+        (void)name;
+        const auto presence = peerPresence_.find(peerId);
+        if (presence == peerPresence_.end()) continue;
+        const auto stage = presence->second.find("stage");
+        const auto room = presence->second.find("room");
+        if (stage == presence->second.end() || !stage->is_string() ||
+            room == presence->second.end() || !room->is_number_integer()) continue;
+        const int64_t roomNumber = room->get<int64_t>();
+        if (roomNumber < -128 || roomNumber > 127) continue;
+        playerLocations.emplace(peerId, PlayerLocationView{
+            stage->get<std::string>(), static_cast<int>(roomNumber)});
+    }
     update_visual_overlays(status.enabled, remoteGameplayReady, nameLabelsEnabled,
                            remoteModelEnabled, playerListEnabled, status.room,
                            (status.mode == net::Mode::DirectHost || status.isOwner) ?
                                "hosting" : "connected",
                            status.name,
-                           peerPoses_, transport_.peers(), promptView);
+                           peerPoses_, transport_.peers(), playerLocations, promptView);
     dusk::multiplayer::set_remote_actor_options(
                                                 dusk::multiplayer::kRemoteMidnaStreamingEnabled &&
                                                     displayMidnaEnabled,

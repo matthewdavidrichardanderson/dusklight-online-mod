@@ -21,6 +21,11 @@ struct ProgressionPromptView {
     float holdRatio = 0.0f;
 };
 
+struct PlayerLocationView {
+    std::string stage;
+    int room = -1;
+};
+
 ModResult install_visual_hooks(ModError* error);
 void uninstall_visual_hooks();
 void update_visual_overlays(
@@ -29,6 +34,7 @@ void update_visual_overlays(
     std::string_view localName,
     const std::map<std::string, dusk::multiplayer::PeerPoseSnapshot>& poses,
     const std::map<std::string, std::string>& names,
+    const std::map<std::string, PlayerLocationView>& locations,
     const ProgressionPromptView& progressionPrompt);
 void push_online_notification(std::string text, float durationSeconds = 5.0f,
                               bool warning = false);
