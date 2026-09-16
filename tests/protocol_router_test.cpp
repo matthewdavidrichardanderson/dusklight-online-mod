@@ -61,7 +61,7 @@ int main() {
         {"sync_request",Domain::Progression,false,false}, {"save_snapshot",Domain::Progression,true,true},
         {"event_bit",Domain::Progression,false,true}, {"tbox_bit",Domain::Progression,true,true},
         {"switch_bit",Domain::Progression,true,true}, {"room_switch_bit",Domain::Progression,true,true},
-        {"web_timer",Domain::Progression,true,true}, {"room_actor_action",Domain::Progression,true,true},
+        {"web_timer",Domain::Progression,true,true}, {"room_actor_action",Domain::Progression,false,true},
         {"floor_switch_state",Domain::Progression,false,true},
         {"item_bit",Domain::Progression,true,true}, {"dungeon_item_bit",Domain::Progression,true,true},
         {"item_get",Domain::Progression,false,true}, {"item_first_bit",Domain::Progression,false,true},

@@ -46,6 +46,11 @@ int room_actor_action_argument(void* actor);
 // needs its live partial-break edge distinguished from full destruction.
 RoomActorAction room_actor_switch_action(void* actor, bool wasSet);
 
+// True only when this exact room actor owns the native durable stage switch.
+// Live actions remain room-scoped, while these bits can use ordinary save-state
+// synchronization before the destination room is loaded.
+bool room_actor_persistent_switch(void* actor, int flag);
+
 // Drive the exact loaded actor through a reviewed native, non-event action.
 bool apply_remote_room_actor_action(int actorName, int room, uint32_t params,
                                     RoomActorAction action, int actionArgument = 0);

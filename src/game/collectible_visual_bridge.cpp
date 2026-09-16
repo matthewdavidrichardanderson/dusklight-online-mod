@@ -810,6 +810,25 @@ RoomActorAction room_actor_switch_action(void* actor, bool wasSet) {
     return RoomActorAction::Break;
 }
 
+bool room_actor_persistent_switch(void* actor, int flag) {
+    if (actor == nullptr || !fopAcM_IsActor(actor) || flag < 0 || flag >= 0xFF)
+        return false;
+    const int actorName = fpcM_GetName(actor);
+    if (actorName == fpcNm_Obj_Movebox_e) {
+        const auto* block = static_cast<const daObjMovebox::Act_c*>(actor);
+        if (block->mpPath == nullptr || block->prmZ_get_pathId() == 0xFF) return false;
+        return flag == block->prm_get_swSave1() || flag == block->prmZ_get_swSave2();
+    }
+    if (actorName == fpcNm_Obj_IceBlock_e) {
+        const auto* block = static_cast<const daObjIceBlk_c*>(actor);
+        if (block->mpPath == nullptr || block->mSwbit == 0xFF ||
+            block->mMaxSwNum == 0 || block->mMaxSwNum > 8) return false;
+        return flag >= block->mSwbit && flag < block->mSwbit + block->mMaxSwNum;
+    }
+    return room_actor_action_supported(actorName, RoomActorAction::Break) &&
+           room_actor_switch_flag(actorName, fopAcM_GetParam(actor)) == flag;
+}
+
 bool apply_remote_room_actor_action(int actorName, int room, uint32_t params,
                                     RoomActorAction action, int actionArgument) {
     if (!room_actor_action_supported(actorName, action) || room < 0 || room >= 64 ||

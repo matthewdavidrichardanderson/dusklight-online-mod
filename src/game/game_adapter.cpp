@@ -1543,10 +1543,15 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", true}};
     if (void* process = exact_local_switch_actor_context(true); process != nullptr) {
         const int actor = fpcM_GetName(process);
-        // Room-scoped actor messages own both the native action and their
-        // exact completion fallback. Do not also leak the same mutation into
-        // the stage-wide generic switch channel.
-        if (is_web_switch_actor(actor) || is_room_action_actor(actor) ||
+        // Live action remains exact-room, but an actor's own durable stage
+        // switches must reach peers while the room is unloaded. That lets the
+        // actor consume already-synchronized save state during native create.
+        const bool remoteBlockAction =
+            (actor == fpcNm_Obj_Movebox_e && remote_movebox_action_active(process)) ||
+            (actor == fpcNm_Obj_IceBlock_e && remote_iceblock_action_active(process));
+        if (is_web_switch_actor(actor) ||
+            (is_room_action_actor(actor) && !room_actor_persistent_switch(process, flag)) ||
+            remoteBlockAction ||
             is_floor_switch_momentary_output(actor, fpcM_GetParam(process), flag) ||
             is_remote_floor_switch_execution(process)) return;
         const auto* source = static_cast<const fopAc_ac_c*>(process);
@@ -1596,8 +1601,11 @@ void memory_switch_off_post(ModContext*, void* args, void*, void*) {
         {{"type", "switch_bit"}, {"stage", stage}, {"flag", flag}, {"set", false}};
     if (void* process = exact_local_switch_actor_context(false); process != nullptr) {
         const int actor = fpcM_GetName(process);
-        if (actor == fpcNm_Obj_Movebox_e || actor == fpcNm_Obj_RotStair_e ||
-            actor == fpcNm_Obj_IceBlock_e ||
+        const bool remoteBlockAction =
+            (actor == fpcNm_Obj_Movebox_e && remote_movebox_action_active(process)) ||
+            (actor == fpcNm_Obj_IceBlock_e && remote_iceblock_action_active(process));
+        if ((is_room_action_actor(actor) && !room_actor_persistent_switch(process, flag)) ||
+            remoteBlockAction ||
             is_floor_switch_momentary_output(actor, fpcM_GetParam(process), flag) ||
             is_remote_floor_switch_execution(process)) return;
         const int room = fopAcM_GetHomeRoomNo(static_cast<const fopAc_ac_c*>(process));
@@ -1988,14 +1996,16 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
          permanent_room_actor_switch_flag(actorName, fopAcM_GetParam(process)) != flag)) return;
     const int stage = current_stage_table();
     if (!valid_stage(stage)) return;
+    // Permanent actors already emitted a transient exact-room action above,
+    // and their native durable bit is carried by switch_bit. Re-emitting the
+    // room switch would allow a delayed room replay to visibly break the actor.
+    if (permanentActor) return;
     const char* stageName = dComIfGp_getStartStageName();
     sActiveAdapter->publish_local({
         {"type", "room_switch_bit"}, {"stage", stage}, {"flag", flag}, {"room", room},
         {"source_actor", actorName}, {"source_room", room},
         {"source_params", fpcM_GetParam(process)},
-        {"source_action", permanentActor
-                              ? static_cast<int>(room_actor_switch_action(process, wasSet))
-                              : 0},
+        {"source_action", 0},
         {"source_stage", stageName != nullptr ? stageName : ""},
     });
 }

@@ -47,7 +47,9 @@ constexpr std::array kEntries = {
     Entry{"switch_bit", {Domain::Progression, true, true}},
     Entry{"room_switch_bit", {Domain::Progression, true, true}},
     Entry{"web_timer", {Domain::Progression, true, true}},
-    Entry{"room_actor_action", {Domain::Progression, true, true}},
+    // A live actor animation is meaningful only at arrival time in the exact
+    // room. Durable results travel separately as ordinary save switches.
+    Entry{"room_actor_action", {Domain::Progression, false, true}},
     // Metadata only; transient pressure must never enter the stage replay queue.
     Entry{"floor_switch_state", {Domain::Progression, false, true}},
     Entry{"item_bit", {Domain::Progression, true, true}},
