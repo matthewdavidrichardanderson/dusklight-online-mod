@@ -5,6 +5,7 @@
 #include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/bottle_sync.hpp"
 #include "dusklight_online/game/cave_map_sync.hpp"
+#include "dusklight_online/game/ooccoo_wire.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
@@ -71,6 +72,8 @@
 
 namespace dusklight_online::game {
 
+DEFINE_HOOK(&daAlink_c::checkSetNpcTks, OoccooReunionHook);
+DEFINE_HOOK(&daAlink_c::createNpcTks, OoccooWarpActorHook);
 DEFINE_HOOK(&dSv_event_c::onEventBit, EventBitOnHook);
 DEFINE_HOOK(&dSv_event_c::offEventBit, EventBitOffHook);
 DEFINE_HOOK(&dSv_memBit_c::onTbox, MemoryTboxOnHook);
@@ -128,7 +131,19 @@ constexpr uint32_t kProgressionStateReadyMaxAgeTicks = 90;
 constexpr uint32_t kPendingSyncReplyTimeoutTicks = 1800;
 constexpr uint32_t kManualSyncRequestTimeoutTicks = 5 * 30;
 constexpr uint32_t kOrdonReloadWarningTicks = 180;
-constexpr std::string_view kOoccooSaveBlob = "ooccoo-note-v1";
+constexpr std::string_view kOoccooSaveBlob = "ooccoo-progress-v2";
+constexpr std::string_view kLegacyOoccooSaveBlob = "ooccoo-note-v1";
+static_assert(ooccoo::Parent == dItemNo_DUNGEON_EXIT_e);
+static_assert(ooccoo::Junior == dItemNo_DUNGEON_BACK_e);
+static_assert(ooccoo::Note == dItemNo_TKS_LETTER_e);
+static_assert(ooccoo::ParentAgain == dItemNo_DUNGEON_EXIT_2_e);
+static_assert(ooccoo::CityParent == dItemNo_LV7_DUNGEON_EXIT_e);
+static_assert(ooccoo::None == dItemNo_NONE_e);
+static_assert(ooccoo::FirstDungeon == dStage_SaveTbl_LV1);
+static_assert(ooccoo::CityDungeon == dStage_SaveTbl_LV7);
+static_assert(dStage_SaveTbl_LV2 == 17 && dStage_SaveTbl_LV3 == 18 &&
+              dStage_SaveTbl_LV4 == 19 && dStage_SaveTbl_LV5 == 20 && dStage_SaveTbl_LV6 == 21);
+static_assert(ST_DUNGEON == 1 && ST_BOSS_ROOM == 3);
 constexpr std::string_view kBottleSourcesSaveBlob = "bottle-sources-v1";
 constexpr uint16_t kTitleSyntheticEponaRescuedEventBit = 0x0601;
 constexpr std::string_view kTitleDemoStage = "F_SP102";
@@ -857,6 +872,76 @@ dSv_memBit_c& stage_bits(int stage) {
     return g_dComIfG_gameInfo.info.getSavedata().getSave(stage).getBit();
 }
 
+// Stage-table numbers are not scene identity. In particular, caves are also
+// ST_DUNGEON, and the City shop shares the main dungeon's save table.
+ooccoo::Scene current_ooccoo_scene() {
+    auto* info = dComIfGp_getStageStagInfo();
+    const char* name = dComIfGp_getStartStageName();
+    return {name != nullptr ? name : "", current_stage_table(),
+            info != nullptr ? static_cast<int>(dStage_stagInfo_GetSTType(info)) : -1,
+            static_cast<int>(dComIfGp_roomControl_getStayNo())};
+}
+
+int local_ooccoo_return_owner() {
+    auto& mark = g_dComIfG_gameInfo.info.getPlayer().getPlayerLastMarkInfo();
+    const char* name = mark.getName();
+    const auto* end = static_cast<const char*>(std::memchr(name, '\0', sizeof(mark.mName)));
+    if (end == nullptr) return -1;
+    const cXyz pos = mark.getPos();
+    return ooccoo::return_owner({mark.getWarpAcceptStage(),
+        std::string_view(name, static_cast<size_t>(end - name)), mark.getRoomNo(),
+        pos.x, pos.y, pos.z});
+}
+
+ooccoo::Progress native_ooccoo_facts(bool includeAcquisitions, bool includeLive) {
+    ooccoo::Progress facts;
+    const int here = includeLive ? ooccoo::scene_dungeon(current_ooccoo_scene()) : -1;
+    for (int stage = ooccoo::FirstDungeon; stage <= ooccoo::CityDungeon; ++stage) {
+        const auto& saved = g_dComIfG_gameInfo.info.getSavedata().getSave(stage).getBit();
+        const auto& live = g_dComIfG_gameInfo.info.getMemory().getBit();
+        const bool completed = saved.isStageBossEnemy() ||
+            (here == stage && live.isStageBossEnemy());
+        // onStageBossEnemy also sets OOCCOO_NOTE. It is not a pickup receipt.
+        const bool acquired = saved.isDungeonItemWarp() ||
+            (here == stage && live.isDungeonItemWarp());
+        if (completed) facts.completed |= ooccoo::dungeon_bit(stage);
+        else if (includeAcquisitions && acquired) facts.acquired |= ooccoo::dungeon_bit(stage);
+    }
+    if (includeAcquisitions) {
+        facts.citySpecial = dComIfGs_isItemFirstBit(dItemNo_LV7_DUNGEON_EXIT_e) ||
+            dComIfGs_getItem(SLOT_18, false) == dItemNo_LV7_DUNGEON_EXIT_e;
+        facts.unboundNote = dComIfGs_isItemFirstBit(dItemNo_TKS_LETTER_e);
+    }
+    // A Note or Sr. found in an arbitrary current area is NOT evidence that
+    // this area owns Ooccoo. Unbound randomized receipts come from ItemService.
+    return facts;
+}
+
+bool block_ooccoo_dungeon_actor(void* args) {
+    if (sActiveAdapter == nullptr || !sActiveAdapter->ooccoo_sync_active()) return false;
+    auto scene = current_ooccoo_scene();
+    // Player initialization can run before roomControl's stay room catches up.
+    // Both methods have arguments (this, position, room, mode/parameters).
+    scene.room = mods::arg<int>(args, 2);
+    return ooccoo::scene_dungeon(scene, false) < 0;
+}
+
+HookAction ooccoo_reunion_pre(ModContext*, void* args, void* result, void*) {
+    if (block_ooccoo_dungeon_actor(args)) {
+        // Old saves may already have an erroneous cave OOCCOO_NOTE bit.
+        // Returning false also prevents the caller entering a reunion demo.
+        *static_cast<bool*>(result) = false;
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+HookAction ooccoo_warp_actor_pre(ModContext*, void* args, void*, void*) {
+    // Covers procDungeonWarpSceneStartInit as well as checkSetNpcTks. This is
+    // Link's dungeon helper only: story NPC_TKS actors remain completely native.
+    return block_ooccoo_dungeon_actor(args) ? HOOK_SKIP_ORIGINAL : HOOK_CONTINUE;
+}
+
 int bottle_slot_count() {
     int count = 0;
     for (int slot = SLOT_11; slot <= SLOT_14; ++slot) {
@@ -1044,7 +1129,6 @@ bool is_synced_key_item(int itemId) {
     case dItemNo_ARROW_LV1_e:
     case dItemNo_ARROW_LV2_e:
     case dItemNo_ARROW_LV3_e:
-    case dItemNo_TKS_LETTER_e:
     case dItemNo_RAFRELS_MEMO_e:
     case dItemNo_ASHS_SCRIBBLING_e:
     case dItemNo_LETTER_e:
@@ -1525,10 +1609,9 @@ void memory_dungeon_item_on_post(ModContext*, void* args, void*, void*) {
     if (bits != &g_dComIfG_gameInfo.info.getMemory().getBit()) return;
     const int stage = current_stage_table();
     const int kind = mods::arg<int>(args, 1);
-    // Boss clear also sets OOCCOO_NOTE. Do not publish that side effect as
-    // a separate item: applying the boss-clear event already sets both bits.
-    // Check state here because onStageBossEnemy can be fully inlined by the host.
-    if (kind == dSv_memBit_c::OOCCOO_NOTE && bits->isStageBossEnemy()) return;
+    // Ooccoo has a dedicated receipt protocol. The raw bit can be set by
+    // boss clear or by an NPC before the actual item give has completed.
+    if (kind == dSv_memBit_c::OOCCOO_NOTE) return;
     if (valid_stage(stage) && kind >= 0 && kind <= 7) {
         sActiveAdapter->publish_local(
             {{"type", "dungeon_item_bit"}, {"stage", stage}, {"kind", kind}});
@@ -1964,10 +2047,17 @@ void GameAdapter::notify_local_event_bit(uint16_t flag) {
 }
 
 void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
-    if (applyingRemote_ || !syncFlagsEnabled_ || !transport_.status().welcomed ||
-        !randomizer_active()) {
-        return;
+    if (applyingRemote_) return;
+    if (ooccoo::is_grant(info.item) && !opening_or_title_active()) {
+        bind_ooccoo_to_save();
+        ooccooState_.record_local(ooccoo::receipt_for_grant(info.item, current_ooccoo_scene()));
+        // Send even if hydration just saw the native bit set by this very
+        // grant. Receivers union receipts, so repeated reunion grants are safe.
+        if (syncFlagsEnabled_ && transport_.status().welcomed) {
+            publish_local({{"type", "ooccoo_state"}, {"state", ooccoo_snapshot_state()}});
+        }
     }
+    if (!syncFlagsEnabled_ || !transport_.status().welcomed || !randomizer_active()) return;
 
     std::string checkName = info.check_name != nullptr ? info.check_name : "";
     if (repeatable_pickup_check(checkName)) checkName.clear();
@@ -1984,6 +2074,7 @@ void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
         {"type", "rando_item_get"},
         {"item_id", info.item},
     };
+    if (ooccoo::is_grant(info.item)) packet["ooccoo_state"] = ooccoo_snapshot_state();
     if (!checkName.empty()) {
         packet["check_name"] = checkName;
         if (const auto flag = current_freestanding_check_flag(checkName)) {
@@ -2162,6 +2253,8 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         install_bomb_hooks(transport_, error) != MOD_OK ||
         install_visual_hooks(error) != MOD_OK ||
         mods::hook::install<ToggleAutoSaveHook>() != MOD_OK ||
+        mods::hook::add_pre<OoccooReunionHook>(&ooccoo_reunion_pre) != MOD_OK ||
+        mods::hook::add_pre<OoccooWarpActorHook>(&ooccoo_warp_actor_pre) != MOD_OK ||
         mods::hook::add_pre<PvpDamageVectorHook>(&pvp_damage_vector_pre) != MOD_OK ||
         mods::hook::add_pre<RemoteEnemyGroupHook>(&remote_enemy_group_pre) != MOD_OK ||
         mods::hook::add_pre<RemoteWolfLockHook>(&remote_wolf_lock_pre) != MOD_OK ||
@@ -2285,6 +2378,8 @@ void GameAdapter::shutdown_hooks() {
     mods::hook::uninstall<MemoryTboxOnHook>();
     mods::hook::uninstall<EventBitOffHook>();
     mods::hook::uninstall<EventBitOnHook>();
+    mods::hook::uninstall<OoccooWarpActorHook>();
+    mods::hook::uninstall<OoccooReunionHook>();
     mods::hook::uninstall<ToggleAutoSaveHook>();
 
     // Remote Link's method table lives in this DLL. Finish every queued actor
@@ -2511,11 +2606,11 @@ void GameAdapter::clear_replaced_save_progression_state() {
 }
 
 void GameAdapter::notify_local_save_reset() {
-    // dSv_info_c::init() is the boundary between selected save files. Preserve
-    // detached Note metadata only until the next loaded file proves it owns
-    // that Note; never broadcast the temporary empty save as a network clear.
-    sharedOoccooBoundToSave_ = false;
-    sharedOoccooAuthoritative_ = false;
+    // No detached Note/owner data may survive a selected-save boundary.
+    ooccooState_.reset();
+    ooccooBoundToSave_ = false;
+    ooccooCatchupPending_ = true;
+    ooccooReplyPending_ = false;
     completedBottleSources_.clear();
     bottleSourcesComplete_ = true;
     clear_replaced_save_progression_state();
@@ -2549,24 +2644,20 @@ void GameAdapter::notify_local_save_loaded() {
 
     size_t size = 0;
     if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), nullptr, &size) != MOD_OK ||
-        size == 0 || size > 4096) return;
+        size == 0 || size > 1024) return;
     std::string encoded(size, '\0');
-    if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), &size) != MOD_OK) {
-        return;
-    }
+    if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), &size) != MOD_OK ||
+        size > encoded.size()) return;
     try {
-        const nlohmann::json candidate = nlohmann::json::parse(encoded.begin(),
-                                                               encoded.begin() + size);
-        const int owner = candidate.value("owner_stage", -1);
-        if (candidate.value("exists", false) && valid_stage(owner) &&
-            !candidate.value("has_return_mark", false)) {
-            sharedOoccooState_ = {{"exists", true}, {"owner_stage", owner},
-                {"city_variant", candidate.value("city_variant", false)},
-                {"has_return_mark", false}};
-        }
+        const auto candidate = nlohmann::json::parse(encoded.begin(), encoded.begin() + size);
+        if (!candidate.is_object() || !candidate.contains("state") ||
+            !candidate.contains("pending")) return;
+        const auto state = ooccoo::decode(candidate["state"]);
+        const auto pending = ooccoo::bounded_integer(candidate["pending"], 0x1FF);
+        if (state && pending) ooccooState_.restore(*state, static_cast<uint16_t>(*pending));
     } catch (const nlohmann::json::exception&) {
-        // Corrupt or old optional companion data is ignored; vanilla save data
-        // remains authoritative and untouched.
+        // Ignore corrupt/legacy companion data. Bind from the selected file's
+        // proven dungeon flags later; never adopt the preceding save's Note.
     }
 }
 
@@ -2629,13 +2720,13 @@ void GameAdapter::replace_bottle_source_state(const nlohmann::json& message) {
 }
 
 void GameAdapter::notify_local_save_written() {
-    if (sharedOoccooState_.is_object() && sharedOoccooState_.value("exists", false) &&
-        !sharedOoccooState_.value("has_return_mark", false)) {
-        const std::string encoded = sharedOoccooState_.dump();
-        (void)svc_save->set_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), encoded.size());
-    } else {
-        (void)svc_save->delete_blob(mod_ctx, kOoccooSaveBlob.data());
-    }
+    bind_ooccoo_to_save();
+    const nlohmann::json state = {
+        {"state", ooccoo_snapshot_state()}, {"pending", ooccooState_.pending()},
+    };
+    const std::string encoded = state.dump();
+    (void)svc_save->set_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), encoded.size());
+    (void)svc_save->delete_blob(mod_ctx, kLegacyOoccooSaveBlob.data());
     persist_bottle_source_state();
 }
 
@@ -2932,6 +3023,10 @@ void GameAdapter::consume_progression_prompt_input() {
 }
 
 void GameAdapter::clear_disabled_sync_flags_state() {
+    ooccooState_.reset();
+    ooccooBoundToSave_ = false;
+    ooccooCatchupPending_ = true;
+    ooccooReplyPending_ = false;
     deferredSwitches_.clear();
     deferredFaronInbound_.clear();
     pendingDarkClears_.fill(0);
@@ -3329,6 +3424,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         flush_story_events();
         poll_local_state(true);
         apply_shared_ooccoo_local_form();
+        flush_ooccoo_catchup();
         if (++collectibleRepairTicks_ >= 60) {
             collectibleRepairTicks_ = 0;
             reapply_observed_memory_items_for_current_stage();
@@ -3504,6 +3600,13 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
     }
     const uint8_t itemToApply = static_cast<uint8_t>(itemId);
 
+    const bool ooccooGrant = ooccoo::is_grant(itemToApply);
+    if (ooccooGrant && !ooccoo_sync_active()) return ApplyResult::IgnoredByPolicy;
+    if (ooccooGrant && (!message.payload.contains("ooccoo_state") ||
+        !ooccoo::decode(message.payload["ooccoo_state"]))) {
+        return reject("randomizer Ooccoo reward requires version 2 acquisition metadata");
+    }
+
     std::string checkName;
     if (const auto check = message.payload.find("check_name");
         check != message.payload.end()) {
@@ -3544,7 +3647,11 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
     // implementation; never resolve the remote check a second time.
     // Currency is applied by rupee_count, not twice via this item grant too.
     // Still retain the check's collected flag and its player notification.
-    if (remote_pickup_requires_grant(itemToApply))
+    if (ooccooGrant) {
+        if (!accept_ooccoo_state(message.payload["ooccoo_state"]))
+            return ApplyResult::IgnoredByPolicy;
+        apply_shared_ooccoo_local_form();
+    } else if (remote_pickup_requires_grant(itemToApply))
         execItemGet(itemToApply, 0, nullptr);
     else if (rupee_pickup_amount(itemToApply) != 0)
         dComIfGs_onItemFirstBit(itemToApply);
@@ -3773,6 +3880,8 @@ void GameAdapter::consume_welcome_membership(const nlohmann::json& message) {
 }
 
 void GameAdapter::peer_joined(std::string_view peerId, std::string_view name) {
+    // Coalesce membership changes; read the save only on a ready game tick.
+    ooccooCatchupPending_ = true;
     peerNames_[std::string(peerId)] = std::string(name);
     publish_player_color();
     push_online_notification((name.empty() ? std::string(peerId) : std::string(name)) +
@@ -3884,9 +3993,10 @@ void GameAdapter::reset_session() {
     progressionTicks_ = 0;
     presenceTicks_ = 0;
     localPoseSequence_ = 0;
-    sharedOoccooState_ = nlohmann::json{{"exists", false}};
-    sharedOoccooAuthoritative_ = false;
-    sharedOoccooBoundToSave_ = false;
+    ooccooState_.reset();
+    ooccooBoundToSave_ = false;
+    ooccooCatchupPending_ = true;
+    ooccooReplyPending_ = false;
     localObservedState_ = nlohmann::json();
     stableStageName_.clear();
     stableRoom_ = -128;
@@ -4556,9 +4666,12 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         return ApplyResult::Applied;
     }
     if (type == "ooccoo_state") {
+        if (message.contains("request_state") && !message["request_state"].is_boolean())
+            return reject("Ooccoo request_state must be boolean");
         if (!accept_ooccoo_state(message.value("state", nlohmann::json::object()))) {
             return ApplyResult::IgnoredByPolicy;
         }
+        if (message.value("request_state", false)) ooccooReplyPending_ = true;
         apply_shared_ooccoo_local_form();
         return ApplyResult::Applied;
     }
@@ -4589,7 +4702,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         case 3: dComIfGs_onStageBossEnemy(stage); break;
         case 4: dComIfGs_onStageLife(stage); break;
         case 5: dComIfGs_onStageBossDemo(stage); break;
-        case 6: dComIfGs_onDungeonItemWarp(stage); break;
+        case 6: return ApplyResult::IgnoredByPolicy; // Use versioned Ooccoo receipts.
         case 7: dComIfGs_onStageMiddleBoss(stage); break;
         }
         return ApplyResult::Applied;
@@ -4978,168 +5091,88 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
     return reject("unhandled progression type: " + type);
 }
 
-bool GameAdapter::accept_ooccoo_state(const nlohmann::json& state) {
-    if (!state.is_object() || opening_or_title_active()) return false;
-    const bool exists = state.value("exists", false);
-    if (!exists) {
-        const int clearStage = state.value("clear_stage", -1);
-        if (clearStage >= 0 && sharedOoccooState_.is_object() &&
-            sharedOoccooState_.value("exists", false) &&
-            sharedOoccooState_.value("owner_stage", -1) != clearStage) {
-            return false;
-        }
-        sharedOoccooState_ = {{"exists", false}};
-        if (clearStage >= 0) sharedOoccooState_["clear_stage"] = clearStage;
-        sharedOoccooAuthoritative_ = true;
-        sharedOoccooBoundToSave_ = true;
-        return true;
-    }
+bool GameAdapter::ooccoo_sync_active() const {
+    return syncFlagsEnabled_ && transport_.status().welcomed && !opening_or_title_active();
+}
 
-    const int owner = state.value("owner_stage", -1);
-    const bool hasMark = state.value("has_return_mark", false);
-    if (!valid_stage(owner)) return false;
-    nlohmann::json decoded = {
-        {"exists", true}, {"owner_stage", owner},
-        {"city_variant", state.value("city_variant", false)},
-        {"has_return_mark", hasMark},
-    };
-    if (hasMark) {
-        const std::string returnStage = state.value("return_stage", std::string());
-        const int room = state.value("return_room", -2);
-        const float x = state.value("return_x", std::numeric_limits<float>::quiet_NaN());
-        const float y = state.value("return_y", std::numeric_limits<float>::quiet_NaN());
-        const float z = state.value("return_z", std::numeric_limits<float>::quiet_NaN());
-        const int angle = state.value("return_angle", 0);
-        if (returnStage.empty() || returnStage.size() >= 8 || room < -1 || room > 63 ||
-            angle < std::numeric_limits<int16_t>::min() ||
-            angle > std::numeric_limits<int16_t>::max() ||
-            !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
-            return false;
-        }
-        decoded.update({
-            {"return_stage", returnStage}, {"return_room", room},
-            {"return_x", x}, {"return_y", y}, {"return_z", z},
-            {"return_angle", angle},
-        });
-    }
-    sharedOoccooState_ = std::move(decoded);
-    sharedOoccooAuthoritative_ = true;
-    sharedOoccooBoundToSave_ = true;
+void GameAdapter::bind_ooccoo_to_save() {
+    if (ooccooBoundToSave_ || opening_or_title_active()) return;
+    ooccooState_.seed(native_ooccoo_facts(true, stage_ready()));
+    ooccooBoundToSave_ = true;
+}
+
+void GameAdapter::flush_ooccoo_catchup() {
+    if ((!ooccooCatchupPending_ && !ooccooReplyPending_) || !ooccoo_sync_active() ||
+        !stage_ready() || manualReloadPending_) return;
+    nlohmann::json packet = {{"type", "ooccoo_state"}, {"state", ooccoo_snapshot_state()}};
+    // The request is an envelope field, never part of the saved receipt set.
+    // A newcomer that joined at the title screen requests again on save load.
+    // Replies do not request another reply; simultaneous joins cannot loop.
+    if (ooccooCatchupPending_) packet["request_state"] = true;
+    publish_local(std::move(packet));
+    ooccooCatchupPending_ = false;
+    ooccooReplyPending_ = false;
+}
+
+nlohmann::json GameAdapter::ooccoo_snapshot_state() {
+    bind_ooccoo_to_save();
+    // Snapshot serialization does not infer an owner from the displayed item,
+    // clear a receipt, or turn a local warp into new network progression.
+    return ooccoo::encode(ooccoo::join(ooccooState_.progress(),
+        native_ooccoo_facts(false, stage_ready())));
+}
+
+bool GameAdapter::accept_ooccoo_state(const nlohmann::json& state) {
+    const auto decoded = ooccoo::decode(state);
+    if (!decoded || !ooccoo_sync_active()) return false;
+    bind_ooccoo_to_save();
+    ooccooState_.merge_remote(*decoded);
     return true;
 }
 
 void GameAdapter::apply_shared_ooccoo_local_form() {
-    if (!stage_ready() || opening_or_title_active()) return;
-
-    if (!sharedOoccooBoundToSave_) {
-        const nlohmann::json detached = sharedOoccooState_;
-        sharedOoccooState_ = nlohmann::json{{"exists", false}};
-        sharedOoccooBoundToSave_ = true;
-        sharedOoccooAuthoritative_ = false;
-        const int item = dComIfGs_getItem(SLOT_18, false);
-        if (item == dItemNo_DUNGEON_BACK_e) {
-            const int owner = dComIfGs_getLastWarpAcceptStage();
-            const char* stage = dComIfGs_getWarpStageName();
-            if (valid_stage(owner) && stage != nullptr && stage[0] != '\0') {
-                const cXyz pos = dComIfGs_getWarpPlayerPos();
-                sharedOoccooState_ = {{"exists", true}, {"owner_stage", owner},
-                    {"city_variant", false}, {"has_return_mark", true},
-                    {"return_stage", stage}, {"return_room", dComIfGs_getWarpRoomNo()},
-                    {"return_x", pos.x}, {"return_y", pos.y}, {"return_z", pos.z},
-                    {"return_angle", dComIfGs_getWarpPlayerAngleY()}};
-                sharedOoccooAuthoritative_ = true;
-            }
-        } else if (item == dItemNo_DUNGEON_EXIT_e ||
-                   item == dItemNo_LV7_DUNGEON_EXIT_e) {
-            const int owner = current_stage_table();
-            if (valid_stage(owner)) {
-                sharedOoccooState_ = {{"exists", true}, {"owner_stage", owner},
-                    {"city_variant", item == dItemNo_LV7_DUNGEON_EXIT_e},
-                    {"has_return_mark", false}};
-                sharedOoccooAuthoritative_ = true;
-            }
-        } else if (item == dItemNo_TKS_LETTER_e && detached.is_object() &&
-                   detached.value("exists", false) &&
-                   !detached.value("has_return_mark", false)) {
-            sharedOoccooState_ = detached;
-            sharedOoccooAuthoritative_ = true;
-        }
-    }
-    if (!sharedOoccooAuthoritative_ || !sharedOoccooState_.is_object()) return;
-
-    const int currentItem = dComIfGs_getItem(SLOT_18, false);
-    if (!sharedOoccooState_.value("exists", false)) {
-        if (currentItem == dItemNo_DUNGEON_EXIT_e || currentItem == dItemNo_DUNGEON_BACK_e ||
-            currentItem == dItemNo_LV7_DUNGEON_EXIT_e || currentItem == dItemNo_TKS_LETTER_e) {
-            RemoteApplicationGuard applying(applyingRemote_);
-            dComIfGs_setItem(SLOT_18, dItemNo_NONE_e);
-            dComIfGs_resetLastWarpAcceptStage();
-        }
-        return;
-    }
-
-    const int owner = sharedOoccooState_.value("owner_stage", -1);
-    if (!valid_stage(owner)) return;
-    const bool hasMark = sharedOoccooState_.value("has_return_mark", false);
-    int desiredItem = dItemNo_TKS_LETTER_e;
-    if (current_stage_table() == owner) {
-        desiredItem = sharedOoccooState_.value("city_variant", false) ?
-            dItemNo_LV7_DUNGEON_EXIT_e : dItemNo_DUNGEON_EXIT_e;
-    } else if (hasMark) {
-        desiredItem = dItemNo_DUNGEON_BACK_e;
-    }
-
+    // Metadata can arrive during loading. Only this safe, game-thread boundary
+    // writes local flags/inventory; never fight a get-item demo or warp menu.
+    if (!ooccoo_sync_active() || !stage_ready() || manualReloadPending_ ||
+        stableRoomTicks_ < kRemoteSwitchRoomInitTicks || dComIfGp_isPauseFlag() ||
+        dMeter2Info_getPauseStatus() != 0 || dMeter2Info_getWarpStatus() != 0 ||
+        dComIfGp_getPlayer(0) == nullptr) return;
+    const auto scene = current_ooccoo_scene();
+    if (scene.name.empty() || scene.room < 0 || scene.room > 63 ||
+        stableStageName_ != scene.name || stableRoom_ != scene.room) return;
+    bind_ooccoo_to_save();
+    ooccooState_.seed(native_ooccoo_facts(false, true));
+    const auto progress = ooccooState_.progress();
     RemoteApplicationGuard applying(applyingRemote_);
-    if (hasMark && desiredItem == dItemNo_DUNGEON_BACK_e) {
-        cXyz position;
-        position.set(sharedOoccooState_.value("return_x", 0.0f),
-                     sharedOoccooState_.value("return_y", 0.0f),
-                     sharedOoccooState_.value("return_z", 0.0f));
-        const std::string returnStage = sharedOoccooState_.value("return_stage", std::string());
-        dComIfGs_setLastWarpMarkItemData(returnStage.c_str(), position,
-            static_cast<s16>(sharedOoccooState_.value("return_angle", 0)),
-            static_cast<s8>(sharedOoccooState_.value("return_room", -1)), 0, 1);
-        dComIfGs_setLastWarpAcceptStage(static_cast<s8>(owner));
+    const int here = ooccoo::scene_dungeon(scene);
+    for (int stage = ooccoo::FirstDungeon; stage <= ooccoo::CityDungeon; ++stage) {
+        const auto bit = ooccoo::dungeon_bit(stage);
+        auto applyFacts = [&](dSv_memBit_c& bits) {
+            if ((progress.completed & bit) != 0) {
+                if (!bits.isStageBossEnemy()) bits.onStageBossEnemy();
+            } else if ((progress.acquired & bit) != 0) {
+                if (!bits.isDungeonItemWarp()) bits.onDungeonItemWarp();
+            }
+        };
+        applyFacts(g_dComIfG_gameInfo.info.getSavedata().getSave(stage).getBit());
+        // Don't use the broad dComIfGs stage wrapper: only an identified
+        // dungeon scene may receive live Ooccoo flags, even if a modded cave
+        // reuses that save-table number.
+        if (here == stage) applyFacts(g_dComIfG_gameInfo.info.getMemory().getBit());
     }
-    if (currentItem != desiredItem) dComIfGs_setItem(SLOT_18, static_cast<u8>(desiredItem));
-}
+    if (progress.acquired != 0 && !dComIfGs_isItemFirstBit(dItemNo_DUNGEON_EXIT_e))
+        dComIfGs_onItemFirstBit(dItemNo_DUNGEON_EXIT_e);
+    if (progress.citySpecial && !dComIfGs_isItemFirstBit(dItemNo_LV7_DUNGEON_EXIT_e))
+        dComIfGs_onItemFirstBit(dItemNo_LV7_DUNGEON_EXIT_e);
+    if (progress.unboundNote && !dComIfGs_isItemFirstBit(dItemNo_TKS_LETTER_e))
+        dComIfGs_onItemFirstBit(dItemNo_TKS_LETTER_e);
 
-nlohmann::json GameAdapter::observe_local_ooccoo_state() {
-    const bool sharedExists = sharedOoccooState_.is_object() &&
-                              sharedOoccooState_.value("exists", false);
     const int item = dComIfGs_getItem(SLOT_18, false);
-    if (item == dItemNo_DUNGEON_BACK_e) {
-        const int owner = dComIfGs_getLastWarpAcceptStage();
-        const char* stage = dComIfGs_getWarpStageName();
-        if (valid_stage(owner) && stage != nullptr && stage[0] != '\0') {
-            const cXyz pos = dComIfGs_getWarpPlayerPos();
-            const bool city = sharedExists &&
-                              sharedOoccooState_.value("owner_stage", -1) == owner &&
-                              sharedOoccooState_.value("city_variant", false);
-            return {{"exists", true}, {"owner_stage", owner}, {"city_variant", city},
-                {"has_return_mark", true}, {"return_stage", stage},
-                {"return_room", dComIfGs_getWarpRoomNo()}, {"return_x", pos.x},
-                {"return_y", pos.y}, {"return_z", pos.z},
-                {"return_angle", dComIfGs_getWarpPlayerAngleY()}};
-        }
-    }
-    if (item == dItemNo_DUNGEON_EXIT_e || item == dItemNo_LV7_DUNGEON_EXIT_e) {
-        const int owner = current_stage_table();
-        if (valid_stage(owner)) return {{"exists", true}, {"owner_stage", owner},
-            {"city_variant", item == dItemNo_LV7_DUNGEON_EXIT_e},
-            {"has_return_mark", false}};
-    }
-    if (item == dItemNo_TKS_LETTER_e && sharedExists &&
-        !sharedOoccooState_.value("has_return_mark", false)) return sharedOoccooState_;
-
-    if (sharedExists) {
-        const int clearStage = current_stage_table();
-        if (sharedOoccooState_.value("owner_stage", -1) != clearStage) {
-            return sharedOoccooState_;
-        }
-        return {{"exists", false}, {"clear_stage", clearStage}};
-    }
-    return {{"exists", false}};
+    const auto projection = ooccooState_.reconcile(
+        scene, item, local_ooccoo_return_owner(), true);
+    if (projection.resetReturn) dComIfGs_resetLastWarpAcceptStage();
+    if (projection.applied && projection.item != item)
+        dComIfGs_setItem(SLOT_18, static_cast<u8>(projection.item));
 }
 
 nlohmann::json GameAdapter::make_save_snapshot() {
@@ -5192,7 +5225,6 @@ nlohmann::json GameAdapter::make_save_snapshot() {
         if (dComIfGs_isStageBossEnemy(stage)) kinds.push_back(3);
         if (dComIfGs_isStageLife(stage)) kinds.push_back(4);
         if (dComIfGs_isStageBossDemo(stage)) kinds.push_back(5);
-        if (dComIfGs_isDungeonItemWarp(stage)) kinds.push_back(6);
         if (dComIfGs_isStageMiddleBoss(stage)) kinds.push_back(7);
         if (!kinds.empty()) dungeonStages.push_back({{"stage", stage}, {"kinds", kinds}});
 
@@ -5264,8 +5296,7 @@ nlohmann::json GameAdapter::make_save_snapshot() {
         {"collect_smell", raw_collect_smell()},
     };
 
-    sharedOoccooState_ = observe_local_ooccoo_state();
-    snapshot["ooccoo_state"] = sharedOoccooState_;
+    snapshot["ooccoo_state"] = ooccoo_snapshot_state();
     return snapshot;
 }
 
@@ -5303,6 +5334,11 @@ std::string GameAdapter::encode_manual_full_state() {
     dSv_info_c snapshotInfo = g_dComIfG_gameInfo.info;
     const int stage = current_stage_table();
     if (valid_stage(stage)) snapshotInfo.getSavedata().putSave(stage, snapshotInfo.getMemory());
+
+    auto& snapshotPlayer = snapshotInfo.getPlayer();
+    snapshotPlayer.getPlayerLastMarkInfo().init();
+    auto& snapshotItem = snapshotPlayer.getItem().mItems[SLOT_18];
+    if (ooccoo::is_form(snapshotItem)) snapshotItem = dItemNo_TKS_LETTER_e;
 
     std::vector<uint8_t> raw(kManualSyncStatePacketSize);
     std::memcpy(raw.data(), &packet, sizeof(packet));
@@ -5361,12 +5397,24 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
         if (!valid_stage(currentStage)) return false;
     }
 
+    // Ooccoo is a local travel capability, not part of the donor's position.
+    // Sanitize before copying, so the deferred replay buffers are safe too.
+    auto& donorPlayer = peerInfo.getPlayer();
+    auto& donorItem = donorPlayer.getItem().mItems[SLOT_18];
+    if (ooccoo::is_form(donorItem)) donorItem = dItemNo_TKS_LETTER_e;
+    donorPlayer.getPlayerLastMarkInfo().init();
+    if (flagsOnly && dComIfGs_getItem(SLOT_18, false) == dItemNo_DUNGEON_BACK_e &&
+        local_ooccoo_return_owner() >= 0) {
+        donorPlayer.getPlayerLastMarkInfo() =
+            g_dComIfG_gameInfo.info.getPlayer().getPlayerLastMarkInfo();
+        donorItem = dItemNo_DUNGEON_BACK_e;
+    }
+
     // Manual full/flags sync replaces save data without invoking the save
     // observer. Clear observations and deferred work from the previous state
     // before installing the peer state, or periodic repair can undo the sync.
-    // Do not merge the receiver's current items back in: an explicit manual
-    // sync is an exact inventory/equipment replacement, matching the original
-    // AIO behavior in both flags-only and sync-and-warp modes.
+    // Other items/equipment retain exact replacement semantics. The deliberate
+    // Ooccoo exception above prevents importing another player's return point.
     clear_replaced_save_progression_state();
     if (flagsOnly) {
         dSv_player_c& localPlayer = g_dComIfG_gameInfo.info.getPlayer();
@@ -5382,6 +5430,7 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
         g_dComIfG_gameInfo.info.setSavedata(syncedSave);
         g_dComIfG_gameInfo.info.setMemory(syncedSave.getSave(currentStage));
         repair_lantern_item_state();
+        dComIfGs_setItem(SLOT_18, dComIfGs_getItem(SLOT_18, false));
         pendingManualFlagsSave_.resize(sizeof(dSv_save_c));
         std::memcpy(pendingManualFlagsSave_.data(),
                     &g_dComIfG_gameInfo.info.getSavedata(), sizeof(dSv_save_c));
@@ -5394,6 +5443,7 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     g_dComIfG_gameInfo.info = peerInfo;
     g_dComIfG_gameInfo.info.getPlayer().getConfig().setVibration(vibration);
     repair_lantern_item_state();
+    dComIfGs_setItem(SLOT_18, dComIfGs_getItem(SLOT_18, false));
     pendingManualInfo_.resize(sizeof(dSv_info_c));
     std::memcpy(pendingManualInfo_.data(), &g_dComIfG_gameInfo.info, sizeof(dSv_info_c));
     pendingManualVibration_ = vibration;
@@ -5485,6 +5535,7 @@ void GameAdapter::tick_manual_transition() {
         pendingManualFlagsSave_.clear();
         repair_lantern_item_state();
     }
+    dComIfGs_setItem(SLOT_18, dComIfGs_getItem(SLOT_18, false));
     manualTransitionActive_ = false;
     localObservedState_ = nlohmann::json();
     observedRupees_ = dComIfGs_getRupee();
@@ -5493,10 +5544,21 @@ void GameAdapter::tick_manual_transition() {
 ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
     const nlohmann::json& message = routed.payload;
     if (message.value("manual_sync", false) && message.contains("full_state")) {
+        // Validate BEFORE replacing any raw save data. Old manual snapshots
+        // have no safe ownership model and are deliberately not accepted.
+        const auto ooccooProgress = message.contains("ooccoo_state") ?
+            ooccoo::decode(message["ooccoo_state"]) : std::nullopt;
+        if (!ooccooProgress) return reject("manual sync requires Ooccoo protocol version 2");
         const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
         const bool applied = apply_manual_full_state(
             message.value("full_state", std::string()), flagsOnly, routed.peerId);
-        if (applied) replace_bottle_source_state(message);
+        if (applied) {
+            replace_bottle_source_state(message);
+            ooccooState_.restore(*ooccooProgress, 0);
+            ooccooBoundToSave_ = true;
+            ooccooCatchupPending_ = true;
+            ooccooReplyPending_ = false;
+        }
         if (manualSyncState_ == ManualSyncState::Waiting &&
             manualSyncPeerId_ == routed.peerId) {
             manualSyncState_ = applied ? ManualSyncState::Succeeded : ManualSyncState::Failed;
@@ -5570,7 +5632,7 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
             case 3: dComIfGs_onStageBossEnemy(stage); break;
             case 4: dComIfGs_onStageLife(stage); break;
             case 5: dComIfGs_onStageBossDemo(stage); break;
-            case 6: dComIfGs_onDungeonItemWarp(stage); break;
+            case 6: break; // Legacy raw Ooccoo bits must never poison another area.
             case 7: dComIfGs_onStageMiddleBoss(stage); break;
             default: break;
             }
@@ -5736,7 +5798,6 @@ void GameAdapter::poll_local_state(bool publish) {
         {"malo_phase", malo_fundraising_phase()}, {"malo", dMsgObject_getFundRaising()},
         {"charlo", dMsgObject_getOffering()}, {"smell", raw_collect_smell()},
         {"bombs", nlohmann::json::array()},
-        {"ooccoo", observe_local_ooccoo_state()},
     };
     const u8 rentalBag = dMeter2Info_getRentalBombBag();
     for (int bag = 0; bag < 3; ++bag) {
@@ -5799,12 +5860,6 @@ void GameAdapter::poll_local_state(bool publish) {
                                {"item", item}, {"count", count}});
             }
         }
-    }
-    if (state["ooccoo"] != localObservedState_["ooccoo"]) {
-        sharedOoccooState_ = state["ooccoo"];
-        sharedOoccooAuthoritative_ = true;
-        sharedOoccooBoundToSave_ = true;
-        publish_local({{"type", "ooccoo_state"}, {"state", sharedOoccooState_}});
     }
     localObservedState_ = std::move(state);
 }

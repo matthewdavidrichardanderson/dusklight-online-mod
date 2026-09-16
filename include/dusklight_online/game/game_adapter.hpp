@@ -2,6 +2,7 @@
 
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/pose_playback.hpp"
+#include "dusklight_online/game/ooccoo_sync.hpp"
 #include "dusk/multiplayer/multiplayer.hpp"
 
 #include <mods/api.h>
@@ -45,6 +46,7 @@ public:
     bool request_manual_sync(std::string_view peerId, bool flagsOnly, std::string* error = nullptr);
     [[nodiscard]] bool applying_remote() const;
     [[nodiscard]] bool randomizer_active() const;
+    [[nodiscard]] bool ooccoo_sync_active() const;
 
     [[nodiscard]] bool stage_ready() const override;
     [[nodiscard]] bool allow_stage_unready(const RoutedMessage& message) const override;
@@ -134,9 +136,11 @@ private:
     bool hooksInstalled_ = false;
     SaveObserverHandle saveObserver_ = 0;
     ItemGiveHandle itemGiveObserver_ = 0;
-    bool sharedOoccooAuthoritative_ = false;
-    bool sharedOoccooBoundToSave_ = false;
-    nlohmann::json sharedOoccooState_ = {{"exists", false}};
+    // Save-scoped acquisition receipts; never stores a peer's return warp.
+    ooccoo::State ooccooState_;
+    bool ooccooBoundToSave_ = false;
+    bool ooccooCatchupPending_ = true;
+    bool ooccooReplyPending_ = false;
     nlohmann::json localObservedState_;
     std::string stableStageName_;
     int stableRoom_ = -128;
@@ -224,7 +228,9 @@ private:
     void flush_pending_dark_clears();
     bool accept_ooccoo_state(const nlohmann::json& state);
     void apply_shared_ooccoo_local_form();
-    nlohmann::json observe_local_ooccoo_state();
+    void bind_ooccoo_to_save();
+    void flush_ooccoo_catchup();
+    nlohmann::json ooccoo_snapshot_state();
     void send_snapshot_to(std::string_view peerId = {}, bool manual = false,
                           bool flagsOnly = false);
     std::string encode_manual_full_state();
