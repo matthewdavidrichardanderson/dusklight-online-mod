@@ -63,6 +63,7 @@ private:
     UiWindowHandle settingsWindow_ = 0;
     UiWindowHandle playerOptionsWindow_ = 0;
     UiWindowHandle syncWindow_ = 0;
+    UiWindowHandle lobbyWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
     UiStyleHandle overlayStyle_ = 0;
     UiElementHandle panelStatus_ = 0;
@@ -70,6 +71,16 @@ private:
     UiElementHandle windowPlayers_ = 0;
     std::string windowRenderedPlayers_;
     UiElementHandle sessionActionsHeading_ = 0;
+    std::vector<UiElementHandle> directLobbyControls_;
+    std::vector<UiElementHandle> relayLobbyControls_;
+    enum class ConnectionRole : uint8_t {
+        Host,
+        Join,
+    } connectionRole_ = ConnectionRole::Host;
+    enum class ConnectionMethod : uint8_t {
+        Direct,
+        Relay,
+    } connectionMethod_ = ConnectionMethod::Direct;
     std::string panelRenderedStatus_;
     std::string windowRenderedStatus_;
     std::string directCodeDisplay_;
@@ -117,6 +128,7 @@ private:
     void open_settings_window();
     void open_player_options_window();
     void open_sync_window();
+    void open_lobby_window(ConnectionRole role);
     void host_direct();
     void join_direct();
     void host_relay();
@@ -126,6 +138,7 @@ private:
     void refresh_manual_peer_choices();
     void request_manual_sync(bool flagsOnly);
     void set_manual_sync_pending_visual(bool pending);
+    void refresh_lobby_window();
     void begin_lobby_attempt(std::string failurePrefix);
     void notify_lobby_attempt_failure(std::string_view detail);
 
@@ -144,20 +157,21 @@ public:
                                         UiElementHandle, void*, ModError*);
     static ModResult build_sync_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                     UiElementHandle, void*, ModError*);
-    static ModResult build_direct_tab(ModContext*, UiWindowHandle, UiElementHandle,
-                                      UiElementHandle, void*, ModError*);
-    static ModResult build_relay_tab(ModContext*, UiWindowHandle, UiElementHandle,
+    static ModResult build_lobby_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                      UiElementHandle, void*, ModError*);
     static ModResult update_window(ModContext*, void*, ModError*);
     static void window_closed(ModContext*, UiWindowHandle, void*);
     static void settings_window_closed(ModContext*, UiWindowHandle, void*);
     static void sync_window_closed(ModContext*, UiWindowHandle, void*);
+    static void lobby_window_closed(ModContext*, UiWindowHandle, void*);
     static void reset_player_options(ModContext*, void*);
     static bool player_colour_locked(ModContext*, void*);
     void match_player_colour();
     static void open_pressed(ModContext*, void*);
     static void settings_pressed(ModContext*, void*);
     static void sync_menu_pressed(ModContext*, void*);
+    static void host_lobby_pressed(ModContext*, void*);
+    static void join_lobby_pressed(ModContext*, void*);
     static void menu_selected(ModContext*, void*);
     static void disconnect_pressed(ModContext*, void*);
     static void stop_hosting_pressed(ModContext*, void*);
@@ -165,6 +179,8 @@ public:
     static void join_direct_pressed(ModContext*, void*);
     static void host_relay_pressed(ModContext*, void*);
     static void join_relay_pressed(ModContext*, void*);
+    static void connection_method_get(ModContext*, void*, UiControlValue*);
+    static void connection_method_set(ModContext*, void*, const UiControlValue*);
     static void direct_code_get(ModContext*, void*, UiControlValue*);
     static void direct_code_set(ModContext*, void*, const UiControlValue*);
     static void relay_code_get(ModContext*, void*, UiControlValue*);

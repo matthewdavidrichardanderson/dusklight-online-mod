@@ -56,12 +56,13 @@ ModResult add_config(const char* name, ConfigVarType type, const char* defaultSt
 
 bool never_modified(ModContext*, void*) { return false; }
 
-void add_bound_control(UiElementHandle pane, UiControlKind kind, const char* label,
-                       ConfigVarHandle variable, int64_t minimum = 0,
-                       int64_t maximum = 0, int64_t step = 1,
-                       int32_t maxLength = 0, UiPredicateFn isDisabled = nullptr,
-                       void* userData = nullptr, const char* styleClass = nullptr,
-                       const char* layoutClass = nullptr, const char* helpRml = nullptr) {
+UiElementHandle add_bound_control(UiElementHandle pane, UiControlKind kind, const char* label,
+                                  ConfigVarHandle variable, int64_t minimum = 0,
+                                  int64_t maximum = 0, int64_t step = 1,
+                                  int32_t maxLength = 0, UiPredicateFn isDisabled = nullptr,
+                                  void* userData = nullptr, const char* styleClass = nullptr,
+                                  const char* layoutClass = nullptr,
+                                  const char* helpRml = nullptr) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = kind;
     control.label = label;
@@ -83,6 +84,7 @@ void add_bound_control(UiElementHandle pane, UiControlKind kind, const char* lab
     if (element != 0 && layoutClass != nullptr) {
         svc_ui->elem_set_class(mod_ctx, element, layoutClass, true);
     }
+    return element;
 }
 
 void add_session_toggle(UiElementHandle pane, const char* label,
@@ -101,23 +103,29 @@ void add_session_toggle(UiElementHandle pane, const char* label,
     svc_ui->pane_add_control(mod_ctx, pane, &control, nullptr);
 }
 
-void add_form_string(UiElementHandle pane, const char* label, ConfigVarHandle variable,
-                     int32_t maxLength, const char* layoutClass = nullptr) {
-    add_bound_control(pane, UI_CONTROL_STRING, label, variable, 0, 0, 1, maxLength,
-                      nullptr, nullptr, "online-form-field", layoutClass);
+UiElementHandle add_form_string(UiElementHandle pane, const char* label,
+                                ConfigVarHandle variable, int32_t maxLength,
+                                const char* layoutClass = nullptr,
+                                const char* helpRml = nullptr) {
+    return add_bound_control(pane, UI_CONTROL_STRING, label, variable, 0, 0, 1, maxLength,
+                             nullptr, nullptr, "online-form-field", layoutClass, helpRml);
 }
 
 UiElementHandle add_button(UiElementHandle pane, const char* label, UiPressedFn callback,
                            void* userData, UiPredicateFn isDisabled = nullptr,
                            UiPredicateFn isModified = nullptr,
-                           const char* styleClass = nullptr) {
+                           const char* styleClass = nullptr,
+                           UiPredicateFn isSelected = nullptr,
+                           const char* helpRml = nullptr) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_BUTTON;
     control.label = label;
+    control.help_rml = helpRml;
     control.on_pressed = callback;
     control.user_data = userData;
     control.is_disabled = isDisabled;
     control.is_modified = isModified;
+    control.is_selected = isSelected;
     UiElementHandle element = 0;
     if (svc_ui->pane_add_control(mod_ctx, pane, &control, &element) == MOD_OK &&
         element != 0 && styleClass != nullptr) {
@@ -126,11 +134,35 @@ UiElementHandle add_button(UiElementHandle pane, const char* label, UiPressedFn 
     return element;
 }
 
-void add_code_control(UiElementHandle pane, const char* label, UiControlGetFn get,
-                      UiControlSetFn set, OnlineApp* app) {
+UiElementHandle add_connection_select(UiElementHandle pane, UiControlGetFn get,
+                                      UiControlSetFn set, OnlineApp* app) {
+    static constexpr const char* options[] = {"Direct", "NAT/Relay"};
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_SELECT;
+    control.label = "Connection Type";
+    control.help_rml =
+        "<p>Choose Direct for a local or port-forwarded connection, or NAT/Relay "
+        "for automatic NAT traversal with relay fallback.</p>";
+    control.get = get;
+    control.set = set;
+    control.options = options;
+    control.option_count = std::size(options);
+    control.is_modified = &never_modified;
+    control.user_data = app;
+    UiElementHandle element = 0;
+    if (svc_ui->pane_add_control(mod_ctx, pane, &control, &element) == MOD_OK && element != 0) {
+        svc_ui->elem_set_class(mod_ctx, element, "online-wide-control", true);
+    }
+    return element;
+}
+
+UiElementHandle add_code_control(UiElementHandle pane, const char* label, UiControlGetFn get,
+                                 UiControlSetFn set, OnlineApp* app,
+                                 const char* helpRml = nullptr) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_STRING;
     control.label = label;
+    control.help_rml = helpRml;
     control.get = get;
     control.set = set;
     control.is_modified = &never_modified;
@@ -142,6 +174,7 @@ void add_code_control(UiElementHandle pane, const char* label, UiControlGetFn ge
         svc_ui->elem_set_class(mod_ctx, element, "online-form-field", true);
         svc_ui->elem_set_class(mod_ctx, element, "online-code-row", true);
     }
+    return element;
 }
 
 std::string rml_escape(std::string_view text) {
@@ -513,6 +546,10 @@ window content pane.online-session-pane > button:not(:disabled):selected {
     opacity: 1;
     background-color: rgba(17, 16, 10, 0%);
 }
+window content pane.online-form-pane > button.online-connection-hidden,
+window content pane.online-form-pane > select-button.online-connection-hidden {
+    display: none;
+}
 )RCSS";
 
 const char* mode_text(net::Mode mode) {
@@ -834,6 +871,10 @@ void OnlineApp::shutdown() {
         svc_ui->window_close(mod_ctx, syncWindow_);
         syncWindow_ = 0;
     }
+    if (lobbyWindow_ != 0) {
+        svc_ui->window_close(mod_ctx, lobbyWindow_);
+        lobbyWindow_ = 0;
+    }
     if (window_ != 0) {
         svc_ui->window_close(mod_ctx, window_);
         window_ = 0;
@@ -1078,23 +1119,15 @@ void OnlineApp::open_window() {
         return;
     }
     refresh_manual_peer_choices();
-    static UiTabDesc tabs[3];
-    tabs[0] = UI_TAB_DESC_INIT;
-    tabs[0].title = "Session";
-    tabs[0].build = &OnlineApp::build_session_tab;
-    tabs[0].update = &OnlineApp::update_window;
-    tabs[0].user_data = this;
-    tabs[1] = UI_TAB_DESC_INIT;
-    tabs[1].title = "Direct";
-    tabs[1].build = &OnlineApp::build_direct_tab;
-    tabs[1].user_data = this;
-    tabs[2] = UI_TAB_DESC_INIT;
-    tabs[2].title = "NAT/Relay";
-    tabs[2].build = &OnlineApp::build_relay_tab;
-    tabs[2].user_data = this;
+    static UiTabDesc tab;
+    tab = UI_TAB_DESC_INIT;
+    tab.title = "Session";
+    tab.build = &OnlineApp::build_session_tab;
+    tab.update = &OnlineApp::update_window;
+    tab.user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
-    desc.tabs = tabs;
-    desc.tab_count = std::size(tabs);
+    desc.tabs = &tab;
+    desc.tab_count = 1;
     desc.rcss = kOnlineWindowRcss;
     desc.on_closed = &OnlineApp::window_closed;
     desc.user_data = this;
@@ -1148,6 +1181,23 @@ void OnlineApp::open_sync_window() {
     desc.on_closed = &OnlineApp::sync_window_closed;
     desc.user_data = this;
     svc_ui->window_push(mod_ctx, &desc, &syncWindow_);
+}
+
+void OnlineApp::open_lobby_window(ConnectionRole role) {
+    if (lobbyWindow_ != 0) return;
+    connectionRole_ = role;
+    static UiTabDesc tab;
+    tab = UI_TAB_DESC_INIT;
+    tab.title = role == ConnectionRole::Host ? "Host lobby" : "Join lobby";
+    tab.build = &OnlineApp::build_lobby_tab;
+    tab.user_data = this;
+    UiWindowDesc desc = UI_WINDOW_DESC_INIT;
+    desc.tabs = &tab;
+    desc.tab_count = 1;
+    desc.rcss = kOnlineWindowRcss;
+    desc.on_closed = &OnlineApp::lobby_window_closed;
+    desc.user_data = this;
+    svc_ui->window_push(mod_ctx, &desc, &lobbyWindow_);
 }
 
 void OnlineApp::refresh_manual_peer_choices() {
@@ -1464,10 +1514,10 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     app.manualSyncWarpButton_ = 0;
     app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
-    svc_ui->pane_add_section(mod_ctx, left, "Status");
-    const std::string status = app.dashboard_rml();
-    svc_ui->pane_add_rml(mod_ctx, left, status.c_str(), &app.windowStatus_);
-    app.windowRenderedStatus_ = status;
+
+    svc_ui->pane_add_section(mod_ctx, left, "PLAY");
+    add_button(left, "Host lobby", &OnlineApp::host_lobby_pressed, &app);
+    add_button(left, "Join lobby", &OnlineApp::join_lobby_pressed, &app);
 
     svc_ui->pane_add_section(mod_ctx, left, "Session");
     add_button(left, "Player options", &OnlineApp::player_options_pressed, &app);
@@ -1489,6 +1539,10 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                &OnlineApp::joiner_inactive, nullptr, "online-danger-action");
 
     svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
+    svc_ui->pane_add_section(mod_ctx, right, "Status");
+    const std::string status = app.dashboard_rml();
+    svc_ui->pane_add_rml(mod_ctx, right, status.c_str(), &app.windowStatus_);
+    app.windowRenderedStatus_ = status;
     svc_ui->pane_add_section(mod_ctx, right, "Connected players");
     const std::string players = app.connected_players_rml();
     svc_ui->pane_add_rml(mod_ctx, right, players.c_str(), &app.windowPlayers_);
@@ -1621,81 +1675,161 @@ ModResult OnlineApp::build_sync_tab(ModContext*, UiWindowHandle, UiElementHandle
     return MOD_OK;
 }
 
-ModResult OnlineApp::build_direct_tab(ModContext*, UiWindowHandle, UiElementHandle left,
-                                      UiElementHandle right, void* data, ModError*) {
-    auto& app = *static_cast<OnlineApp*>(data);
-    // Activating any tab destroys the previous tab's elements.
-    app.windowStatus_ = 0;
-    app.windowPlayers_ = 0;
-    app.sessionActionsHeading_ = 0;
-    svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
-    svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
-    svc_ui->pane_add_section(mod_ctx, left, "Host direct");
-    add_button(left, "Host direct lobby", &OnlineApp::host_direct_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
-               &OnlineApp::direct_host_inactive, nullptr, "online-danger-action");
-    add_form_string(left, "Player name", app.config_.playerName, 32);
-    add_form_string(left, "Lobby name", app.config_.directRoom, 64, "online-half-field");
-    add_form_string(left, "Host address", app.config_.publicHost, 255, "online-half-field");
-    add_bound_control(left, UI_CONTROL_NUMBER, "Port", app.config_.port, 1, 65535, 1,
-                      0, nullptr, nullptr, "online-form-field", "online-half-field");
-    add_code_control(left, "Invite code", &OnlineApp::direct_code_get,
-                     &OnlineApp::direct_code_set, &app);
-    add_button(left, "Copy", &OnlineApp::copy_direct_code_pressed, &app,
-               nullptr, nullptr, "online-copy-action");
-    svc_ui->pane_add_section(mod_ctx, right, "Join direct");
-    add_button(right, "Join direct lobby", &OnlineApp::join_direct_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
-               &OnlineApp::direct_join_inactive, nullptr, "online-danger-action");
-    add_form_string(right, "Player name", app.config_.playerName, 32);
-    add_code_control(right, "Invite code", &OnlineApp::direct_code_get,
-                     &OnlineApp::direct_code_set, &app);
-    add_button(right, "Paste", &OnlineApp::paste_direct_code_pressed, &app,
-               nullptr, nullptr, "online-copy-action");
-    return MOD_OK;
+void OnlineApp::refresh_lobby_window() {
+    const bool direct = connectionMethod_ == ConnectionMethod::Direct;
+    const auto set_visible = [](const std::vector<UiElementHandle>& controls, bool visible) {
+        for (const UiElementHandle control : controls) {
+            if (control != 0) {
+                svc_ui->elem_set_class(mod_ctx, control, "online-connection-hidden", !visible);
+            }
+        }
+    };
+    set_visible(directLobbyControls_, direct);
+    set_visible(relayLobbyControls_, !direct);
 }
 
-ModResult OnlineApp::build_relay_tab(ModContext*, UiWindowHandle, UiElementHandle left,
+ModResult OnlineApp::build_lobby_tab(ModContext*, UiWindowHandle, UiElementHandle left,
                                      UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
-    // Activating any tab destroys the previous tab's elements.
-    app.windowStatus_ = 0;
-    app.windowPlayers_ = 0;
-    app.sessionActionsHeading_ = 0;
+    app.directLobbyControls_.clear();
+    app.relayLobbyControls_.clear();
     svc_ui->elem_set_class(mod_ctx, left, "online-form-pane", true);
-    svc_ui->elem_set_class(mod_ctx, right, "online-form-pane", true);
-    svc_ui->pane_add_section(mod_ctx, left, "Host NAT/Relay");
-    add_button(left, "Host NAT/Relay lobby", &OnlineApp::host_relay_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
-               &OnlineApp::relay_host_inactive, nullptr, "online-danger-action");
-    add_form_string(left, "Player name", app.config_.playerName, 32);
-    add_code_control(left, "Relay code", &OnlineApp::relay_code_get,
-                     &OnlineApp::relay_code_set, &app);
-    add_button(left, "Copy", &OnlineApp::copy_relay_code_pressed, &app,
-               nullptr, nullptr, "online-copy-action");
-    add_form_string(left, "Lobby name", app.config_.relayRoom, 64, "online-half-field");
-    add_form_string(left, "Password", app.config_.relayPassword, 128, "online-half-field");
-    add_bound_control(left, UI_CONTROL_TOGGLE,
-                      "Use relay on this PC", app.config_.relayLocal,
-                      0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
-    svc_ui->pane_add_section(mod_ctx, right, "Join NAT/Relay");
-    add_button(right, "Join NAT/Relay lobby", &OnlineApp::join_relay_pressed, &app,
-               &OnlineApp::session_active, nullptr, "online-primary-action");
-    add_button(right, "Disconnect", &OnlineApp::disconnect_pressed, &app,
-               &OnlineApp::relay_join_inactive, nullptr, "online-danger-action");
-    add_form_string(right, "Player name", app.config_.playerName, 32);
-    add_code_control(right, "Relay code", &OnlineApp::relay_code_get,
-                     &OnlineApp::relay_code_set, &app);
-    add_button(right, "Paste", &OnlineApp::paste_relay_code_pressed, &app,
-               nullptr, nullptr, "online-copy-action");
-    add_form_string(right, "Lobby name", app.config_.relayRoom, 64, "online-half-field");
-    add_form_string(right, "Password", app.config_.relayPassword, 128, "online-half-field");
-    add_bound_control(right, UI_CONTROL_TOGGLE,
-                      "Use relay on this PC", app.config_.relayLocal,
-                      0, 0, 1, 0, nullptr, nullptr, "online-wide-control");
+
+    svc_ui->pane_add_section(mod_ctx, left, "Connection");
+    add_connection_select(left, &OnlineApp::connection_method_get,
+                          &OnlineApp::connection_method_set, &app);
+
+    svc_ui->pane_add_section(mod_ctx, left, "Settings");
+    const auto keep = [](std::vector<UiElementHandle>& controls, UiElementHandle control) {
+        if (control != 0) controls.push_back(control);
+    };
+
+    if (app.connectionRole_ == ConnectionRole::Host) {
+        keep(app.directLobbyControls_,
+             add_button(left, "Host direct lobby", &OnlineApp::host_direct_pressed, &app,
+                        &OnlineApp::session_active, nullptr, "online-primary-action", nullptr,
+                        "<p>Start hosting with the direct-connection settings below.</p>"));
+        keep(app.directLobbyControls_,
+             add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+                        &OnlineApp::direct_host_inactive, nullptr, "online-danger-action", nullptr,
+                        "<p>Close the current direct lobby and disconnect every guest.</p>"));
+        keep(app.directLobbyControls_,
+             add_form_string(left, "Player name", app.config_.playerName, 32, nullptr,
+                             "<p>The name other players will see for you.</p>"));
+        keep(app.directLobbyControls_,
+             add_form_string(left, "Lobby name", app.config_.directRoom, 64,
+                             "online-half-field",
+                             "<p>The name included in the direct invite code.</p>"));
+        keep(app.directLobbyControls_,
+             add_form_string(left, "Host address", app.config_.publicHost, 255,
+                             "online-half-field",
+                             "<p>The public IP address or hostname guests should connect to.</p>"));
+        keep(app.directLobbyControls_,
+             add_bound_control(left, UI_CONTROL_NUMBER, "Port", app.config_.port, 1, 65535, 1,
+                               0, nullptr, nullptr, "online-form-field", "online-half-field",
+                               "<p>The UDP port used for the direct connection.</p>"));
+        keep(app.directLobbyControls_,
+             add_code_control(left, "Invite code", &OnlineApp::direct_code_get,
+                              &OnlineApp::direct_code_set, &app,
+                              "<p>Share this code with players who want to join directly.</p>"));
+        keep(app.directLobbyControls_,
+             add_button(left, "Copy", &OnlineApp::copy_direct_code_pressed, &app,
+                        nullptr, nullptr, "online-copy-action", nullptr,
+                        "<p>Copy the direct invite code to the clipboard.</p>"));
+
+        keep(app.relayLobbyControls_,
+             add_button(left, "Host NAT/Relay lobby", &OnlineApp::host_relay_pressed, &app,
+                        &OnlineApp::session_active, nullptr, "online-primary-action", nullptr,
+                        "<p>Create a lobby using NAT traversal with relay fallback.</p>"));
+        keep(app.relayLobbyControls_,
+             add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+                        &OnlineApp::relay_host_inactive, nullptr, "online-danger-action", nullptr,
+                        "<p>Close the current NAT/Relay lobby and disconnect every guest.</p>"));
+        keep(app.relayLobbyControls_,
+             add_form_string(left, "Player name", app.config_.playerName, 32, nullptr,
+                             "<p>The name other players will see for you.</p>"));
+        keep(app.relayLobbyControls_,
+             add_form_string(left, "Lobby name", app.config_.relayRoom, 64,
+                             "online-half-field",
+                             "<p>The lobby name guests must enter to find your session.</p>"));
+        keep(app.relayLobbyControls_,
+             add_form_string(left, "Password", app.config_.relayPassword, 128,
+                             "online-half-field",
+                             "<p>An optional password guests must enter to join the lobby.</p>"));
+        keep(app.relayLobbyControls_,
+             add_bound_control(left, UI_CONTROL_TOGGLE, "Use relay on this PC",
+                               app.config_.relayLocal, 0, 0, 1, 0, nullptr, nullptr,
+                               "online-wide-control", nullptr,
+                               "<p>Run the relay service locally instead of using the server in the relay code.</p>"));
+        keep(app.relayLobbyControls_,
+             add_code_control(left, "Relay code", &OnlineApp::relay_code_get,
+                              &OnlineApp::relay_code_set, &app,
+                              "<p>The connection code for the relay server used by this lobby.</p>"));
+        keep(app.relayLobbyControls_,
+             add_button(left, "Copy", &OnlineApp::copy_relay_code_pressed, &app,
+                        nullptr, nullptr, "online-copy-action", nullptr,
+                        "<p>Copy the relay server code to the clipboard.</p>"));
+    } else {
+        keep(app.directLobbyControls_,
+             add_button(left, "Join direct lobby", &OnlineApp::join_direct_pressed, &app,
+                        &OnlineApp::session_active, nullptr, "online-primary-action", nullptr,
+                        "<p>Join the direct lobby described by the invite code below.</p>"));
+        keep(app.directLobbyControls_,
+             add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+                        &OnlineApp::direct_join_inactive, nullptr, "online-danger-action", nullptr,
+                        "<p>Leave the current direct lobby.</p>"));
+        keep(app.directLobbyControls_,
+             add_form_string(left, "Player name", app.config_.playerName, 32, nullptr,
+                             "<p>The name other players will see for you.</p>"));
+        keep(app.directLobbyControls_,
+             add_code_control(left, "Invite code", &OnlineApp::direct_code_get,
+                              &OnlineApp::direct_code_set, &app,
+                              "<p>The direct invite code shared by the host.</p>"));
+        keep(app.directLobbyControls_,
+             add_button(left, "Paste", &OnlineApp::paste_direct_code_pressed, &app,
+                        nullptr, nullptr, "online-copy-action", nullptr,
+                        "<p>Paste a direct invite code from the clipboard.</p>"));
+
+        keep(app.relayLobbyControls_,
+             add_button(left, "Join NAT/Relay lobby", &OnlineApp::join_relay_pressed, &app,
+                        &OnlineApp::session_active, nullptr, "online-primary-action", nullptr,
+                        "<p>Join using NAT traversal with relay fallback.</p>"));
+        keep(app.relayLobbyControls_,
+             add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+                        &OnlineApp::relay_join_inactive, nullptr, "online-danger-action", nullptr,
+                        "<p>Leave the current NAT/Relay lobby.</p>"));
+        keep(app.relayLobbyControls_,
+             add_form_string(left, "Player name", app.config_.playerName, 32, nullptr,
+                             "<p>The name other players will see for you.</p>"));
+        keep(app.relayLobbyControls_,
+             add_form_string(left, "Lobby name", app.config_.relayRoom, 64,
+                             "online-half-field",
+                             "<p>The exact lobby name supplied by the host.</p>"));
+        keep(app.relayLobbyControls_,
+             add_form_string(left, "Password", app.config_.relayPassword, 128,
+                             "online-half-field",
+                             "<p>The lobby password supplied by the host, if one is required.</p>"));
+        keep(app.relayLobbyControls_,
+             add_bound_control(left, UI_CONTROL_TOGGLE, "Use relay on this PC",
+                               app.config_.relayLocal, 0, 0, 1, 0, nullptr, nullptr,
+                               "online-wide-control", nullptr,
+                               "<p>Connect through a relay service running on this PC.</p>"));
+        keep(app.relayLobbyControls_,
+             add_code_control(left, "Relay code", &OnlineApp::relay_code_get,
+                              &OnlineApp::relay_code_set, &app,
+                              "<p>The connection code for the relay server used by the host.</p>"));
+        keep(app.relayLobbyControls_,
+             add_button(left, "Paste", &OnlineApp::paste_relay_code_pressed, &app,
+                        nullptr, nullptr, "online-copy-action", nullptr,
+                        "<p>Paste a relay server code from the clipboard.</p>"));
+    }
+
+    svc_ui->pane_add_section(mod_ctx, right,
+                             app.connectionRole_ == ConnectionRole::Host ?
+                                 "Host lobby" : "Join lobby");
+    svc_ui->pane_add_text(mod_ctx, right,
+                          "Select an option to see its description.", nullptr);
+    app.refresh_lobby_window();
     return MOD_OK;
 }
 
@@ -1767,6 +1901,13 @@ void OnlineApp::sync_window_closed(ModContext*, UiWindowHandle, void* data) {
     app.manualSyncWarpButton_ = 0;
 }
 
+void OnlineApp::lobby_window_closed(ModContext*, UiWindowHandle, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.lobbyWindow_ = 0;
+    app.directLobbyControls_.clear();
+    app.relayLobbyControls_.clear();
+}
+
 bool OnlineApp::player_colour_locked(ModContext*, void* data) {
     return static_cast<OnlineApp*>(data)->bool_value(
         static_cast<OnlineApp*>(data)->config_.matchOutfitColor, true);
@@ -1786,6 +1927,12 @@ void OnlineApp::settings_pressed(ModContext*, void* data) {
 void OnlineApp::sync_menu_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->open_sync_window();
 }
+void OnlineApp::host_lobby_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->open_lobby_window(ConnectionRole::Host);
+}
+void OnlineApp::join_lobby_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->open_lobby_window(ConnectionRole::Join);
+}
 void OnlineApp::menu_selected(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }
 void OnlineApp::disconnect_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->disconnect(); }
 void OnlineApp::stop_hosting_pressed(ModContext*, void* data) {
@@ -1797,6 +1944,16 @@ void OnlineApp::host_direct_pressed(ModContext*, void* data) { static_cast<Onlin
 void OnlineApp::join_direct_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->join_direct(); }
 void OnlineApp::host_relay_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->host_relay(); }
 void OnlineApp::join_relay_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->join_relay(); }
+void OnlineApp::connection_method_get(ModContext*, void* data, UiControlValue* value) {
+    value->int_value = static_cast<OnlineApp*>(data)->connectionMethod_ ==
+                               ConnectionMethod::Relay ? 1 : 0;
+}
+void OnlineApp::connection_method_set(ModContext*, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.connectionMethod_ = value->int_value == 1 ? ConnectionMethod::Relay :
+                                                   ConnectionMethod::Direct;
+    app.refresh_lobby_window();
+}
 void OnlineApp::direct_code_get(ModContext*, void* data, UiControlValue* value) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.directCodeDisplay_ = app.string_value(app.config_.directInvite);
