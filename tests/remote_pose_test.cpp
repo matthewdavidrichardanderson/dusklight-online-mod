@@ -137,6 +137,39 @@ int main() {
         }
     }
 
+    auto powerMessage = pose_message(12, "semantic_gameplay");
+    powerMessage["state"]["power_up_timer"] = 510;
+    powerMessage["state"]["power_up_intensity"] = 0.7f;
+    PeerPoseSnapshot powerPose;
+    if (!decode_and_enforce(powerMessage, nullptr, powerPose, error) ||
+        powerPose.powerUpTimer != 510 || powerPose.powerUpIntensity != 0.7f) {
+        std::cerr << "power-up state failed to decode\n";
+        return 1;
+    }
+    powerMessage["sequence"] = 13;
+    powerMessage["state"].erase("power_up_timer");
+    powerMessage["state"].erase("power_up_intensity");
+    if (!decode_and_enforce(powerMessage, &powerPose, pose, error) || pose.powerUpTimer != 0 ||
+        pose.powerUpIntensity != 0.0f) {
+        std::cerr << "missing power-up state did not reset\n";
+        return 1;
+    }
+    for (const auto& bad : {json(-1), json(65536), json(0.5f), json("510")}) {
+        powerMessage["state"]["power_up_timer"] = bad;
+        if (decode_and_enforce(powerMessage, nullptr, pose, error)) {
+            std::cerr << "invalid power-up timer was accepted\n";
+            return 1;
+        }
+    }
+    powerMessage["state"].erase("power_up_timer");
+    for (const auto& bad : {json(-0.1f), json(1.1f), json("1.0")}) {
+        powerMessage["state"]["power_up_intensity"] = bad;
+        if (decode_and_enforce(powerMessage, nullptr, pose, error)) {
+            std::cerr << "invalid power-up intensity was accepted\n";
+            return 1;
+        }
+    }
+
     auto audioMessage = pose_message(1, "semantic_gameplay");
     audioMessage["state"]["active_audio_events"] = json::array({
         {{"seq", 10}, {"sound_id", 0x10000}, {"tracked", true}},

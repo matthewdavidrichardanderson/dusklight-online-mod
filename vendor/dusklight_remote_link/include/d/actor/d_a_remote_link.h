@@ -122,6 +122,7 @@ public:
                                              int i_procVar3, int i_procVar5,
                                              f32 i_frame, const cXyz& i_pos);
     void setRemoteWaterDropState(const std::array<int64_t, 6>& state, uint32_t sequence, bool strong);
+    void setRemotePowerUpState(u16 i_timer, f32 i_intensity);
     void handoffRemoteTransformEffectsTo(daRemoteLink_c* i_target);
     void setRemoteBombObjectState(const dusk::multiplayer::RemoteBombObjectSnapshot& i_bomb);
     void setRemoteHatState(const std::array<int16_t, 10>& i_rotA,
@@ -751,6 +752,8 @@ private:
     std::array<dusklight_online::game::WetState, 2> mRemoteWetState{};
     bool mRemoteWaterDropStrong = false;
     std::array<u32, 2> mRemoteWaterDropEmitters{};
+    u16 mRemotePowerUpTimer = 0;
+    f32 mRemotePowerUpIntensity = 0.0f;
     void updateRemoteWaterDrops();
     void stopRemoteWaterDrops();
 

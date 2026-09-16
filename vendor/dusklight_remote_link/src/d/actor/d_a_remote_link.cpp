@@ -4094,6 +4094,11 @@ int daRemoteLink_c::Execute() {
     for (auto& wet : mRemoteWetState) {
         wet = dusklight_online::game::advance_wet_state(wet, 1);
     }
+    if (mRemotePowerUpTimer != 0) {
+        --mRemotePowerUpTimer;
+    }
+    cLib_chaseF(&mRemotePowerUpIntensity,
+                mRemotePowerUpTimer != 0 ? 1.0f : 0.0f, 0.1f);
 
     // Refresh lighting inputs on simulation ticks, never retain a collision
     // polygon across frames or query the scene during teardown.
@@ -7155,6 +7160,11 @@ void daRemoteLink_c::setRemoteWaterDropState(const std::array<int64_t, 6>& state
     }
 }
 
+void daRemoteLink_c::setRemotePowerUpState(u16 i_timer, f32 i_intensity) {
+    mRemotePowerUpTimer = i_timer;
+    mRemotePowerUpIntensity = i_intensity;
+}
+
 void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
     if (mVisualState.form == FORM_WOLF || mpBodyModel == NULL || mpHeadModel == NULL) {
         return;
@@ -7172,14 +7182,37 @@ void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
     const s16 lowerTint = static_cast<s16>(mRemoteWetState[1].fade * wetScale);
     const GXColorS10 upperWet = {upperTint, upperTint, upperTint, static_cast<s16>(mRemoteWetState[0].fade)};
     const GXColorS10 lowerWet = {lowerTint, lowerTint, lowerTint, static_cast<s16>(mRemoteWetState[1].fade)};
-    // Native wet tint applies to Hero/Casual clothes, not Zora/Magic Armor.
-    // Transformation colour retains priority over wetness.
+    const GXColorS10 upperPower = {
+        static_cast<s16>(mRemotePowerUpIntensity * 13.0f),
+        static_cast<s16>(mRemotePowerUpIntensity * 10.0f),
+        static_cast<s16>(mRemotePowerUpIntensity * 2.0f), 255};
+    const GXColorS10 lowerPower = {
+        static_cast<s16>(mRemotePowerUpIntensity * 28.0f),
+        static_cast<s16>(mRemotePowerUpIntensity * 16.0f),
+        static_cast<s16>(mRemotePowerUpIntensity * 4.0f), 255};
+    const bool powerActive = upperPower.r != 0;
+    // Native wet tint applies only to Hero/Casual clothes. Rare Chu Jelly and
+    // Fairy Tears use this same material map on every human outfit, with the
+    // power-up colour taking priority over wetness.
     const bool wetClothes = mClothesVariant == 0 || mClothesVariant == 1;
-    const J3DGXColorS10* color =
-        i_active ? reinterpret_cast<const J3DGXColorS10*>(&tevStr.TevColor)
-                 : reinterpret_cast<const J3DGXColorS10*>(wetClothes ? &upperWet : &noColor);
-    const J3DGXColorS10* lowerColor =
-        !i_active && wetClothes ? reinterpret_cast<const J3DGXColorS10*>(&lowerWet) : color;
+    const J3DGXColorS10* color;
+    const J3DGXColorS10* lowerColor;
+    if (i_active) {
+        color = reinterpret_cast<const J3DGXColorS10*>(&tevStr.TevColor);
+        lowerColor = color;
+    } else if (powerActive) {
+        // Native draw applies both halves of this effect: the first colour is
+        // Link's overall TEV tint, while setWaterDropColor receives the second
+        // colour for every mapped clothing material.
+        tevStr.TevColor.r = upperPower.r;
+        tevStr.TevColor.g = upperPower.g;
+        tevStr.TevColor.b = upperPower.b;
+        color = reinterpret_cast<const J3DGXColorS10*>(&lowerPower);
+        lowerColor = color;
+    } else {
+        color = reinterpret_cast<const J3DGXColorS10*>(wetClothes ? &upperWet : &noColor);
+        lowerColor = wetClothes ? reinterpret_cast<const J3DGXColorS10*>(&lowerWet) : color;
+    }
 
     const auto setMaterialColor = [&color](J3DModelData* i_modelData, u16 i_index) {
         if (i_modelData == NULL || i_index >= i_modelData->getMaterialNum()) {
@@ -7196,7 +7229,7 @@ void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
     if (mClothesVariant == 3 && mpMagicArmorBodyBrk != NULL &&
         mpMagicArmorHeadBrk != NULL)
     {
-        if (i_active) {
+        if (i_active || powerActive) {
             bodyData->removeTevRegAnimator(mpMagicArmorBodyBrk);
             headData->removeTevRegAnimator(mpMagicArmorHeadBrk);
         } else {

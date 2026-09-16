@@ -217,6 +217,8 @@ struct PeerPoseSnapshot {
     // Upper/lower anchors: pose sequence, native timer, initial fade.
     std::array<int64_t, 6> waterDropState{};
     bool waterDropStrong = false;
+    uint16_t powerUpTimer = 0;
+    float powerUpIntensity = 0.0f;
     bool isWolf = false;
     bool isTransforming = false;
     bool transformFromWolf = false;

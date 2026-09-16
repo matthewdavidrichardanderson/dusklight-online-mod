@@ -826,6 +826,28 @@ bool decode_peer_pose(const json& message, const std::string& peerId,
             }
         }
         pose.waterDropStrong = state.value("water_drop_strong", false);
+        if (state.contains("power_up_timer")) {
+            const auto& timer = state["power_up_timer"];
+            if (!timer.is_number_integer() || timer < 0 ||
+                timer > std::numeric_limits<uint16_t>::max()) {
+                error = "pose contains invalid power-up timer";
+                return false;
+            }
+            pose.powerUpTimer = timer.get<uint16_t>();
+        }
+        if (state.contains("power_up_intensity")) {
+            const auto& intensity = state["power_up_intensity"];
+            if (!intensity.is_number()) {
+                error = "pose contains invalid power-up intensity";
+                return false;
+            }
+            pose.powerUpIntensity = intensity.get<float>();
+            if (!std::isfinite(pose.powerUpIntensity) || pose.powerUpIntensity < 0.0f ||
+                pose.powerUpIntensity > 1.0f) {
+                error = "pose contains invalid power-up intensity";
+                return false;
+            }
+        }
         pose.isWolf = state.value("is_wolf", false);
         pose.isTransforming = state.value("is_transforming", false);
         pose.transformFromWolf = state.value("transform_from_wolf", pose.isWolf);
