@@ -75,6 +75,7 @@ namespace dusklight_online::game {
 
 DEFINE_HOOK(&daAlink_c::checkSetNpcTks, OoccooReunionHook);
 DEFINE_HOOK(&daAlink_c::createNpcTks, OoccooWarpActorHook);
+DEFINE_HOOK(&dMeter2Info_c::warpOutProc, OoccooWarpOutHook);
 DEFINE_HOOK(&dSv_event_c::onEventBit, EventBitOnHook);
 DEFINE_HOOK(&dSv_event_c::offEventBit, EventBitOffHook);
 DEFINE_HOOK(&dSv_memBit_c::onTbox, MemoryTboxOnHook);
@@ -913,6 +914,22 @@ ooccoo::Progress native_ooccoo_facts(bool includeAcquisitions, bool includeLive)
         facts.citySpecial = dComIfGs_isItemFirstBit(dItemNo_LV7_DUNGEON_EXIT_e) ||
             dComIfGs_getItem(SLOT_18, false) == dItemNo_LV7_DUNGEON_EXIT_e;
         facts.unboundNote = dComIfGs_isItemFirstBit(dItemNo_TKS_LETTER_e);
+        // A genuine local Ooccoo warp already has the exact native return mark.
+        // Preserve it for catch-up without borrowing arbitrary save coordinates.
+        const int owner = local_ooccoo_return_owner();
+        if (dComIfGs_getItem(SLOT_18, false) == dItemNo_DUNGEON_BACK_e &&
+            ooccoo::is_dungeon(owner) && (facts.acquired & ooccoo::dungeon_bit(owner))) {
+            auto& mark = g_dComIfG_gameInfo.info.getPlayer().getPlayerLastMarkInfo();
+            const std::string_view name(mark.getName());
+            const auto baseName = ooccoo::DungeonNames[owner - ooccoo::FirstDungeon];
+            const cXyz pos = mark.getPos();
+            ooccoo::ReturnAnchor anchor{true,
+                static_cast<uint8_t>(name.size() == baseName.size() + 1),
+                static_cast<uint8_t>(mark.getRoomNo()), pos.x, pos.y, pos.z,
+                mark.getAngleY()};
+            if (ooccoo::valid_anchor(owner, anchor))
+                facts.anchors[owner - ooccoo::FirstDungeon] = anchor;
+        }
     }
     // A Note or Sr. found in an arbitrary current area is NOT evidence that
     // this area owns Ooccoo. Unbound randomized receipts come from ItemService.
@@ -942,6 +959,10 @@ HookAction ooccoo_warp_actor_pre(ModContext*, void* args, void*, void*) {
     // Covers procDungeonWarpSceneStartInit as well as checkSetNpcTks. This is
     // Link's dungeon helper only: story NPC_TKS actors remain completely native.
     return block_ooccoo_dungeon_actor(args) ? HOOK_SKIP_ORIGINAL : HOOK_CONTINUE;
+}
+
+void ooccoo_warp_out_post(ModContext*, void*, void*, void*) {
+    if (sActiveAdapter != nullptr) sActiveAdapter->notify_local_ooccoo_warp_out();
 }
 
 int bottle_slot_count() {
@@ -2068,7 +2089,10 @@ void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
     if (applyingRemote_) return;
     if (ooccoo::is_grant(info.item) && !opening_or_title_active()) {
         bind_ooccoo_to_save();
-        ooccooState_.record_local(ooccoo::receipt_for_grant(info.item, current_ooccoo_scene()));
+        auto receipt = ooccoo::receipt_for_grant(info.item, current_ooccoo_scene());
+        ooccooState_.record_local(receipt);
+        svc_log->info(mod_ctx, ("OOCCOO local grant item=" + std::to_string(info.item) +
+            " acquired=" + std::to_string(receipt.acquired)).c_str());
         // Send even if hydration just saw the native bit set by this very
         // grant. Receivers union receipts, so repeated reunion grants are safe.
         if (syncFlagsEnabled_ && transport_.status().welcomed) {
@@ -2110,6 +2134,26 @@ void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
         << std::setfill('0') << static_cast<int>(info.item);
     if (!checkName.empty()) log << " for check '" << checkName << "'";
     svc_log->info(mod_ctx, log.str().c_str());
+}
+
+void GameAdapter::notify_local_ooccoo_warp_out() {
+    // warpOutProc has already made the real Jr and adjusted its return point
+    // for special rooms. Publish those exact native fields, not a guessed
+    // point captured when Sr. was first picked up.
+    if (applyingRemote_ || !ooccoo_sync_active()) return;
+    bind_ooccoo_to_save();
+    auto facts = native_ooccoo_facts(true, true);
+    const int owner = local_ooccoo_return_owner();
+    if (!ooccoo::is_dungeon(owner) ||
+        !(facts.acquired & ooccoo::dungeon_bit(owner)) ||
+        !ooccoo::valid_anchor(owner, facts.anchors[owner - ooccoo::FirstDungeon])) {
+        svc_log->warn(mod_ctx, "OOCCOO native warp-out had no valid Jr return mark");
+        return;
+    }
+    ooccooState_.record_local(facts);
+    svc_log->info(mod_ctx, ("OOCCOO native warp-out stage=" + std::to_string(owner) +
+        " room=" + std::to_string(facts.anchors[owner - ooccoo::FirstDungeon].room)).c_str());
+    publish_local({{"type", "ooccoo_state"}, {"state", ooccoo_snapshot_state()}});
 }
 
 void GameAdapter::remember_memory_item(int stage, int flag) {
@@ -2274,6 +2318,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::install<ToggleAutoSaveHook>() != MOD_OK ||
         mods::hook::add_pre<OoccooReunionHook>(&ooccoo_reunion_pre) != MOD_OK ||
         mods::hook::add_pre<OoccooWarpActorHook>(&ooccoo_warp_actor_pre) != MOD_OK ||
+        mods::hook::add_post<OoccooWarpOutHook>(&ooccoo_warp_out_post) != MOD_OK ||
         mods::hook::add_pre<PvpDamageVectorHook>(&pvp_damage_vector_pre) != MOD_OK ||
         mods::hook::add_pre<RemoteEnemyGroupHook>(&remote_enemy_group_pre) != MOD_OK ||
         mods::hook::add_pre<RemoteWolfLockHook>(&remote_wolf_lock_pre) != MOD_OK ||
@@ -2399,6 +2444,7 @@ void GameAdapter::shutdown_hooks() {
     mods::hook::uninstall<EventBitOffHook>();
     mods::hook::uninstall<EventBitOnHook>();
     mods::hook::uninstall<OoccooWarpActorHook>();
+    mods::hook::uninstall<OoccooWarpOutHook>();
     mods::hook::uninstall<OoccooReunionHook>();
     mods::hook::uninstall<ToggleAutoSaveHook>();
 
@@ -2665,7 +2711,7 @@ void GameAdapter::notify_local_save_loaded() {
 
     size_t size = 0;
     if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), nullptr, &size) != MOD_OK ||
-        size == 0 || size > 1024) return;
+        size == 0 || size > 4096) return;
     std::string encoded(size, '\0');
     if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), &size) != MOD_OK ||
         size > encoded.size()) return;
@@ -2675,7 +2721,15 @@ void GameAdapter::notify_local_save_loaded() {
             !candidate.contains("pending")) return;
         const auto state = ooccoo::decode(candidate["state"]);
         const auto pending = ooccoo::bounded_integer(candidate["pending"], 0x1FF);
-        if (state && pending) ooccooState_.restore(*state, static_cast<uint16_t>(*pending));
+        if (state && pending) {
+            if (candidate.contains("managed_form") && !candidate["managed_form"].is_boolean())
+                return;
+            const bool legacyNote = candidate["state"].value("version", 0) == 2 &&
+                dComIfGs_getItem(SLOT_18, false) == dItemNo_TKS_LETTER_e &&
+                state->acquired != 0 && !state->unboundNote;
+            ooccooState_.restore(*state, static_cast<uint16_t>(*pending),
+                candidate.value("managed_form", legacyNote));
+        }
     } catch (const nlohmann::json::exception&) {
         // Ignore corrupt/legacy companion data. Bind from the selected file's
         // proven dungeon flags later; never adopt the preceding save's Note.
@@ -2744,6 +2798,7 @@ void GameAdapter::notify_local_save_written() {
     bind_ooccoo_to_save();
     const nlohmann::json state = {
         {"state", ooccoo_snapshot_state()}, {"pending", ooccooState_.pending()},
+        {"managed_form", ooccooState_.managed_form()},
     };
     const std::string encoded = state.dump();
     (void)svc_save->set_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), encoded.size());
@@ -5181,8 +5236,8 @@ void GameAdapter::flush_ooccoo_catchup() {
 
 nlohmann::json GameAdapter::ooccoo_snapshot_state() {
     bind_ooccoo_to_save();
-    // Snapshot serialization does not infer an owner from the displayed item,
-    // clear a receipt, or turn a local warp into new network progression.
+    // Snapshot serialization does not infer an owner from the displayed item
+    // or clear a receipt. The native warp-out hook records its mark explicitly.
     return ooccoo::encode(ooccoo::join(ooccooState_.progress(),
         native_ooccoo_facts(false, stage_ready())));
 }
@@ -5191,7 +5246,13 @@ bool GameAdapter::accept_ooccoo_state(const nlohmann::json& state) {
     const auto decoded = ooccoo::decode(state);
     if (!decoded || !ooccoo_sync_active()) return false;
     bind_ooccoo_to_save();
-    ooccooState_.merge_remote(*decoded);
+    if (ooccooState_.merge_remote(*decoded)) {
+        const auto merged = ooccooState_.progress();
+        svc_log->info(mod_ctx, ("OOCCOO remote progress acquired=" +
+            std::to_string(merged.acquired) + " completed=" +
+            std::to_string(merged.completed) + " pending=" +
+            std::to_string(ooccooState_.pending())).c_str());
+    }
     return true;
 }
 
@@ -5201,12 +5262,21 @@ void GameAdapter::apply_shared_ooccoo_local_form() {
     if (!ooccoo_sync_active() || !stage_ready() || manualReloadPending_ ||
         stableRoomTicks_ < kRemoteSwitchRoomInitTicks || dComIfGp_isPauseFlag() ||
         dMeter2Info_getPauseStatus() != 0 || dMeter2Info_getWarpStatus() != 0 ||
+        dComIfGp_isEnableNextStage() || fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq() ||
         dComIfGp_getPlayer(0) == nullptr) return;
     const auto scene = current_ooccoo_scene();
     if (scene.name.empty() || scene.room < 0 || scene.room > 63 ||
         stableStageName_ != scene.name || stableRoom_ != scene.room) return;
     bind_ooccoo_to_save();
-    ooccooState_.seed(native_ooccoo_facts(false, true));
+    const auto nativeFacts = native_ooccoo_facts(false, true);
+    const bool newlyCompleted =
+        (nativeFacts.completed & ~ooccooState_.progress().completed) != 0;
+    ooccooState_.seed(nativeFacts);
+    if (newlyCompleted && !applyingRemote_) {
+        svc_log->info(mod_ctx, ("OOCCOO local completion mask=" +
+            std::to_string(nativeFacts.completed)).c_str());
+        publish_local({{"type", "ooccoo_state"}, {"state", ooccoo_snapshot_state()}});
+    }
     const auto progress = ooccooState_.progress();
     RemoteApplicationGuard applying(applyingRemote_);
     const int here = ooccoo::scene_dungeon(scene);
@@ -5236,8 +5306,25 @@ void GameAdapter::apply_shared_ooccoo_local_form() {
     const auto projection = ooccooState_.reconcile(
         scene, item, local_ooccoo_return_owner(), true);
     if (projection.resetReturn) dComIfGs_resetLastWarpAcceptStage();
-    if (projection.applied && projection.item != item)
+    if (ooccoo::is_dungeon(projection.installReturnStage)) {
+        const int stage = projection.installReturnStage;
+        const auto& anchor = progress.anchors[stage - ooccoo::FirstDungeon];
+        if (ooccoo::valid_anchor(stage, anchor)) {
+            std::string name(ooccoo::DungeonNames[stage - ooccoo::FirstDungeon]);
+            if (anchor.variant == 1) name.push_back('B');
+            dComIfGs_setLastWarpAcceptStage(static_cast<s8>(stage));
+            dComIfGs_setWarpItemData(name.c_str(), cXyz(anchor.x, anchor.y, anchor.z),
+                                     anchor.angle, static_cast<s8>(anchor.room), 0, 1);
+            svc_log->info(mod_ctx, ("OOCCOO installed Jr return stage=" +
+                std::to_string(stage) + " room=" + std::to_string(anchor.room)).c_str());
+        }
+    }
+    if (projection.applied && projection.item != item) {
+        svc_log->info(mod_ctx, ("OOCCOO projected item " + std::to_string(item) +
+            " -> " + std::to_string(projection.item) +
+            " managed=" + std::to_string(ooccooState_.managed_form())).c_str());
         dComIfGs_setItem(SLOT_18, static_cast<u8>(projection.item));
+    }
 }
 
 nlohmann::json GameAdapter::make_save_snapshot() {
@@ -5464,8 +5551,9 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
         if (!valid_stage(currentStage)) return false;
     }
 
-    // Ooccoo is a local travel capability, not part of the donor's position.
-    // Sanitize before copying, so the deferred replay buffers are safe too.
+    // Raw save transfer must not copy the donor's personal return mark. The
+    // separate Ooccoo receipt can provide a bounded dungeon anchor instead.
+    // Sanitize before copying, so deferred replay buffers are safe too.
     auto& donorPlayer = peerInfo.getPlayer();
     auto& donorItem = donorPlayer.getItem().mItems[SLOT_18];
     if (ooccoo::is_form(donorItem)) donorItem = dItemNo_TKS_LETTER_e;
@@ -5621,7 +5709,8 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
             message.value("full_state", std::string()), flagsOnly, routed.peerId);
         if (applied) {
             replace_bottle_source_state(message);
-            ooccooState_.restore(*ooccooProgress, 0);
+            ooccooState_.restore(*ooccooProgress, 0,
+                !flagsOnly && ooccoo::entitlements(*ooccooProgress) != 0);
             ooccooBoundToSave_ = true;
             ooccooCatchupPending_ = true;
             ooccooReplyPending_ = false;

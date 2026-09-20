@@ -26,13 +26,14 @@ int main() {
             check(!decode(state), "invalid mask rejected without narrowing");
         }
     }
-    for (const auto* field : {"version", "acquired", "completed", "city_special", "unbound_note"}) {
+    for (const auto* field : {"version", "acquired", "completed", "city_special",
+                              "unbound_note", "anchors"}) {
         auto state = valid; state.erase(field);
         check(!decode(state), "incomplete state rejected");
     }
-    for (const auto& version : {json(1), json(3), json("2"), json(2.0), json(true)}) {
+    for (const auto& version : {json(1), json(5), json("4"), json(4.0), json(true)}) {
         auto state = valid; state["version"] = version;
-        check(!decode(state), "version must be exact integer 2");
+        check(!decode(state), "version must be exact integer 4 or legacy 2/3");
     }
     for (const auto* field : {"city_special", "unbound_note"}) {
         auto state = valid; state[field] = 1;
@@ -45,6 +46,31 @@ int main() {
     check(!decode(json{{"exists", false}}), "legacy empty state is not a clear");
     check(!decode(json{{"exists", true}, {"owner_stage", 25}}), "legacy cave owner rejected");
     check(!decode(json::array()) && !decode(nullptr), "nonobjects rejected");
+    Progress anchored{1, 0, false, false};
+    anchored.anchors[0] = {true, 0, 0, 10.0f, 20.0f, 30.0f, 123};
+    check(decode(encode(anchored)) == anchored, "return anchor wire round trip");
+    auto preWarpBuild = encode(anchored);
+    preWarpBuild["version"] = 3;
+    check(decode(preWarpBuild) == Progress{1, 0, false, false},
+          "previous pickup-time return points cannot create Jr");
+    auto legacy = valid;
+    legacy["version"] = 2;
+    legacy.erase("anchors");
+    check(decode(legacy) == Progress{1, 2, true, false}, "existing version 2 save migrates");
+    auto wrongStage = encode(anchored);
+    wrongStage["anchors"][1] = wrongStage["anchors"][0];
+    check(!decode(wrongStage), "anchor cannot claim a dungeon without acquisition");
+    for (const auto& bad : {json(64), json(-1), json(1.5), json("0")}) {
+        auto packet = encode(anchored);
+        packet["anchors"][0]["room"] = bad;
+        check(!decode(packet), "invalid return room rejected");
+    }
+    auto nonfinite = encode(anchored);
+    nonfinite["anchors"][0]["x"] = 1.0e30;
+    check(!decode(nonfinite), "out-of-bounds return position rejected");
+    auto hugeAngle = encode(anchored);
+    hugeAngle["anchors"][0]["angle"] = std::numeric_limits<uint64_t>::max();
+    check(!decode(hugeAngle), "unsigned angle overflow rejected before narrowing");
     check(bounded_integer(json(0x1FF), 0x1FF) == 0x1FF, "pending upper bound valid");
     check(!bounded_integer(json(0x200), 0x1FF), "pending overflow invalid");
     State live; live.merge_remote({1, 0, false, false});

@@ -74,6 +74,7 @@ public:
     void notify_local_rupees(int previous, int value);
     void notify_local_poe_pickup(int previous, int value);
     void notify_local_item_grant(const ItemGiveInfo& info);
+    void notify_local_ooccoo_warp_out();
 
     void set_player_color(uint32_t color, uint32_t outfit);
     void publish_player_color();

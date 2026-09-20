@@ -42,7 +42,13 @@ def main() -> None:
     for field in ("owner_stage", "return_stage", "return_room", "return_x", "return_y", "return_z",
                   "return_angle", "has_return_mark", "clear_stage"):
         require(f'"{field}"' not in adapter, f"no legacy wire field {field}")
-    require("dComIfGs_setLastWarpMarkItemData" not in adapter, "no constructed remote return mark")
+    require("dComIfGs_setWarpItemData(name.c_str()" in adapter and
+            "dComIfGs_setLastWarpAcceptStage(static_cast<s8>(stage))" in adapter,
+            "remote Jr receives the same native mark fields as warpOutProc")
+    require("DEFINE_HOOK(&dMeter2Info_c::warpOutProc, OoccooWarpOutHook)" in adapter and
+            "mods::hook::add_post<OoccooWarpOutHook>(&ooccoo_warp_out_post)" in adapter and
+            "ooccooState_.record_local(facts)" in adapter,
+            "native warp-out publishes the validated Jr mark separately from pickup")
     key_items = section("bool is_synced_key_item(", "bool is_synced_item_first_bit(")
     require("dItemNo_TKS_LETTER_e" not in key_items, "Note excluded from generic item_get")
     bit_hook = section("void memory_dungeon_item_on_post(", "HookAction visited_room_on_pre(")
@@ -67,6 +73,10 @@ def main() -> None:
             "active warps/menus defer mutation")
     require("if (here == stage) applyFacts" in apply, "live bit writes require validated scene identity")
     require("native_ooccoo_facts(false, true)" in apply, "reconcile cannot mint acquisitions from raw flags")
+    require("newlyCompleted" in apply and '"type", "ooccoo_state"' in apply,
+            "local boss completion publishes Ooccoo progress")
+    require("ooccoo::valid_anchor(stage, anchor)" in apply,
+            "untrusted return anchors are checked before writing native warp data")
     require("add_pre<OoccooReunionHook>" in adapter and "uninstall<OoccooReunionHook>" in adapter,
             "cave reunion hook installed and removed")
     require("add_pre<OoccooWarpActorHook>" in adapter and "uninstall<OoccooWarpActorHook>" in adapter,
@@ -80,15 +90,17 @@ def main() -> None:
             "manual receiver sanitizes before copying/replay buffers")
     snapshots = section("ApplyResult GameAdapter::apply_save_snapshot(", "void GameAdapter::poll_local_state(")
     require(snapshots.index("ooccoo::decode") < snapshots.index("apply_manual_full_state("),
-            "manual v2 ownership validated before raw save replacement")
-    require("ooccooState_.restore(*ooccooProgress, 0)" in snapshots,
+            "manual Ooccoo metadata validated before raw save replacement")
+    require("ooccooState_.restore(*ooccooProgress, 0," in snapshots,
             "manual replacement also replaces ownership metadata")
     require('"ooccoo-progress-v2"' in adapter and "delete_blob(mod_ctx, kLegacyOoccooSaveBlob" in adapter,
             "versioned save companion replaces legacy detached owner")
-    require('state.size() != 5' in wire and 'bounded_integer(state["acquired"], DungeonMask)' in wire,
+    require('state.size() != (*version >= 3 ? 6 : 5)' in wire and
+            'bounded_integer(state["acquired"], DungeonMask)' in wire,
             "wire format is strict and bounded")
-    require("coordinates" not in model[model.index("struct Progress {"):model.index("constexpr Progress join")],
-            "shared model contains no warp coordinates")
+    require("valid_anchor" in model and "choose_anchor" in model and
+            "installReturnStage" in model,
+            "bounded native return anchors converge and drive remote Jr projection")
 
     if args.dusklight_dir:
         vanilla = args.dusklight_dir.resolve()

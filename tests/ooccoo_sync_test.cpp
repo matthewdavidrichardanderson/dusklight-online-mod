@@ -28,6 +28,13 @@ constexpr Progress forestReceipt{1, 0, false, false};
 constexpr Progress minesReceipt{2, 0, false, false};
 constexpr Progress cityReceipt{64, 0, false, false};
 constexpr Progress specialReceipt{0, 0, true, false};
+constexpr ReturnAnchor forestAnchor{true, 0, 0, 10.0f, 20.0f, 30.0f, 0x1234};
+
+Progress anchored_forest_receipt() {
+    Progress receipt = forestReceipt;
+    receipt.anchors[0] = forestAnchor;
+    return receipt;
+}
 
 void scene_identity() {
     for (int stage = -10; stage < 50; ++stage) {
@@ -97,6 +104,57 @@ void inventory_and_travel() {
           "boss room inventory retained; vanilla still controls usability");
     check(sameDungeon.reconcile({"D_MN05B", 16, 3, 51}, Parent, -1, true).item == Parent,
           "miniboss substage is not treated as a cave");
+}
+
+void remote_junior_and_completion() {
+    State outside;
+    outside.merge_remote(forestReceipt);
+    check(outside.reconcile(field, None, -1, true).item == Note,
+          "remote pickup outside gives Note until an actual warp-out");
+    outside.merge_remote(anchored_forest_receipt());
+    const auto given = outside.reconcile(field, Note, -1, true);
+    check(given.item == Junior && given.installReturnStage == 16,
+          "native warp-out upgrades Note to Jr with its return destination");
+    check(outside.managed_form(), "remote Jr is tracked separately from native inventory");
+    const auto holding = outside.reconcile(field, Junior, 16, true);
+    check(holding.item == Junior && holding.installReturnStage == -1,
+          "valid Jr return mark is preserved between updates");
+    outside.merge_remote({0, 1, false, false});
+    const auto cleared = outside.reconcile(field, Junior, 16, true);
+    check(cleared.item == None && cleared.resetReturn && !outside.managed_form(),
+          "remote boss completion removes Jr and clears the mark");
+
+    State sameDungeon;
+    sameDungeon.merge_remote(anchored_forest_receipt());
+    check(sameDungeon.reconcile(forest, None, -1, true).item == Parent,
+          "same-dungeon pickup still gives Sr");
+
+    State lateAnchor;
+    lateAnchor.merge_remote(forestReceipt);
+    check(lateAnchor.reconcile(field, None, -1, true).item == Note,
+          "old receipt without a safe anchor cannot create a broken Jr");
+    lateAnchor.merge_remote(anchored_forest_receipt());
+    check(lateAnchor.reconcile(field, Note, -1, true).item == Junior,
+          "late anchor upgrades the provisional Note to Jr");
+    lateAnchor.merge_remote({0, 1, false, false});
+    check(lateAnchor.reconcile(field, Note, -1, true).item == None,
+          "managed Note also clears after remote completion");
+
+    State local;
+    local.record_local(anchored_forest_receipt());
+    check(local.reconcile(field, Parent, -1, true).item == Note,
+          "local pickup still follows vanilla outside-dungeon Sr-to-Note behavior");
+
+    State restored;
+    restored.restore(anchored_forest_receipt(), 0, true);
+    check(restored.reconcile(field, Note, -1, true).item == Junior,
+          "saved remote item retains its synthetic return destination");
+
+    auto anotherPickup = anchored_forest_receipt();
+    anotherPickup.anchors[0].room = 5;
+    check(join(anchored_forest_receipt(), anotherPickup) ==
+          join(anotherPickup, anchored_forest_receipt()),
+          "different valid pickup marks converge regardless of packet order");
 }
 
 void local_return_validation() {
@@ -232,6 +290,7 @@ void convergence_properties() {
 int main() {
     scene_identity();
     inventory_and_travel();
+    remote_junior_and_completion();
     local_return_validation();
     city_variants();
     lifecycle_and_completion();

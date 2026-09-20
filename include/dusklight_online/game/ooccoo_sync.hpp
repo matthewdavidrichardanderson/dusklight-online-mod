@@ -80,20 +80,60 @@ inline int return_owner(const ReturnMark& mark) {
     return mark.stageName == name || miniboss ? mark.owner : -1;
 }
 
-// Only durable facts cross the network. Completion dominates acquisition;
-// union makes concurrent pickups, retries and old snapshots order-independent.
+// A validated native return mark captured only after Ooccoo's warpOutProc.
+// The receiving player did not perform that warp, so vanilla has no return
+// mark to pair with Jr. Stage names are reconstructed from the
+// allowlist; the wire never supplies an arbitrary warp destination name.
+struct ReturnAnchor {
+    bool valid = false;
+    uint8_t variant = 0; // 0 = dungeon, 1 = known miniboss substage B.
+    uint8_t room = 0;
+    float x = 0, y = 0, z = 0;
+    int16_t angle = 0;
+    bool operator==(const ReturnAnchor&) const = default;
+};
+
+constexpr bool valid_anchor(int owner, const ReturnAnchor& anchor) {
+    return is_dungeon(owner) && anchor.valid && anchor.variant <= 1 && anchor.room <= 63 &&
+        std::isfinite(anchor.x) && std::isfinite(anchor.y) && std::isfinite(anchor.z) &&
+        std::abs(anchor.x) <= 10000000.0f && std::abs(anchor.y) <= 10000000.0f &&
+        std::abs(anchor.z) <= 10000000.0f;
+}
+
+constexpr ReturnAnchor choose_anchor(int owner, ReturnAnchor a, ReturnAnchor b) {
+    if (!valid_anchor(owner, a)) return valid_anchor(owner, b) ? b : ReturnAnchor{};
+    if (!valid_anchor(owner, b)) return a;
+    // Concurrent native warps must converge regardless of packet order.
+    if (a.variant != b.variant) return a.variant < b.variant ? a : b;
+    if (a.room != b.room) return a.room < b.room ? a : b;
+    if (a.x != b.x) return a.x < b.x ? a : b;
+    if (a.y != b.y) return a.y < b.y ? a : b;
+    if (a.z != b.z) return a.z < b.z ? a : b;
+    return a.angle <= b.angle ? a : b;
+}
+
+// Acquisition/completion and actual warp-out return anchors cross the network.
+// Completion dominates acquisition; union makes concurrent pickups, retries
+// and old snapshots order-independent.
 // The special City item does not set vanilla's ordinary OOCCOO_NOTE flag.
 struct Progress {
     uint8_t acquired = 0;
     uint8_t completed = 0;
     bool citySpecial = false;
     bool unboundNote = false; // A randomized/legacy item without a proven owner.
+    std::array<ReturnAnchor, 7> anchors{};
     bool operator==(const Progress&) const = default;
 };
 constexpr Progress join(Progress a, Progress b) {
-    return {static_cast<uint8_t>(a.acquired | b.acquired),
-            static_cast<uint8_t>(a.completed | b.completed),
-            a.citySpecial || b.citySpecial, a.unboundNote || b.unboundNote};
+    Progress result{static_cast<uint8_t>(a.acquired | b.acquired),
+                    static_cast<uint8_t>(a.completed | b.completed),
+                    a.citySpecial || b.citySpecial, a.unboundNote || b.unboundNote};
+    for (int stage = FirstDungeon; stage <= CityDungeon; ++stage) {
+        const auto index = static_cast<std::size_t>(stage - FirstDungeon);
+        if (result.acquired & dungeon_bit(stage))
+            result.anchors[index] = choose_anchor(stage, a.anchors[index], b.anchors[index]);
+    }
+    return result;
 }
 constexpr uint16_t entitlements(Progress p) {
     const uint8_t active = static_cast<uint8_t>(p.acquired & ~p.completed & DungeonMask);
@@ -125,13 +165,15 @@ struct Projection {
     int item;
     bool resetReturn = false;
     bool applied = false; // false keeps pending delivery across unsafe frames.
+    int installReturnStage = -1;
 };
 
 class State {
 public:
     [[nodiscard]] Progress progress() const { return progress_; }
     [[nodiscard]] uint16_t pending() const { return pending_; }
-    void reset() { progress_ = {}; pending_ = 0; }
+    [[nodiscard]] bool managed_form() const { return managedForm_; }
+    void reset() { progress_ = {}; pending_ = 0; managedForm_ = false; }
 
     // Save hydration and actual local grants don't redeliver an already owned
     // item. The engine has performed the local give itself.
@@ -142,6 +184,7 @@ public:
     void record_local(Progress facts) {
         seed(facts);
         pending_ &= static_cast<uint16_t>(~entitlements(facts));
+        if (entitlements(facts) != 0) managedForm_ = false;
     }
     bool merge_remote(Progress facts) {
         const auto before = progress_;
@@ -151,27 +194,46 @@ public:
         pending_ = static_cast<uint16_t>((pending_ | (available & ~oldEntitlements)) & available);
         return before != progress_;
     }
-    void restore(Progress facts, uint16_t pending) {
+    void restore(Progress facts, uint16_t pending, bool managedForm = false) {
         progress_ = facts;
         pending_ = static_cast<uint16_t>(pending & entitlements(progress_));
+        managedForm_ = managedForm;
     }
 
-    // The caller owns the current inventory and validated *local* return mark.
-    // No result contains coordinates, and this function cannot mint a Jr.
+    // The caller owns the current inventory and validated local return mark.
+    // An outside recipient gets Note on pickup; Jr only when an actual native
+    // warp-out later supplies a return mark, which the adapter installs.
     Projection reconcile(const Scene& scene, int current, int localReturnOwner, bool safe) {
         if (!safe || (current != None && !is_form(current))) return {current};
         // Native boss exits/demo saves can remove Ooccoo. Old receipts must not
         // resurrect her every tick or every time the same snapshot is received.
-        if (current == None && pending_ == 0) return {None, false, true};
+        if (current == None && pending_ == 0) {
+            managedForm_ = false;
+            return {None, false, true};
+        }
 
         const int here = scene_dungeon(scene);
         const uint8_t hereBit = dungeon_bit(here);
         const bool completeHere = (progress_.completed & hereBit) != 0;
         const bool regularHere = (progress_.acquired & hereBit) != 0 && !completeHere;
         const bool specialHere = here == CityDungeon && progress_.citySpecial && !completeHere;
+        const bool activeSpecial = progress_.citySpecial &&
+            !(progress_.completed & dungeon_bit(CityDungeon));
         const bool validReturn = is_dungeon(localReturnOwner) &&
             !(progress_.completed & dungeon_bit(localReturnOwner));
+        const uint8_t active = static_cast<uint8_t>(progress_.acquired &
+            ~progress_.completed & DungeonMask);
+        int anchoredStage = -1;
+        for (int stage = FirstDungeon; stage <= CityDungeon; ++stage) {
+            if ((active & dungeon_bit(stage)) &&
+                valid_anchor(stage, progress_.anchors[stage - FirstDungeon])) {
+                anchoredStage = stage;
+                break;
+            }
+        }
         int desired = Note;
+        int installReturnStage = -1;
+        const bool remoteProjection = managedForm_ || pending_ != 0;
         if (current == Junior && validReturn && (!regularHere || city_shop(scene))) {
             desired = Junior; // Never borrow, rewrite or clear another player's mark.
         } else if (regularHere) {
@@ -184,18 +246,29 @@ public:
             // dungeons. Preserve an already-held special City item, but don't
             // give that form to a remote recipient outside the City.
             desired = CityParent;
+        } else if (remoteProjection && anchoredStage >= 0) {
+            desired = Junior;
+            if (!validReturn) installReturnStage = anchoredStage;
         } else if (((current == Parent || current == CityParent) && completeHere) ||
                    (current == Junior && is_dungeon(localReturnOwner) && !validReturn)) {
             // A different, newly received dungeon still deserves its Note.
             desired = pending_ != 0 ? Note : None;
+        } else if (active == 0 && !activeSpecial && !progress_.unboundNote &&
+                   managedForm_) {
+            // A Note created by an earlier remote projection must go when its
+            // dungeon is complete, even if this player never entered it.
+            desired = None;
         }
+        if (pending_ != 0 && desired != None) managedForm_ = true;
+        if (desired == None) managedForm_ = false;
         pending_ = 0;
-        return {desired, current == Junior && desired != Junior, true};
+        return {desired, current == Junior && desired != Junior, true, installReturnStage};
     }
 
 private:
     Progress progress_;
     uint16_t pending_ = 0;
+    bool managedForm_ = false;
 };
 
 } // namespace dusklight_online::game::ooccoo
