@@ -114,6 +114,30 @@ int main() {
     assert(projected.boomerangX == 99 && projected.sequence == b.sequence);
     assert(projected.audioEvents.empty() && projected.activeAudioEvents.empty());
     assert(projected.underFrame0 == 4 && b.underFrame0 == 2);
+    // Pause and other stops may leave a movement proc and animation rate set.
+    // Repeated held samples must neither move nor advance that old clip.
+    Pose stopped = b;
+    stopped.sequence = 3;
+    assert(!predict(b, stopped, 1, projected));
+    stopped.x = b.x + 1;
+    stopped.bodyRootX = stopped.x + 2;
+    assert(predict(b, stopped, 1, projected));
+    assert(projected.underFrame0 == stopped.underFrame0);
+    stopped.x = b.x;
+    stopped.underFrame0 += 1;
+    assert(predict(b, stopped, 1, projected));
+    assert(projected.x == stopped.x && projected.underFrame0 == stopped.underFrame0 + 1);
+    Pose upperOnly = b;
+    upperOnly.underRatio0 = 0;
+    upperOnly.upperBck0 = 7;
+    upperOnly.upperFrame0 = 2;
+    Pose upperNext = upperOnly;
+    upperNext.sequence = upperOnly.sequence + 1;
+    upperNext.upperFrame0 = 3;
+    assert(predict(upperOnly, upperNext, 1, projected));
+    assert(projected.upperFrame0 == 4);
+    upperNext.upperBck0 = 8;
+    assert(!predict(upperOnly, upperNext, 1, projected));
     assert(!predict(a, b, 3, projected)); // hard horizon
     a.procId = 5; assert(!predict(a, b, 1, projected)); a.procId = b.procId;
     a.stage = "different"; assert(!predict(a, b, 1, projected)); a.stage = b.stage;

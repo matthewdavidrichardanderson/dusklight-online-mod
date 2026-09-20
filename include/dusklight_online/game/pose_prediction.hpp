@@ -23,6 +23,35 @@ inline bool predict_pose(const dusk::multiplayer::PeerPoseSnapshot& before,
     const float dz = (latest.z - before.z) * factor;
     if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz) ||
         dx*dx + dy*dy + dz*dz > 120.0f*120.0f || std::abs(dy) > 30.0f) return false;
+    // A stopped Link can retain PROC_MOVE and a positive animation rate,
+    // especially when the pause menu replays the last gameplay pose. Do not
+    // invent motion from that stale rate when the sampled frame stopped.
+    const auto frameAdvanced = [](int oldClip, int clip, int oldArc, int arc,
+                                  float oldFrame, float frame, float ratio) {
+        return ratio > 0.001f && oldClip == clip && oldArc == arc &&
+               std::isfinite(oldFrame) && std::isfinite(frame) &&
+               std::abs(frame - oldFrame) > 0.001f;
+    };
+    const bool animationAdvanced =
+        frameAdvanced(before.underBck0, latest.underBck0, before.underBckArc0,
+                      latest.underBckArc0, before.underFrame0, latest.underFrame0,
+                      latest.underRatio0) ||
+        frameAdvanced(before.underBck1, latest.underBck1, before.underBckArc1,
+                      latest.underBckArc1, before.underFrame1, latest.underFrame1,
+                      latest.underRatio1) ||
+        frameAdvanced(before.underBck2, latest.underBck2, before.underBckArc2,
+                      latest.underBckArc2, before.underFrame2, latest.underFrame2,
+                      latest.underRatio2) ||
+        frameAdvanced(before.upperBck0, latest.upperBck0, before.upperBckArc0,
+                      latest.upperBckArc0, before.upperFrame0, latest.upperFrame0,
+                      latest.upperRatio0) ||
+        frameAdvanced(before.upperBck1, latest.upperBck1, before.upperBckArc1,
+                      latest.upperBckArc1, before.upperFrame1, latest.upperFrame1,
+                      latest.upperRatio1) ||
+        frameAdvanced(before.upperBck2, latest.upperBck2, before.upperBckArc2,
+                      latest.upperBckArc2, before.upperFrame2, latest.upperFrame2,
+                      latest.upperRatio2);
+    if (dx*dx + dy*dy + dz*dz < 0.0001f && !animationAdvanced) return false;
     out = latest;
     out.x += dx; out.y += dy; out.z += dz;
     if (out.bodyRootValid) { out.bodyRootX += dx; out.bodyRootY += dy; out.bodyRootZ += dz; }
@@ -43,17 +72,32 @@ inline bool predict_pose(const dusk::multiplayer::PeerPoseSnapshot& before,
     }
     // The renderer already wraps loop animations and clamps one-shot frames
     // using the real resource duration. Never extrapolate across a clip change.
-    const auto advance = [ahead](int oldClip, int clip, int oldArc, int arc,
-                                 float rate, float& frame) {
-        if (oldClip == clip && oldArc == arc && std::isfinite(rate) && std::abs(rate) <= 4)
+    const auto advance = [ahead, &frameAdvanced](int oldClip, int clip,
+                                                  int oldArc, int arc,
+                                                  float oldFrame, float rate,
+                                                  float ratio, float& frame) {
+        if (frameAdvanced(oldClip, clip, oldArc, arc, oldFrame, frame, ratio) &&
+            std::isfinite(rate) && std::abs(rate) <= 4)
             frame += rate * float(ahead);
     };
-#define ADVANCE_SLOT(name) advance(before.name##Bck0, latest.name##Bck0, before.name##BckArc0, latest.name##BckArc0, latest.name##Rate0, out.name##Frame0); \
-    advance(before.name##Bck1, latest.name##Bck1, before.name##BckArc1, latest.name##BckArc1, latest.name##Rate1, out.name##Frame1); \
-    advance(before.name##Bck2, latest.name##Bck2, before.name##BckArc2, latest.name##BckArc2, latest.name##Rate2, out.name##Frame2)
-    ADVANCE_SLOT(under);
-    ADVANCE_SLOT(upper);
-#undef ADVANCE_SLOT
+    advance(before.underBck0, latest.underBck0, before.underBckArc0,
+            latest.underBckArc0, before.underFrame0, latest.underRate0,
+            latest.underRatio0, out.underFrame0);
+    advance(before.underBck1, latest.underBck1, before.underBckArc1,
+            latest.underBckArc1, before.underFrame1, latest.underRate1,
+            latest.underRatio1, out.underFrame1);
+    advance(before.underBck2, latest.underBck2, before.underBckArc2,
+            latest.underBckArc2, before.underFrame2, latest.underRate2,
+            latest.underRatio2, out.underFrame2);
+    advance(before.upperBck0, latest.upperBck0, before.upperBckArc0,
+            latest.upperBckArc0, before.upperFrame0, latest.upperRate0,
+            latest.upperRatio0, out.upperFrame0);
+    advance(before.upperBck1, latest.upperBck1, before.upperBckArc1,
+            latest.upperBckArc1, before.upperFrame1, latest.upperRate1,
+            latest.upperRatio1, out.upperFrame1);
+    advance(before.upperBck2, latest.upperBck2, before.upperBckArc2,
+            latest.upperBckArc2, before.upperFrame2, latest.upperRate2,
+            latest.upperRatio2, out.upperFrame2);
     out.audioEvents.clear();
     out.activeAudioEvents.clear();
     out.ageTicks += static_cast<uint32_t>(ahead);
