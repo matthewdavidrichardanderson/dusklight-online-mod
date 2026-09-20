@@ -135,6 +135,7 @@ constexpr uint32_t kManualSyncRequestTimeoutTicks = 5 * 30;
 constexpr uint32_t kOrdonReloadWarningTicks = 180;
 constexpr std::string_view kOoccooSaveBlob = "ooccoo-progress-v2";
 constexpr std::string_view kLegacyOoccooSaveBlob = "ooccoo-note-v1";
+constexpr std::string_view kBombBagSaveWarpBlob = "bomb-bag-savewarp-v1";
 static_assert(ooccoo::Parent == dItemNo_DUNGEON_EXIT_e);
 static_assert(ooccoo::Junior == dItemNo_DUNGEON_BACK_e);
 static_assert(ooccoo::Note == dItemNo_TKS_LETTER_e);
@@ -2666,6 +2667,8 @@ void GameAdapter::clear_replaced_save_progression_state() {
     initializedRoom_ = -128;
     initializedRoomTicks_ = 0;
     localObservedState_ = nlohmann::json();
+    observedBombBagRental_.reset();
+    pendingBombBagSaveWarp_.reset();
     pendingRupeePublicationToSuppress_.reset();
     observedRupees_.reset();
     pendingMaxLifePublicationToSuppress_.reset();
@@ -2708,6 +2711,7 @@ void GameAdapter::notify_local_save_reset() {
 void GameAdapter::notify_local_save_loaded() {
     notify_local_save_reset();
     load_bottle_source_state();
+    load_bomb_bag_save_warp_candidate();
 
     size_t size = 0;
     if (svc_save->get_blob(mod_ctx, kOoccooSaveBlob.data(), nullptr, &size) != MOD_OK ||
@@ -2804,6 +2808,121 @@ void GameAdapter::notify_local_save_written() {
     (void)svc_save->set_blob(mod_ctx, kOoccooSaveBlob.data(), encoded.data(), encoded.size());
     (void)svc_save->delete_blob(mod_ctx, kLegacyOoccooSaveBlob.data());
     persist_bottle_source_state();
+    persist_bomb_bag_save_warp_candidate();
+}
+
+void GameAdapter::persist_bomb_bag_save_warp_candidate() {
+    // The save menu calls resetMiniGameItem(true), then may call
+    // setMiniGameItem again. That overwrites mSaveBombItem, so use the empty
+    // slot observed when the rental began, not the value at save completion.
+    pendingBombBagSaveWarp_.reset();
+    const int bag = dMeter2Info_getRentalBombBag();
+    const int item = bag >= 0 && bag < 3 ? dComIfGs_getItem(SLOT_15 + bag, false) : -1;
+    const int count = bag >= 0 && bag < 3 ? dComIfGs_getBombNum(static_cast<u8>(bag)) : 0;
+    if (!syncFlagsEnabled_ || !transport_.status().welcomed ||
+        g_meter2_info.getMiniGameItemSetFlag() == 0 ||
+        !observedBombBagRental_ || observedBombBagRental_->bag != bag) {
+        if (bag >= 0 && bag < 3 && syncFlagsEnabled_ && transport_.status().welcomed) {
+            svc_log->info(mod_ctx, ("BOMB_BAG save-warp skipped bag=" +
+                std::to_string(bag) + " prior=" +
+                std::to_string(g_meter2_info.mSaveBombItem) + " item=" +
+                std::to_string(item) + " count=" + std::to_string(count) +
+                " mini=" + std::to_string(g_meter2_info.getMiniGameItemSetFlag()) +
+                " observed=" + (observedBombBagRental_ ?
+                    std::to_string(observedBombBagRental_->bag) + ":" +
+                    std::to_string(observedBombBagRental_->item) : "none")).c_str());
+        }
+        (void)svc_save->delete_blob(mod_ctx, kBombBagSaveWarpBlob.data());
+        return;
+    }
+    const std::string encoded = nlohmann::json{{"version", 1}, {"bag", bag},
+                                               {"item", observedBombBagRental_->item}}.dump();
+    if (svc_save->set_blob(mod_ctx, kBombBagSaveWarpBlob.data(),
+            encoded.data(), encoded.size()) == MOD_OK) {
+        svc_log->info(mod_ctx, ("BOMB_BAG save-warp candidate bag=" +
+            std::to_string(bag) + " item=" +
+            std::to_string(observedBombBagRental_->item)).c_str());
+    } else {
+        svc_log->warn(mod_ctx, "BOMB_BAG save-warp candidate could not be saved");
+    }
+}
+
+void GameAdapter::observe_bomb_bag_rental() {
+    const int bag = dMeter2Info_getRentalBombBag();
+    if (!syncFlagsEnabled_ || opening_or_title_active() || randomizer_active() ||
+        g_meter2_info.getMiniGameItemSetFlag() == 0 || bag < 0 || bag >= 3) {
+        observedBombBagRental_.reset();
+        return;
+    }
+    if (observedBombBagRental_ && observedBombBagRental_->bag == bag) return;
+    observedBombBagRental_.reset();
+    const int item = dComIfGs_getItem(SLOT_15 + bag, false);
+    const int count = dComIfGs_getBombNum(static_cast<u8>(bag));
+    if (save_warp_bag_candidate(false, syncable_bomb_item(item), bag,
+            g_meter2_info.mSaveBombItem, dItemNo_NONE_e, count)) {
+        observedBombBagRental_ = BombBagSaveWarpCandidate{bag, item};
+        svc_log->info(mod_ctx, ("BOMB_BAG rental observed empty slot bag=" +
+            std::to_string(bag) + " item=" + std::to_string(item)).c_str());
+    }
+}
+
+void GameAdapter::load_bomb_bag_save_warp_candidate() {
+    size_t size = 0;
+    if (svc_save->get_blob(mod_ctx, kBombBagSaveWarpBlob.data(), nullptr, &size) != MOD_OK)
+        return;
+    if (size == 0 || size > 128) {
+        (void)svc_save->delete_blob(mod_ctx, kBombBagSaveWarpBlob.data());
+        return;
+    }
+    std::string encoded(size, '\0');
+    if (svc_save->get_blob(mod_ctx, kBombBagSaveWarpBlob.data(), encoded.data(), &size) != MOD_OK ||
+        size > encoded.size()) return;
+    std::optional<BombBagSaveWarpCandidate> candidate;
+    try {
+        const auto value = nlohmann::json::parse(encoded.begin(), encoded.begin() + size);
+        if (value.is_object() && value.size() == 3 && value.contains("version") &&
+            value.contains("bag") && value.contains("item") &&
+            value["version"].is_number_integer() && value["version"] == 1 &&
+            value["bag"].is_number_integer() && value["item"].is_number_integer()) {
+            const int bag = value["bag"].get<int>();
+            const int item = value["item"].get<int>();
+            if (bag >= 0 && bag < 3 && syncable_bomb_item(item))
+                candidate = BombBagSaveWarpCandidate{bag, item};
+        }
+    } catch (const nlohmann::json::exception&) {
+        // A corrupt companion blob cannot turn a loaded bag into progression.
+    }
+    // Consume before sending. A second load cannot replay old ammo over a
+    // peer's newer count, even if this game exits immediately afterward.
+    if (svc_save->delete_blob(mod_ctx, kBombBagSaveWarpBlob.data()) == MOD_OK) {
+        pendingBombBagSaveWarp_ = candidate;
+        if (candidate) svc_log->info(mod_ctx, ("BOMB_BAG save-warp loaded candidate bag=" +
+            std::to_string(candidate->bag)).c_str());
+    } else {
+        svc_log->warn(mod_ctx, "BOMB_BAG save-warp candidate could not be consumed");
+    }
+}
+
+void GameAdapter::flush_bomb_bag_save_warp_candidate() {
+    if (!pendingBombBagSaveWarp_ || !syncFlagsEnabled_ ||
+        !transport_.status().welcomed || !stage_ready() || opening_or_title_active()) return;
+    const auto candidate = *pendingBombBagSaveWarp_;
+    const int bag = candidate.bag;
+    const int item = dComIfGs_getItem(SLOT_15 + bag, false);
+    const int count = dComIfGs_getBombNum(static_cast<u8>(bag));
+    if (!save_warp_bag_converted(randomizer_active(), syncable_bomb_item(item),
+            bag, candidate.item, dMeter2Info_getRentalBombBag(), item, count)) {
+        svc_log->info(mod_ctx, "BOMB_BAG save-warp candidate did not become permanent");
+        pendingBombBagSaveWarp_.reset();
+        return;
+    }
+    if (transport_.send({{"type", "bomb_bag_slot"}, {"bag", bag},
+                         {"item", item}, {"count", count}})) {
+        svc_log->info(mod_ctx, ("BOMB_BAG save-warp published bag=" +
+            std::to_string(bag) + " item=" + std::to_string(item) +
+            " count=" + std::to_string(count)).c_str());
+        pendingBombBagSaveWarp_.reset();
+    }
 }
 
 void GameAdapter::notify_room_scene_initialized(int room) {
@@ -3161,6 +3280,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
     syncFlagsEnabled_ = syncFlagsEnabled;
     syncWorldEnabled_ = syncWorldEnabled;
+    observe_bomb_bag_rental();
     const bool randomizerActive = randomizer_active();
     set_randomizer_audio_filter(randomizerActive);
     sWorldSyncEnabled = syncWorldEnabled && transport_.status().welcomed;
@@ -3514,6 +3634,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         flush_pending_dark_clears();
         flush_story_events();
         poll_local_state(true);
+        flush_bomb_bag_save_warp_candidate();
         apply_shared_ooccoo_local_form();
         flush_ooccoo_catchup();
         if (++collectibleRepairTicks_ >= 60) {
@@ -5692,6 +5813,7 @@ void GameAdapter::tick_manual_transition() {
     }
     dComIfGs_setItem(SLOT_18, dComIfGs_getItem(SLOT_18, false));
     manualTransitionActive_ = false;
+    pendingBombBagSaveWarp_.reset();
     localObservedState_ = nlohmann::json();
     observedRupees_ = dComIfGs_getRupee();
 }

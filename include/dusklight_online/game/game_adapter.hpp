@@ -143,6 +143,9 @@ private:
     bool ooccooBoundToSave_ = false;
     bool ooccooCatchupPending_ = true;
     bool ooccooReplyPending_ = false;
+    struct BombBagSaveWarpCandidate { int bag; int item; };
+    std::optional<BombBagSaveWarpCandidate> observedBombBagRental_;
+    std::optional<BombBagSaveWarpCandidate> pendingBombBagSaveWarp_;
     nlohmann::json localObservedState_;
     std::string stableStageName_;
     int stableRoom_ = -128;
@@ -250,6 +253,10 @@ private:
     bool has_active_faron_cage_sequence_peer() const;
     bool should_defer_faron_warp_sequence() const;
     void poll_local_state(bool publish);
+    void observe_bomb_bag_rental();
+    void persist_bomb_bag_save_warp_candidate();
+    void load_bomb_bag_save_warp_candidate();
+    void flush_bomb_bag_save_warp_candidate();
     void clear_disabled_sync_flags_state();
     void clear_replaced_save_progression_state();
     void load_bottle_source_state();
