@@ -71,16 +71,10 @@ private:
     UiElementHandle windowPlayers_ = 0;
     std::string windowRenderedPlayers_;
     UiElementHandle sessionActionsHeading_ = 0;
-    std::vector<UiElementHandle> directLobbyControls_;
-    std::vector<UiElementHandle> relayLobbyControls_;
     enum class ConnectionRole : uint8_t {
         Host,
         Join,
     } connectionRole_ = ConnectionRole::Host;
-    enum class ConnectionMethod : uint8_t {
-        Direct,
-        Relay,
-    } connectionMethod_ = ConnectionMethod::Direct;
     std::string panelRenderedStatus_;
     std::string windowRenderedStatus_;
     std::string directCodeDisplay_;
@@ -138,7 +132,6 @@ private:
     void refresh_manual_peer_choices();
     void request_manual_sync(bool flagsOnly);
     void set_manual_sync_pending_visual(bool pending);
-    void refresh_lobby_window();
     void begin_lobby_attempt(std::string failurePrefix);
     void notify_lobby_attempt_failure(std::string_view detail);
 
@@ -159,6 +152,10 @@ public:
                                     UiElementHandle, void*, ModError*);
     static ModResult build_lobby_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                      UiElementHandle, void*, ModError*);
+    static ModResult build_host_direct_settings(ModContext*, UiElementHandle, void*, ModError*);
+    static ModResult build_host_relay_settings(ModContext*, UiElementHandle, void*, ModError*);
+    static ModResult build_join_direct_settings(ModContext*, UiElementHandle, void*, ModError*);
+    static ModResult build_join_relay_settings(ModContext*, UiElementHandle, void*, ModError*);
     static ModResult update_window(ModContext*, void*, ModError*);
     static void window_closed(ModContext*, UiWindowHandle, void*);
     static void settings_window_closed(ModContext*, UiWindowHandle, void*);
@@ -179,8 +176,6 @@ public:
     static void join_direct_pressed(ModContext*, void*);
     static void host_relay_pressed(ModContext*, void*);
     static void join_relay_pressed(ModContext*, void*);
-    static void connection_method_get(ModContext*, void*, UiControlValue*);
-    static void connection_method_set(ModContext*, void*, const UiControlValue*);
     static void direct_code_get(ModContext*, void*, UiControlValue*);
     static void direct_code_set(ModContext*, void*, const UiControlValue*);
     static void relay_code_get(ModContext*, void*, UiControlValue*);
