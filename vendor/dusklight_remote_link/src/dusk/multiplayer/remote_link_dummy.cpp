@@ -193,10 +193,13 @@ bool dummy_trace_enabled() {
              std::strcmp(value, "OFF") == 0);
 }
 
-bool semantic_animation_slot_supported(int bck, int arc, f32 ratio) {
+bool semantic_animation_slot_supported(int bck, int arc, f32 ratio, int procId,
+                                       bool isWolf) {
     if (ratio < 0.0f || ratio > 1.0f) return false;
     if (ratio <= 0.001f) return true;
-    return bck > 0 && bck != 0xFFFF && arc == 0xFFFF;
+    return bck > 0 && bck != 0xFFFF &&
+           (arc == 0xFFFF ||
+            dusklight_online::game::ganon_clash_animation_archive(procId, isWolf, arc));
 }
 
 bool phase3_semantic_pose_supported(const PeerPoseSnapshot& pose) {
@@ -207,17 +210,17 @@ bool phase3_semantic_pose_supported(const PeerPoseSnapshot& pose) {
            (pose.rideActorKind == REMOTE_RIDE_ACTOR_NONE ||
             pose.rideActorKind == REMOTE_RIDE_ACTOR_SPINNER) &&
            semantic_animation_slot_supported(pose.underBck0, pose.underBckArc0,
-                                             pose.underRatio0) &&
+                                             pose.underRatio0, pose.procId, pose.isWolf) &&
            semantic_animation_slot_supported(pose.underBck1, pose.underBckArc1,
-                                             pose.underRatio1) &&
+                                             pose.underRatio1, pose.procId, pose.isWolf) &&
            semantic_animation_slot_supported(pose.underBck2, pose.underBckArc2,
-                                             pose.underRatio2) &&
+                                             pose.underRatio2, pose.procId, pose.isWolf) &&
            semantic_animation_slot_supported(pose.upperBck0, pose.upperBckArc0,
-                                             pose.upperRatio0) &&
+                                             pose.upperRatio0, pose.procId, pose.isWolf) &&
            semantic_animation_slot_supported(pose.upperBck1, pose.upperBckArc1,
-                                             pose.upperRatio1) &&
+                                             pose.upperRatio1, pose.procId, pose.isWolf) &&
            semantic_animation_slot_supported(pose.upperBck2, pose.upperBckArc2,
-                                             pose.upperRatio2);
+                                             pose.upperRatio2, pose.procId, pose.isWolf);
 }
 
 ReceiverPresentationMode choose_presentation_mode(const PeerPoseSnapshot& pose) {

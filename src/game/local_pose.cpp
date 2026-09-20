@@ -349,9 +349,10 @@ bool build_local_pose(uint32_t sequence, bool manualSyncReady,
     // Event visibility is a policy of the viewing client. Publishing the
     // sender's local event as unsupported hides previously supported poses,
     // including Link's compulsory death event, from every other player.
-    const auto slotNeedsArchiveFallback = [](const PoseAnimSlot& slot) {
+    const auto slotNeedsArchiveFallback = [link, wolf](const PoseAnimSlot& slot) {
         return slot.ratio > 0.001f && slot.bck > 0 && slot.bck != 0xFFFF &&
-               slot.arc != 0xFFFF;
+               slot.arc != 0xFFFF &&
+               !ganon_clash_animation_archive(link->mProcID, wolf, slot.arc);
     };
     for (int i = 0; i < 3; ++i) {
         if (slotNeedsArchiveFallback(underSlots[i]) ||

@@ -8,6 +8,13 @@
 
 namespace dusklight_online::game {
 
+// TP stores these two Ganondorf clash motions in boss archives rather than
+// Link's global animation archive. Other event motions remain unsupported.
+inline bool ganon_clash_animation_archive(int procId, bool isWolf, int arcNo) {
+    return (isWolf && procId == daAlink_c::PROC_WOLF_GANON_CATCH && arcNo == 8) ||
+           (!isWolf && procId == daAlink_c::PROC_SWORD_PUSH && arcNo == 7);
+}
+
 inline bool local_link_in_load_exit(daAlink_c* link) {
     if (link == nullptr || !dComIfGp_isEnableNextStage()) return false;
     // checkSceneChange sets this flag and ORIGINAL 26/17 only after a
@@ -33,35 +40,11 @@ inline bool local_transition_hides_remote_link() {
 }
 
 inline bool local_scene_hides_remote_link() {
-    static RemoteLinkEventVisibility visibility;
-    static fpc_ProcID previousPlayer = fpcM_ERROR_PROCESS_ID_e;
-    auto* link = daAlink_getAlinkActorClass();
-    if (link == nullptr) {
-        visibility = {};
-        previousPlayer = fpcM_ERROR_PROCESS_ID_e;
-        return true;
-    }
-    const auto playerId = fopAcM_GetID(link);
-    if (playerId != previousPlayer) {
-        visibility = {};
-        previousPlayer = playerId;
-    }
-    // TALK is ordinary conversation, not dialogue embedded in a DEMO event.
-    // START is the native post-load entrance; authored arrival movies use
-    // SYSTEM/TOOL instead. Door traversal and the native item-get procedure
-    // seed a local exception tied to the current engine event through handoff.
-    // Do not whitelist a whole demo type or bypass transition/animation guards.
-    const bool door = link->eventInfo.checkCommandDoor() ||
-        link->mProcID == daAlink_c::PROC_DOOR_OPEN || local_link_in_load_exit(link);
-    const bool itemGet = link->mProcID == daAlink_c::PROC_GET_ITEM;
-    return visibility.hidden(
-        local_transition_hides_remote_link(),
-        dComIfGp_event_runCheck(),
-        dComIfGp_getEvent()->isOrderOK(),
-        dComIfGp_event_getMode() == dEvt_mode_TALK_e,
-        link->mDemo.getDemoType() == daPy_demo_c::DEMO_TYPE_START_e,
-        door || itemGet,
-        link->eventInfo.getEventId());
+    // Remote actors carry NOPAUSE and can keep rendering and consuming live
+    // poses while the viewer's own Link is in an event or transforming. The
+    // overlap swap is still unsafe because this scene's actors are being torn
+    // down. Interaction has a separate event-time guard.
+    return local_transition_hides_remote_link();
 }
 
 } // namespace dusklight_online::game

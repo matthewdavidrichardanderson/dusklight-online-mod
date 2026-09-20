@@ -2685,7 +2685,13 @@ void daRemoteLink_c::releaseBckCacheEntry(BckCacheEntry& i_entry) {
     if (i_entry.buffer != NULL) {
         JKR_DELETE_ARRAY(i_entry.buffer);
     }
+    if (i_entry.arcNo != 0xFFFF && i_entry.bck != NULL) {
+        // Boss-archive animations are per-slot copies of a shared native
+        // resource. The native Link must never observe our frame changes.
+        JKR_DELETE(i_entry.bck);
+    }
     i_entry.resId = 0;
+    i_entry.arcNo = 0xFFFF;
     i_entry.buffer = NULL;
     i_entry.bck = NULL;
 }
@@ -2705,6 +2711,7 @@ J3DAnmTransform* daRemoteLink_c::getMotionBck(u16 i_resId) {
                 return NULL;
             }
             mBckCache[i].resId = i_resId;
+            mBckCache[i].arcNo = 0xFFFF;
             mBckCache[i].buffer = buffer;
             mBckCache[i].bck = bck;
             return bck;
@@ -2715,7 +2722,8 @@ J3DAnmTransform* daRemoteLink_c::getMotionBck(u16 i_resId) {
     return NULL;
 }
 
-J3DAnmTransform* daRemoteLink_c::getBlendSlotBck(int i_slot, u16 i_resId) {
+J3DAnmTransform* daRemoteLink_c::getBlendSlotBck(int i_slot, u16 i_resId,
+                                                  u16 i_arcNo) {
     if (i_slot < 0 || i_slot >= static_cast<int>(ARRAY_SIZE(mBlendBckCache)) ||
         !isValidRemoteBck(i_resId))
     {
@@ -2723,18 +2731,47 @@ J3DAnmTransform* daRemoteLink_c::getBlendSlotBck(int i_slot, u16 i_resId) {
     }
 
     BckCacheEntry& entry = mBlendBckCache[i_slot];
-    if (entry.resId == i_resId && entry.bck != NULL) {
+    if (entry.resId == i_resId && entry.arcNo == i_arcNo && entry.bck != NULL) {
         return entry.bck;
     }
 
     releaseBckCacheEntry(entry);
     u8* buffer = NULL;
-    J3DAnmTransform* bck = loadMotionBck(i_resId, &buffer);
+    J3DAnmTransform* bck = NULL;
+    if (i_arcNo == 0xFFFF) {
+        bck = loadMotionBck(i_resId, &buffer);
+    } else {
+        J3DAnmTransform* shared = static_cast<J3DAnmTransform*>(
+            loadFaceAnimation(i_resId, i_arcNo, NULL));
+        if (shared != NULL) {
+            JKRHeap* previousHeap = mDoExt_setCurrentHeap(mpArcHeap);
+            switch (shared->getKind()) {
+            case 8:
+                bck = JKR_NEW J3DAnmTransformKey(
+                    *static_cast<J3DAnmTransformKey*>(shared));
+                break;
+            case 9:
+                bck = JKR_NEW J3DAnmTransformFull(
+                    *static_cast<J3DAnmTransformFull*>(shared));
+                break;
+            case 16:
+                bck = JKR_NEW J3DAnmTransformFullWithLerp(
+                    *static_cast<J3DAnmTransformFullWithLerp*>(shared));
+                break;
+            default:
+                DuskLog.warn("RemoteLink: unsupported boss BCK kind={} arc={} id={}",
+                             shared->getKind(), i_arcNo, i_resId);
+                break;
+            }
+            mDoExt_setCurrentHeap(previousHeap);
+        }
+    }
     if (bck == NULL) {
         return NULL;
     }
 
     entry.resId = i_resId;
+    entry.arcNo = i_arcNo;
     entry.buffer = buffer;
     entry.bck = bck;
     return entry.bck;
@@ -2787,8 +2824,8 @@ void daRemoteLink_c::setupMotionAnimation() {
                  mVisualState.form == FORM_WOLF ? "wolf" : "human", (void*)waitBck);
 }
 
-bool daRemoteLink_c::configureBlendSlot(int i_slot, u16 i_bck, f32 i_frame, f32 i_rate,
-                                        f32 i_ratio) {
+bool daRemoteLink_c::configureBlendSlot(int i_slot, u16 i_bck, u16 i_arcNo,
+                                        f32 i_frame, f32 i_rate, f32 i_ratio) {
     if (i_slot < 0 || i_slot >= 6) return false;
     if (!isValidRemoteBck(i_bck)) {
         mBlendAnmPacks[i_slot].setAnmTransform(NULL);
@@ -2798,11 +2835,17 @@ bool daRemoteLink_c::configureBlendSlot(int i_slot, u16 i_bck, f32 i_frame, f32 
         return false;
     }
 
+    if (i_arcNo != 0xFFFF &&
+        !dusklight_online::game::ganon_clash_animation_archive(
+            mRemoteProcId, mVisualState.form == FORM_WOLF, i_arcNo)) {
+        return false;
+    }
+
     // Each active blend slot owns a distinct animation object. J3D animation
     // frame state is mutable, so sharing the ordinary resource cache lets one
     // slot overwrite another slot's frame while the blend calculator is using
     // it (notably during jump-attack transitions).
-    J3DAnmTransform* bck = getBlendSlotBck(i_slot, i_bck);
+    J3DAnmTransform* bck = getBlendSlotBck(i_slot, i_bck, i_arcNo);
     if (bck == NULL) {
         mBlendAnmPacks[i_slot].setAnmTransform(NULL);
         mBlendAnmPacks[i_slot].setRatio(0.0f);
@@ -2837,19 +2880,25 @@ bool daRemoteLink_c::configureBlendSlot(int i_slot, u16 i_bck, f32 i_frame, f32 
 
 bool daRemoteLink_c::setupBlendAnimation() {
     bool lowerSlots[3] = {
-        configureBlendSlot(0, mRemoteUnderBck0, mRemoteUnderFrame0, mRemoteUnderRate0,
+        configureBlendSlot(0, mRemoteUnderBck0, mRemoteUnderBckArc0,
+                           mRemoteUnderFrame0, mRemoteUnderRate0,
                            mRemoteUnderRatio0),
-        configureBlendSlot(1, mRemoteUnderBck1, mRemoteUnderFrame1, mRemoteUnderRate1,
+        configureBlendSlot(1, mRemoteUnderBck1, mRemoteUnderBckArc1,
+                           mRemoteUnderFrame1, mRemoteUnderRate1,
                            mRemoteUnderRatio1),
-        configureBlendSlot(2, mRemoteUnderBck2, mRemoteUnderFrame2, mRemoteUnderRate2,
+        configureBlendSlot(2, mRemoteUnderBck2, mRemoteUnderBckArc2,
+                           mRemoteUnderFrame2, mRemoteUnderRate2,
                            mRemoteUnderRatio2),
     };
     bool upperSlots[3] = {
-        configureBlendSlot(3, mRemoteUpperBck0, mRemoteUpperFrame0, mRemoteUpperRate0,
+        configureBlendSlot(3, mRemoteUpperBck0, mRemoteUpperBckArc0,
+                           mRemoteUpperFrame0, mRemoteUpperRate0,
                            mRemoteUpperRatio0),
-        configureBlendSlot(4, mRemoteUpperBck1, mRemoteUpperFrame1, mRemoteUpperRate1,
+        configureBlendSlot(4, mRemoteUpperBck1, mRemoteUpperBckArc1,
+                           mRemoteUpperFrame1, mRemoteUpperRate1,
                            mRemoteUpperRatio1),
-        configureBlendSlot(5, mRemoteUpperBck2, mRemoteUpperFrame2, mRemoteUpperRate2,
+        configureBlendSlot(5, mRemoteUpperBck2, mRemoteUpperBckArc2,
+                           mRemoteUpperFrame2, mRemoteUpperRate2,
                            mRemoteUpperRatio2),
     };
     const bool hasLower = lowerSlots[0] || lowerSlots[1] || lowerSlots[2];

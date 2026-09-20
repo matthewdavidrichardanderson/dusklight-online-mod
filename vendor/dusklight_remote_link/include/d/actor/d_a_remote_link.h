@@ -182,6 +182,7 @@ private:
 
     struct BckCacheEntry {
         u16 resId;
+        u16 arcNo;
         u8* buffer;
         J3DAnmTransform* bck;
     };
@@ -251,7 +252,8 @@ private:
     void applySwordShapeVisibility();
     void setupMotionAnimation();
     bool setupBlendAnimation();
-    bool configureBlendSlot(int i_slot, u16 i_bck, f32 i_frame, f32 i_rate, f32 i_ratio);
+    bool configureBlendSlot(int i_slot, u16 i_bck, u16 i_arcNo, f32 i_frame,
+                            f32 i_rate, f32 i_ratio);
     void applyRemoteChangeBlendRate(int i_jointNo);
     void applyRemoteFootMatrix();
     void applyRemoteArmMatrix();
@@ -260,7 +262,7 @@ private:
     void updateFaceAnimation();
     void releaseBckCacheEntry(BckCacheEntry& i_entry);
     J3DAnmTransform* getMotionBck(u16 i_resId);
-    J3DAnmTransform* getBlendSlotBck(int i_slot, u16 i_resId);
+    J3DAnmTransform* getBlendSlotBck(int i_slot, u16 i_resId, u16 i_arcNo);
     u16 selectActionBck(f32* o_speed);
     void updateMotionAnimation();
     bool setMotionBck(u16 i_resId, f32 i_speed);

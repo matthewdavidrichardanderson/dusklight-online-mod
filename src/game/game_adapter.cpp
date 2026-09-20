@@ -11,6 +11,7 @@
 #include "dusklight_online/game/collectible_visual_bridge.hpp"
 #include "dusklight_online/game/floor_switch_bridge.hpp"
 #include "dusklight_online/game/local_pose.hpp"
+#include "dusklight_online/game/local_event_visibility.hpp"
 #include "dusklight_online/game/randomizer_item_names.hpp"
 #include "dusklight_online/game/remote_actor_bridge.hpp"
 #include "dusklight_online/game/remote_pose.hpp"
@@ -1056,16 +1057,11 @@ bool remote_link_gameplay_ready(bool manualTransitionActive) {
     if (manualTransitionActive || fpcM_SearchByName(fpcNm_TITLE_e) != nullptr ||
         fpcM_SearchByName(fpcNm_PLAY_SCENE_e) == nullptr ||
         dComIfGp_getWindowNum() == 0 || dComIfGp_getStageStagInfo() == nullptr ||
-        dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage() ||
-        fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq()) {
+        local_transition_hides_remote_link()) {
         return false;
     }
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
-    if (player == nullptr || fopAcM_GetName(player) != fpcNm_ALINK_e) return false;
-    const auto* link = static_cast<const daAlink_c*>(player);
-    return link->mClothesChangeWaitTimer == 0 &&
-           link->mProcID != daAlink_c::PROC_METAMORPHOSE &&
-           link->mProcID != daAlink_c::PROC_METAMORPHOSE_ONLY;
+    return player != nullptr && fopAcM_GetName(player) == fpcNm_ALINK_e;
 }
 
 bool syncable_bomb_item(int itemId) {
@@ -3359,8 +3355,9 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                                                 dusk::multiplayer::kRemoteMidnaStreamingEnabled &&
                                                     displayMidnaEnabled,
                                                 status.welcomed && syncWorldEnabled &&
-                                                    status.settings.syncWorld,
-                                                remoteCollisionEnabled, pvpEnabled,
+                                                status.settings.syncWorld,
+                                                remoteCollisionEnabled && !dComIfGp_event_runCheck(),
+                                                pvpEnabled,
                                                 !matrixStreamingEnabled);
     for (auto& [peerId, pose] : peerPoses_) {
         (void)peerId;
