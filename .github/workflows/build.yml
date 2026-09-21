@@ -10,8 +10,24 @@ env:
   SYMGEN_VERSION: v1.2.4
 
 jobs:
+  dusklight-sdk:
+    name: Resolve Dusklight SDK revision
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.resolve.outputs.revision }}
+    steps:
+      - name: Resolve upstream default branch
+        id: resolve
+        shell: bash
+        run: |
+          revision=$(git ls-remote https://github.com/TwilitRealm/dusklight.git HEAD | cut -f1)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "Building against Dusklight $revision"
+
   build:
     name: Build ${{matrix.platform}}
+    needs: dusklight-sdk
     runs-on: ${{matrix.runner}}
     strategy:
       fail-fast: false
@@ -45,16 +61,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Read pinned Dusklight version
-        id: dusklight
-        shell: bash
-        run: echo "version=$(sed -n 's/.*set(DUSKLIGHT_VERSION "\([^"]*\)").*/\1/p' CMakeLists.txt)" >> "$GITHUB_OUTPUT"
-
       - name: Cache Dusklight sources
         uses: actions/cache@v6
         with:
           path: dusklight
-          key: dusklight-${{runner.os}}-${{steps.dusklight.outputs.version}}
+          key: dusklight-${{runner.os}}-${{needs.dusklight-sdk.outputs.revision}}
 
       - name: Enable Visual Studio environment
         if: matrix.msvc_arch
@@ -75,7 +86,9 @@ jobs:
       - name: Configure CMake
         shell: bash
         run: |
-          args=(-G Ninja ${{matrix.cmake_args}})
+          args=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+                -DDUSKLIGHT_VERSION=${{needs.dusklight-sdk.outputs.revision}}
+                ${{matrix.cmake_args}})
           if [[ -n "${{matrix.android_ndk}}" ]]; then
             args+=(-DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/${{matrix.android_ndk}}/build/cmake/android.toolchain.cmake"
                    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28)

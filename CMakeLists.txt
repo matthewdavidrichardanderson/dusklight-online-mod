@@ -26,12 +26,6 @@ if (MSVC)
     add_link_options("/Brepro")
 endif ()
 
-# Pin the SDK/ABI used for release builds. Compatibility with other builds is
-# negotiated at runtime through versioned services and the GameService epoch.
-if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "d34226ad1dcd261dcb738d27daa808bcf81e44dd")
-endif ()
-
 if (PROJECT_IS_TOP_LEVEL)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
     add_subdirectory("${DUSKLIGHT_DIR}/sdk" dusklight-sdk EXCLUDE_FROM_ALL)

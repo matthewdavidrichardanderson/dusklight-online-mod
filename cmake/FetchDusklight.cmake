@@ -1,8 +1,8 @@
-# Fetches the Dusklight source tree pinned by DUSKLIGHT_VERSION.
+# Fetches the latest Dusklight source tree, or the revision selected by the caller.
 #
 # Inputs:
-#   DUSKLIGHT_VERSION       git tag or commit SHA to fetch (required unless DUSKLIGHT_DIR
-#                           points at an existing checkout)
+#   DUSKLIGHT_VERSION       optional git tag or commit SHA to fetch. When omitted, resolve the
+#                           upstream default branch's HEAD at configure time.
 # Outputs / knobs:
 #   DUSKLIGHT_DIR           Dusklight checkout, default <source>/dusklight. Point it at an
 #                           existing checkout (e.g. a Dusklight development tree) to skip
@@ -36,7 +36,23 @@ if (EXISTS "${DUSKLIGHT_DIR}/sdk/CMakeLists.txt" AND NOT EXISTS "${_dusklight_st
     message(STATUS "Dusklight: using existing checkout at ${DUSKLIGHT_DIR}")
 else ()
     if (NOT DUSKLIGHT_VERSION)
-        message(FATAL_ERROR "Dusklight: DUSKLIGHT_VERSION is not set")
+        find_package(Git QUIET REQUIRED)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" ls-remote "${DUSKLIGHT_REPOSITORY}" HEAD
+            OUTPUT_VARIABLE _dusklight_remote_head
+            RESULT_VARIABLE _dusklight_remote_result
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(REGEX MATCH "^[0-9a-fA-F]+" _dusklight_remote_revision
+            "${_dusklight_remote_head}")
+        string(LENGTH "${_dusklight_remote_revision}" _dusklight_revision_length)
+        if (NOT _dusklight_remote_result EQUAL 0 OR
+            NOT _dusklight_revision_length EQUAL 40 OR
+            NOT _dusklight_remote_head STREQUAL "${_dusklight_remote_revision}\tHEAD")
+            message(FATAL_ERROR
+                "Dusklight: could not resolve the latest revision from ${DUSKLIGHT_REPOSITORY}")
+        endif ()
+        set(DUSKLIGHT_VERSION "${_dusklight_remote_revision}")
+        message(STATUS "Dusklight: latest upstream revision is ${DUSKLIGHT_VERSION}")
     endif ()
 
     set(_dusklight_fetched "")
@@ -57,7 +73,9 @@ else ()
         # manually instead.
         _exec_git(fetch --depth 1 "${DUSKLIGHT_REPOSITORY}" "${DUSKLIGHT_VERSION}")
         _exec_git(-c advice.detachedHead=false checkout --force FETCH_HEAD)
-        _exec_git(submodule update --init --depth 1 extern/aurora)
+        if (EXISTS "${DUSKLIGHT_DIR}/.gitmodules")
+            _exec_git(submodule update --init --depth 1 extern/aurora)
+        endif ()
         file(WRITE "${_dusklight_stamp}" "${DUSKLIGHT_VERSION}\n")
     endif ()
 
