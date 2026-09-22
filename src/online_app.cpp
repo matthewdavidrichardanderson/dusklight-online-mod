@@ -10,14 +10,13 @@
 
 #include <mods/service.hpp>
 #include <mods/svc/config.h>
-#include <mods/svc/ui.h>
+#include <mods/svc/ui.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
 #include <map>
-#include <cstring>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -216,56 +215,13 @@ std::string failure_message(std::string_view prefix, std::string_view detail) {
 }
 
 bool write_clipboard(std::string_view text) {
-#ifdef _WIN32
-    if (text.empty() || !OpenClipboard(nullptr)) return false;
-    const HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
-    if (memory == nullptr) {
-        CloseClipboard();
-        return false;
-    }
-    void* const bytes = GlobalLock(memory);
-    if (bytes == nullptr) {
-        GlobalFree(memory);
-        CloseClipboard();
-        return false;
-    }
-    std::memcpy(bytes, text.data(), text.size());
-    static_cast<char*>(bytes)[text.size()] = '\0';
-    GlobalUnlock(memory);
-    EmptyClipboard();
-    if (SetClipboardData(CF_TEXT, memory) == nullptr) {
-        GlobalFree(memory);
-        CloseClipboard();
-        return false;
-    }
-    CloseClipboard();
-    return true;
-#else
-    (void)text;
-    return false;
-#endif
+    return !text.empty() && mods::ui::set_clipboard_text(std::string(text)) == MOD_OK;
 }
 
 std::string read_clipboard() {
-#ifdef _WIN32
-    if (!OpenClipboard(nullptr)) return {};
-    const HANDLE handle = GetClipboardData(CF_TEXT);
-    if (handle == nullptr) {
-        CloseClipboard();
-        return {};
-    }
-    const char* const bytes = static_cast<const char*>(GlobalLock(handle));
-    if (bytes == nullptr) {
-        CloseClipboard();
-        return {};
-    }
-    std::string text(bytes);
-    GlobalUnlock(handle);
-    CloseClipboard();
+    std::string text;
+    if (mods::ui::get_clipboard_text(text) != MOD_OK) return {};
     return trim_clipboard_text(std::move(text));
-#else
-    return {};
-#endif
 }
 
 void push_clipboard_toast(const char* message, bool warning = false) {
