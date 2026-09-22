@@ -37,6 +37,7 @@ constexpr std::array kEntries = {
     Entry{"progression_state", {Domain::Presence, false, true}},
     Entry{"puppet_preference", {Domain::Presence, false, false}},
     Entry{"midna_preference", {Domain::Presence, false, false}},
+    Entry{"chat", {Domain::Chat, false, false}},
     // A sync request has its own arrival contract: the game adapter retains
     // unsafe stage/event/title arrivals in its typed, bounded reply queue. It
     // must not enter the generic stage-message queue as a second copy.

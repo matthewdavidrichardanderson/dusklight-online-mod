@@ -16,6 +16,7 @@ enum class MessageDomain : uint8_t {
     Session,
     Membership,
     Presence,
+    Chat,
     Progression,
     Visual,
     Interaction,

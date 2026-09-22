@@ -12,7 +12,8 @@ inline bool peer_delivery_type(std::string_view type) {
         "malo_fundraising","charlo_offering","fish_record","collect_smell","item_get","rando_item_get",
         "item_first_bit","collect_crystal","collect_mirror","dark_clear_lv","transform_lv","region_bit",
         "collect","visited_room","letter_get","pvp_hit","ganondorf_owner_claim","ganondorf_owner",
-        "ganondorf_hit","ganondorf_reaction","ganondorf_player_damage","ganondorf_state","ooccoo_state"};
+        "ganondorf_hit","ganondorf_reaction","ganondorf_player_damage","ganondorf_state","ooccoo_state",
+        "chat"};
     for(auto value:types) if(type==value) return true;
     return false;
 }

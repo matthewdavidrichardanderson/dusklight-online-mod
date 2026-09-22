@@ -108,6 +108,7 @@ private:
     double poseTimingMaxUpdateMs_ = 0;
     std::map<std::string, uint32_t> latestAckSequence_;
     std::map<std::string, uint32_t> pvpRemoteHitLastSequence_;
+    std::map<std::string, std::deque<std::chrono::steady_clock::time_point>> chatMessageTimes_;
     // Link exposes several sword attack objects during one swing. Remember
     // contacts already reported during this game update so those colliders
     // produce one network hit without imposing a cross-frame cooldown.

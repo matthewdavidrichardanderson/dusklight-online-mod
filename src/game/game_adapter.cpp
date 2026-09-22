@@ -5,6 +5,7 @@
 #include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/bottle_sync.hpp"
 #include "dusklight_online/game/cave_map_sync.hpp"
+#include "dusklight_online/game/chat.hpp"
 #include "dusklight_online/game/ooccoo_wire.hpp"
 #include "dusklight_online/game/audio_bridge.hpp"
 #include "dusklight_online/game/bomb_bridge.hpp"
@@ -3345,7 +3346,11 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         playerLocations.emplace(peerId, PlayerLocationView{
             stage->get<std::string>(), static_cast<int>(roomNumber)});
     }
-    update_visual_overlays(status.enabled, remoteGameplayReady, nameLabelsEnabled,
+    const bool chatAvailable = status.enabled &&
+        (status.mode == net::Mode::DirectHost ?
+            (status.state == net::State::Listening || status.state == net::State::Connected) :
+            status.welcomed);
+    update_visual_overlays(status.enabled, chatAvailable, remoteGameplayReady, nameLabelsEnabled,
                            remoteModelEnabled, playerListEnabled, status.room,
                            (status.mode == net::Mode::DirectHost || status.isOwner) ?
                                "hosting" : "connected",
@@ -3765,6 +3770,34 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                 }
             } else peerPresence_[message.peerId] = message.payload;
             return ApplyResult::Applied;
+        case MessageDomain::Chat:
+        {
+            const auto peer = peerNames_.find(message.peerId);
+            if (message.peerId.empty() || peer == peerNames_.end()) {
+                return reject("chat message came from an unknown peer");
+            }
+            const auto textField = message.payload.find("text");
+            if (textField == message.payload.end() || !textField->is_string()) {
+                return reject("chat message is missing text");
+            }
+            std::string text;
+            if (!normalize_chat_text(textField->get_ref<const std::string&>(), text)) {
+                return reject("chat message text is invalid");
+            }
+
+            constexpr size_t kChatBurstLimit = 6;
+            constexpr auto kChatBurstWindow = std::chrono::seconds(5);
+            const auto now = std::chrono::steady_clock::now();
+            auto& recent = chatMessageTimes_[message.peerId];
+            while (!recent.empty() && now - recent.front() >= kChatBurstWindow) {
+                recent.pop_front();
+            }
+            if (recent.size() >= kChatBurstLimit) return ApplyResult::IgnoredByPolicy;
+            recent.push_back(now);
+            push_chat_message(peer->second, std::move(text),
+                              appearance::peer_color(message.peerId));
+            return ApplyResult::Applied;
+        }
         case MessageDomain::Progression:
         {
             if (type == "floor_switch_state") {
@@ -4141,6 +4174,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
         manualSyncState_ = ManualSyncState::Failed;
     }
     pvpRemoteHitLastSequence_.erase(key);
+    chatMessageTimes_.erase(key);
     pvpLocalHitContactsThisUpdate_.clear();
     fishCatchSequence_.erase(key);
     const std::string prefix = key + ':';
@@ -4199,6 +4233,7 @@ void GameAdapter::reset_session() {
     poseTimingMaxUpdateMs_ = 0;
     latestAckSequence_.clear();
     pvpRemoteHitLastSequence_.clear();
+    chatMessageTimes_.clear();
     pvpLocalHitContactsThisUpdate_.clear();
     localPvpHitSequence_ = 0;
     reset_visual_overlays();

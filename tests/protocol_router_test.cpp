@@ -1,4 +1,6 @@
 #include "dusklight_online/game/protocol_router.hpp"
+#include "dusklight_online/game/chat.hpp"
+#include "dusklight_online/net/peer_delivery.hpp"
 #include "cave_map_packet.hpp"
 
 #include <cassert>
@@ -58,6 +60,7 @@ int main() {
         {"remote_collision",Domain::Membership,false,false}, {"pvp_enabled",Domain::Membership,false,false},
         {"presence",Domain::Presence,false,false}, {"progression_state",Domain::Presence,false,true},
         {"puppet_preference",Domain::Presence,false,false}, {"midna_preference",Domain::Presence,false,false},
+        {"chat",Domain::Chat,false,false},
         {"sync_request",Domain::Progression,false,false}, {"save_snapshot",Domain::Progression,true,true},
         {"event_bit",Domain::Progression,false,true}, {"tbox_bit",Domain::Progression,true,true},
         {"switch_bit",Domain::Progression,true,true}, {"room_switch_bit",Domain::Progression,true,true},
@@ -98,6 +101,26 @@ int main() {
     assert(!ProtocolRouter::classify("rando_item_get").stageDependent);
     assert(ProtocolRouter::classify("ganondorf_state").domain == MessageDomain::Ganondorf);
     assert(!ProtocolRouter::is_known_type("future_unreviewed_lane"));
+    assert(dusklight_online::net::peer_delivery_type("chat"));
+
+    std::string normalizedChat;
+    assert(dusklight_online::game::normalize_chat_text("  hello world  ", normalizedChat));
+    assert(normalizedChat == "hello world");
+    assert(dusklight_online::game::normalize_chat_text("Twilight \xf0\x9f\x90\xba", normalizedChat));
+    assert(!dusklight_online::game::normalize_chat_text("   ", normalizedChat));
+    assert(dusklight_online::game::normalize_chat_text("\n  line one\nline two  \n", normalizedChat));
+    assert(normalizedChat == "line one\nline two");
+    assert(!dusklight_online::game::normalize_chat_text(
+        std::string(dusklight_online::game::kMaxChatLineCodepoints + 1, 'x'), normalizedChat));
+    assert(!dusklight_online::game::normalize_chat_text("1\n2\n3\n4\n5", normalizedChat));
+    assert(!dusklight_online::game::normalize_chat_text("\xc0\x80", normalizedChat));
+
+    const auto wrappedChat = dusklight_online::game::wrap_chat_input(
+        std::string(dusklight_online::game::kMaxChatLineCodepoints + 1, 'x'),
+        dusklight_online::game::kMaxChatLineCodepoints + 1);
+    assert(wrappedChat.text ==
+        std::string(dusklight_online::game::kMaxChatLineCodepoints, 'x') + "\nx");
+    assert(wrappedChat.cursorByte == wrappedChat.text.size());
 
     // Latest pressure is metadata, never stage-deferred replay. A release
     // arriving during a cutscene must replace the hold immediately.

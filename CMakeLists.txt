@@ -79,6 +79,27 @@ FetchContent_GetProperties(online_imgui)
 if (NOT online_imgui_POPULATED)
     FetchContent_Populate(online_imgui)
 endif ()
+
+# Chat observes the SDL event already owned and dispatched by Dusklight; it
+# does not link or initialize a second SDL runtime. Standalone mod builds need
+# only the matching public event/key definitions.
+find_path(DUSKLIGHT_ONLINE_SDL3_INCLUDE_DIR SDL3/SDL_events.h
+    HINTS
+        "${DUSKLIGHT_DIR}/build/windows-msvc/_deps/sdl3_prebuilt-src/include"
+        "${DUSKLIGHT_DIR}/build/windows-msvc/_deps/sdl3-src/include"
+)
+if (NOT DUSKLIGHT_ONLINE_SDL3_INCLUDE_DIR)
+    FetchContent_Declare(online_sdl3_headers
+        URL "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.10.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    )
+    FetchContent_GetProperties(online_sdl3_headers)
+    if (NOT online_sdl3_headers_POPULATED)
+        FetchContent_Populate(online_sdl3_headers)
+    endif ()
+    set(DUSKLIGHT_ONLINE_SDL3_INCLUDE_DIR "${online_sdl3_headers_SOURCE_DIR}/include")
+endif ()
+
 add_library(dusklight_online_imgui STATIC
     "${online_imgui_SOURCE_DIR}/imgui.cpp"
     "${online_imgui_SOURCE_DIR}/imgui_draw.cpp"
@@ -292,6 +313,7 @@ add_mod(dusklight_online
 target_include_directories(dusklight_online PRIVATE
     include
     src
+    "${DUSKLIGHT_ONLINE_SDL3_INCLUDE_DIR}"
     "${DUSKLIGHT_ONLINE_GENERATED_INCLUDE_DIR}"
     "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}"
     "${DUSKLIGHT_DIR}/src"

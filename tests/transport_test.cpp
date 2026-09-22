@@ -243,6 +243,21 @@ int main() {
         }
     }
 
+    if (!alice.send({{"type", "chat"}, {"text", "Hello\nfrom Alice"},
+                     {"client_id", "spoof"}})) {
+        fail("direct chat send");
+    }
+    pump(host, alice, bob, 40);
+    for (Transport* recipient : {&host, &bob}) {
+        nlohmann::json received;
+        if (!drain_for_type(*recipient, "chat", &received) ||
+            received.value("text", "") != "Hello\nfrom Alice" ||
+            received.value("client_id", "") == "spoof") {
+            fail("direct chat delivery or sender attribution");
+        }
+    }
+    if (drain_for_type(alice, "chat")) fail("direct chat echoed to sender");
+
     // Appearance is reliable presence metadata, including the empty default.
     for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},
                                       std::pair{"C06030", ""}, std::pair{"", "204060"},

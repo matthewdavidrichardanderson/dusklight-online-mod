@@ -644,6 +644,20 @@ void OnlineApp::update() {
         reopenSyncWindowPending_ = false;
         open_sync_window();
     }
+    if (auto chat = game::take_chat_submission()) {
+        const net::Status status = transport_.status();
+        const bool chatAvailable = status.enabled &&
+            (status.mode == net::Mode::DirectHost ?
+                (status.state == net::State::Listening || status.state == net::State::Connected) :
+                status.welcomed);
+        if (!chatAvailable) {
+            game::push_online_notification("Chat is unavailable while disconnected.", 4.0f, true);
+        } else if (transport_.send({{"type", "chat"}, {"text", *chat}})) {
+            game::push_chat_message(status.name, std::move(*chat), game::appearance::local_color());
+        } else {
+            game::push_online_notification("Could not send chat message.", 4.0f, true);
+        }
+    }
     transport_.tick();
     const net::Status captureStatus = transport_.status();
     const bool captureSyncFlags = captureStatus.enabled ? captureStatus.settings.syncFlags :

@@ -158,6 +158,7 @@ const std::set<std::string> kGameplayRouteTypes = {
     "ganondorf_player_damage",
     "ganondorf_state",
     "ooccoo_state",
+    "chat",
 };
 
 using SteadyClock = std::chrono::steady_clock;
@@ -203,6 +204,9 @@ const char* packet_category(const std::string& type) {
     }
     if (type == "ping" || type == "pong" || type == "error" || type == "ack") {
         return "control";
+    }
+    if (type == "chat") {
+        return "chat";
     }
     if (type == "sync_request") {
         return "manual_sync_request";

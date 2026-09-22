@@ -5,7 +5,8 @@ Online multiplayer for *The Legend of Zelda: Twilight Princess* running on
 
 Play together through a direct connection or relay server. The mod includes
 remote players, shared progression and world state, player collision, optional
-PvP, name tags, multiplayer audio, and manual save synchronization.
+PvP, name tags, multiplayer audio, lobby text chat, and manual save
+synchronization.
 
 ## Installation
 

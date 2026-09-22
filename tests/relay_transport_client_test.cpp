@@ -157,6 +157,17 @@ int main(int argc, char** argv) {
     };
     checkCaveDelivery();
 
+    if (!owner.send({{"type", "chat"}, {"text", "Hello through\nthe relay"},
+                     {"client_id", "spoof"}})) {
+        fail("chat send");
+    }
+    nlohmann::json chat;
+    if (!wait_until(owner, joiner, [&] { return consume_type(joiner, "chat", &chat); }) ||
+        chat.value("text", "") != "Hello through\nthe relay" ||
+        chat.value("client_id", "") != owner.status().clientId) {
+        fail("chat delivery or sender attribution");
+    }
+
     if (ownerDirect && joinerDirect) {
         const auto start = std::chrono::steady_clock::now();
         if (!owner.send({{"type","pvp_hit"},{"damage",1},{"direct_latency_probe",true}})) fail("direct hit send");

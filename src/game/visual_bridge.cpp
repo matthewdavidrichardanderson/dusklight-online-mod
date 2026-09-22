@@ -1,11 +1,17 @@
 #include "dusklight_online/game/appearance.hpp"
+#include "dusklight_online/game/chat.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
+#include "dusklight_online/logging.hpp"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +43,10 @@
 #include "mods/svc/ui.h"
 
 #include <imgui.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keycode.h>
+#include <dolphin/gx/GXAurora.h>
+#include <dolphin/pad.h>
 
 namespace dusklight_online::game {
 
@@ -44,6 +54,11 @@ DEFINE_HOOK(&dDlst_list_c::drawOpaDrawList, OpaqueDrawListHook);
 DEFINE_HOOK_SYMBOL("dMeterMap_c::draw", void(dMeterMap_c*), MeterMapDrawHook);
 DEFINE_HOOK_SYMBOL("dusk::ImGuiConsole::PostDraw", void(void*),
                    HostImGuiPostDrawHook);
+// The const qualification of a reference is not part of the calling ABI. The
+// hook uses a mutable reference to mask Dusk's slash shortcut while chat owns
+// focus, then restores the event before later consumers see it.
+DEFINE_HOOK_SYMBOL("dusk::ui::handle_event", void(SDL_Event&),
+                   HostUiEventHook);
 
 
 namespace {
@@ -106,7 +121,15 @@ struct Notification {
     float durationSeconds = 5.0f;
 };
 
+struct ChatLine {
+    std::string playerName;
+    std::string text;
+    PlayerColor playerColor{255, 255, 255, 255};
+    std::chrono::steady_clock::time_point receivedAt;
+};
+
 bool sConnected = false;
+bool sChatAvailable = false;
 bool sGameplayReady = false;
 bool sNameLabelsEnabled = true;
 bool sRemoteModelEnabled = true;
@@ -120,19 +143,112 @@ std::map<std::string, PlayerLocationView> sLocations;
 std::unique_ptr<NameLabelFontAtlas> sFontAtlas;
 ProgressionPromptView sProgressionPrompt;
 std::vector<Notification> sNotifications;
+std::deque<ChatLine> sChatLines;
+std::optional<std::string> sPendingChatSubmission;
+std::array<char, kMaxChatTextBytes + 1> sChatInput{};
+bool sChatInputActive = false;
+bool sChatInputFocused = false;
+bool sChatOpenRequested = false;
+bool sChatFocusRequested = false;
+bool sHostWantsKeyboard = false;
+bool sHostDocumentWasVisible = false;
+bool sChatScrollToBottom = false;
+bool sHostUiKeyRewritten = false;
+SDL_Keycode sHostUiOriginalKey = SDLK_UNKNOWN;
+
+constexpr size_t kMaxChatHistory = 100;
+constexpr size_t kClosedChatLineCount = 5;
+constexpr auto kClosedChatLifetime = std::chrono::seconds(8);
+constexpr auto kClosedChatFade = std::chrono::seconds(1);
+
+void restore_pad_input_block() {
+    bool documentVisible = false;
+    if (svc_ui != nullptr && svc_ui->is_any_document_visible != nullptr) {
+        svc_ui->is_any_document_visible(mod_ctx, &documentVisible);
+    }
+    PADBlockInput(documentVisible);
+}
+
+void close_chat_input() {
+    const bool wasOpen = sChatInputActive || sChatOpenRequested;
+    sChatInputActive = false;
+    sChatInputFocused = false;
+    sChatOpenRequested = false;
+    sChatFocusRequested = false;
+    sChatInput.fill('\0');
+    if (wasOpen) restore_pad_input_block();
+}
+
+bool another_document_visible() {
+    bool visible = false;
+    return svc_ui != nullptr && svc_ui->is_any_document_visible != nullptr &&
+           svc_ui->is_any_document_visible(mod_ctx, &visible) == MOD_OK && visible;
+}
+
+bool is_chat_activation_key(const SDL_Event& event) {
+    return event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+           (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER);
+}
+
+HookAction host_ui_event_pre(ModContext*, void* args, void*, void*) {
+    SDL_Event& event = mods::arg_ref<SDL_Event&>(args, 0);
+    sHostUiKeyRewritten = false;
+    if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+        close_chat_input();
+        return HOOK_CONTINUE;
+    }
+
+    // Only request the window here. It becomes active later, in the draw hook,
+    // after InputText has actually accepted keyboard focus. In particular, do
+    // not swallow this event: if the overlay draw hook is unavailable for any
+    // reason, Enter must keep working everywhere else in Dusk.
+    if (!sChatInputActive && !sChatOpenRequested && sChatAvailable &&
+        is_chat_activation_key(event) &&
+        !sHostWantsKeyboard && !sHostDocumentWasVisible &&
+        !another_document_visible()) {
+        sChatOpenRequested = true;
+        sChatScrollToBottom = true;
+        sChatInput.fill('\0');
+        dusklight_online::log_info("CHAT_UI open requested");
+    }
+
+    // Aurora has already given the original event to ImGui by the time this
+    // hook runs. Hide only the slash-console shortcut from Dusk while our
+    // confirmed input field owns focus, then restore the event in post-hook so
+    // later consumers still see the unmodified value.
+    if (sChatInputActive && sChatInputFocused &&
+        (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
+        event.key.key == SDLK_SLASH) {
+        sHostUiOriginalKey = event.key.key;
+        event.key.key = SDLK_UNKNOWN;
+        sHostUiKeyRewritten = true;
+    }
+    return HOOK_CONTINUE;
+}
+
+void host_ui_event_post(ModContext*, void* args, void*, void*) {
+    if (sHostUiKeyRewritten) {
+        SDL_Event& event = mods::arg_ref<SDL_Event&>(args, 0);
+        event.key.key = sHostUiOriginalKey;
+        sHostUiKeyRewritten = false;
+    }
+    if (sChatInputActive) PADBlockInput(true);
+}
 
 PlayerColor display_color(uint32_t value) {
     if (value == appearance::default_color) value = 0xffffff;
     return {uint8_t(value >> 16), uint8_t(value >> 8), uint8_t(value), 255};
 }
-PlayerColor color_for_peer(const std::string& peerId) {
-    PlayerColor value = display_color(appearance::peer_color(peerId));
-    // Apply the same modest brightness lift to nametags and remote map markers.
-    // Outfit textures and the native local cursor are unaffected.
+PlayerColor brighten_display_color(PlayerColor value) {
     value.r += (255 - value.r + 2) / 5;
     value.g += (255 - value.g + 2) / 5;
     value.b += (255 - value.b + 2) / 5;
     return value;
+}
+PlayerColor color_for_peer(const std::string& peerId) {
+    // Apply the same modest brightness lift to nametags and remote map markers.
+    // Outfit textures and the native local cursor are unaffected.
+    return brighten_display_color(display_color(appearance::peer_color(peerId)));
 }
 
 bool host_projection_is_mirrored() {
@@ -624,10 +740,334 @@ void draw_imgui_notifications() {
     ImGui::End();
 }
 
+void draw_chat_line(const ChatLine& line, float alpha) {
+    const PlayerColor color = line.playerColor;
+    const std::string nameLabel = line.playerName + ":";
+    const ImVec2 namePos = ImGui::GetCursorScreenPos();
+    // Derive the shadow from the active font size so it follows the chat's
+    // continuous resolution scaling instead of relying on resolution cases.
+    const float shadowOffset = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    ImGui::GetWindowDrawList()->AddText(
+        ImGui::GetFont(), ImGui::GetFontSize(),
+        ImVec2(namePos.x + shadowOffset, namePos.y + shadowOffset),
+        IM_COL32(0, 0, 0, static_cast<int>(210.0f * alpha)), nameLabel.c_str());
+    ImGui::PushStyleColor(
+        ImGuiCol_Text,
+        ImVec4(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f,
+               (color.a / 255.0f) * alpha));
+    ImGui::TextUnformatted(nameLabel.c_str());
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    const ImVec2 messagePos = ImGui::GetCursorScreenPos();
+    const float messageWrapWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    ImGui::GetWindowDrawList()->AddText(
+        ImGui::GetFont(), ImGui::GetFontSize(),
+        ImVec2(messagePos.x + shadowOffset, messagePos.y + shadowOffset),
+        IM_COL32(0, 0, 0, static_cast<int>(210.0f * alpha)), line.text.c_str(),
+        nullptr, messageWrapWidth);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.96f, 0.97f, 1.0f, alpha));
+    ImGui::TextWrapped("%s", line.text.c_str());
+    ImGui::PopStyleColor();
+}
+
+float closed_chat_line_alpha(const ChatLine& line,
+                             std::chrono::steady_clock::time_point now) {
+    const auto age = now - line.receivedAt;
+    if (age <= kClosedChatLifetime - kClosedChatFade) return 1.0f;
+    return std::clamp(
+        std::chrono::duration<float>(kClosedChatLifetime - age).count() /
+            std::chrono::duration<float>(kClosedChatFade).count(),
+        0.0f, 1.0f);
+}
+
+float chat_history_content_height(size_t firstVisible) {
+    const float contentWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const float singleLineHeight = ImGui::GetTextLineHeight();
+    float totalHeight = 0.0f;
+    for (size_t index = firstVisible; index < sChatLines.size(); ++index) {
+        const ChatLine& line = sChatLines[index];
+        const std::string nameLabel = line.playerName + ":";
+        const float nameWidth = ImGui::CalcTextSize(nameLabel.c_str()).x;
+        const float messageWidth = std::max(
+            1.0f, contentWidth - nameWidth - ImGui::GetStyle().ItemSpacing.x);
+        const float messageHeight = ImGui::CalcTextSize(
+            line.text.c_str(), nullptr, false, messageWidth).y;
+        if (index != firstVisible) totalHeight += ImGui::GetStyle().ItemSpacing.y;
+        totalHeight += std::max(singleLineHeight, messageHeight);
+    }
+    return totalHeight;
+}
+
+size_t chat_composer_line_count() {
+    const auto end = std::find(sChatInput.begin(), sChatInput.end(), '\0');
+    return 1 + static_cast<size_t>(std::count(
+        sChatInput.begin(), end, '\n'));
+}
+
+int chat_composer_edit_callback(ImGuiInputTextCallbackData* data) {
+    if (data == nullptr || data->EventFlag != ImGuiInputTextFlags_CallbackEdit) return 0;
+    const WrappedChatInput wrapped = wrap_chat_input(
+        std::string_view(data->Buf, static_cast<size_t>(data->BufTextLen)),
+        static_cast<size_t>(std::max(0, data->CursorPos)));
+    if (wrapped.text.size() == static_cast<size_t>(data->BufTextLen) &&
+        std::memcmp(wrapped.text.data(), data->Buf, wrapped.text.size()) == 0) {
+        return 0;
+    }
+
+    const size_t length = std::min(
+        wrapped.text.size(), static_cast<size_t>(std::max(0, data->BufSize - 1)));
+    std::memcpy(data->Buf, wrapped.text.data(), length);
+    data->Buf[length] = '\0';
+    data->BufTextLen = static_cast<int>(length);
+    data->CursorPos = static_cast<int>(std::min(wrapped.cursorByte, length));
+    data->SelectionStart = data->CursorPos;
+    data->SelectionEnd = data->CursorPos;
+    data->BufDirty = true;
+    return 0;
+}
+
+struct PresentationRect {
+    ImVec2 pos;
+    ImVec2 size;
+};
+
+PresentationRect game_presentation_rect() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    PresentationRect result{
+        viewport != nullptr ? viewport->Pos : ImVec2(0.0f, 0.0f),
+        viewport != nullptr ? viewport->Size : ImVec2(1280.0f, 720.0f),
+    };
+
+    u32 renderWidth = 0;
+    u32 renderHeight = 0;
+    AuroraGetRenderSize(&renderWidth, &renderHeight);
+    if (renderWidth == 0 || renderHeight == 0 || result.size.x <= 0.0f ||
+        result.size.y <= 0.0f) {
+        return result;
+    }
+
+    const float contentAspect = static_cast<float>(renderWidth) /
+                                static_cast<float>(renderHeight);
+    const float windowAspect = result.size.x / result.size.y;
+    if (windowAspect > contentAspect) {
+        const float contentWidth = result.size.y * contentAspect;
+        result.pos.x += (result.size.x - contentWidth) * 0.5f;
+        result.size.x = contentWidth;
+    } else if (windowAspect < contentAspect) {
+        const float contentHeight = result.size.x / contentAspect;
+        result.pos.y += (result.size.y - contentHeight) * 0.5f;
+        result.size.y = contentHeight;
+    }
+    return result;
+}
+
+void draw_imgui_chat() {
+    bool openedThisFrame = false;
+    if (sChatOpenRequested) {
+        sChatOpenRequested = false;
+        if (sChatAvailable && !sHostWantsKeyboard && !another_document_visible()) {
+            sChatInputActive = true;
+            sChatInputFocused = false;
+            sChatFocusRequested = true;
+            openedThisFrame = true;
+        } else {
+            dusklight_online::log_info("CHAT_UI open request cancelled: another UI owns keyboard input");
+        }
+    }
+
+    // A RmlUi document (including Dusk's command console) always wins. This
+    // also makes it impossible for a stale chat field to starve that document
+    // of Enter through ImGui's WantCaptureKeyboard flag.
+    if (sChatInputActive && another_document_visible()) {
+        dusklight_online::log_info("CHAT_UI closed: Dusk UI took focus");
+        close_chat_input();
+    }
+
+    if (!sChatAvailable && !sChatInputActive) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    size_t firstVisible = sChatLines.size();
+    if (sChatInputActive) {
+        firstVisible = 0;
+    } else {
+        size_t count = 0;
+        for (size_t index = sChatLines.size(); index > 0; --index) {
+            if (now - sChatLines[index - 1].receivedAt > kClosedChatLifetime) break;
+            firstVisible = index - 1;
+            if (++count == kClosedChatLineCount) break;
+        }
+        if (firstVisible == sChatLines.size()) return;
+    }
+
+    const PresentationRect gameRect = game_presentation_rect();
+    const float resolutionScale = std::clamp(gameRect.size.y / 1080.0f, 0.75f, 2.5f);
+    // Keep open and closed chat on one predictable measure. This is 70% of
+    // the former 900 px maximum and the composer limit is reduced by the same
+    // proportion, so input and rendered messages share the same line length.
+    // Scale that measure with the presented game height so 4K retains the
+    // same physical proportions as 1080p.
+    const float width = std::min(630.0f * resolutionScale,
+        std::max(1.0f, gameRect.size.x - 32.0f * resolutionScale));
+    const float activeHeight = std::min(
+        std::clamp(gameRect.size.y * 0.55f,
+                   340.0f * resolutionScale, 600.0f * resolutionScale),
+        std::max(1.0f, gameRect.size.y - 36.0f * resolutionScale));
+    const ImVec2 windowPadding = sChatInputActive ?
+        ImVec2(12.0f * resolutionScale, 9.0f * resolutionScale) :
+        ImVec2(8.0f * resolutionScale, 3.0f * resolutionScale);
+    ImGui::SetNextWindowPos(
+        ImVec2(gameRect.pos.x + 16.0f * resolutionScale,
+               gameRect.pos.y + gameRect.size.y - 18.0f * resolutionScale),
+        ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowSize(
+        ImVec2(width, sChatInputActive ? activeHeight : 0.0f), ImGuiCond_Always);
+    const float closedAlpha = sChatInputActive || sChatLines.empty() ?
+        1.0f : closed_chat_line_alpha(sChatLines.back(), now);
+    ImGui::SetNextWindowBgAlpha(sChatInputActive ? 0.72f : 0.48f * closedAlpha);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f * resolutionScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, windowPadding);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        ImVec2(5.0f * resolutionScale, 3.0f * resolutionScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                        ImVec2(style.FramePadding.x * resolutionScale,
+                               style.FramePadding.y * resolutionScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,
+                        style.FrameRounding * resolutionScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize,
+                        style.ScrollbarSize * resolutionScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,
+                        style.GrabMinSize * resolutionScale);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.015f, 0.018f, 0.022f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.46f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.08f, 0.08f, 0.08f, 0.58f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.11f, 0.11f, 0.11f, 0.66f));
+    ImGui::PushStyleColor(ImGuiCol_NavHighlight, ImVec4(0.32f, 0.32f, 0.32f, 0.30f));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0.0f, 0.0f, 0.0f, 0.24f));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.34f, 0.34f, 0.34f, 0.38f));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.46f, 0.46f, 0.46f, 0.52f));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.58f, 0.58f, 0.58f, 0.64f));
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing;
+    if (!sChatInputActive) {
+        flags |= ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                 ImGuiWindowFlags_NoNav;
+    }
+
+    if (ImGui::Begin("Online Chat", nullptr, flags)) {
+        // Scale the entire chat window, including history from every player
+        // and the local composer. Child windows inherit the parent scale.
+        ImGui::SetWindowFontScale(1.15f * resolutionScale);
+        const float composerHeight = ImGui::GetTextLineHeight() *
+                static_cast<float>(std::clamp<size_t>(
+                    chat_composer_line_count(), 1, kMaxChatLines)) +
+            ImGui::GetStyle().FramePadding.y * 2.0f;
+        const float inputHeight = composerHeight + ImGui::GetStyle().ItemSpacing.y;
+        const float historyHeight = sChatInputActive ?
+            std::max(1.0f, ImGui::GetContentRegionAvail().y - inputHeight) : 0.0f;
+        if (sChatInputActive) {
+            ImGui::BeginChild("##OnlineChatHistory", ImVec2(0.0f, historyHeight), false,
+                              ImGuiWindowFlags_NoSavedSettings);
+            if (!sChatLines.empty()) {
+                const float contentHeight = chat_history_content_height(firstVisible);
+                const float availableHeight = ImGui::GetContentRegionAvail().y;
+                if (contentHeight < availableHeight) {
+                    ImGui::SetCursorPosY(
+                        ImGui::GetCursorPosY() + availableHeight - contentHeight);
+                }
+            }
+        }
+
+        ImGui::PushTextWrapPos(0.0f);
+        for (size_t index = firstVisible; index < sChatLines.size(); ++index) {
+            float alpha = 1.0f;
+            if (!sChatInputActive) {
+                alpha = closed_chat_line_alpha(sChatLines[index], now);
+            }
+            draw_chat_line(sChatLines[index], alpha);
+        }
+        ImGui::PopTextWrapPos();
+
+        if (sChatInputActive) {
+            if (sChatScrollToBottom) {
+                ImGui::SetScrollHereY(1.0f);
+                sChatScrollToBottom = false;
+            }
+            ImGui::EndChild();
+
+            if (sChatFocusRequested) {
+                ImGui::SetKeyboardFocusHere();
+                sChatFocusRequested = false;
+            }
+            ImGui::SetNextItemWidth(-1.0f);
+            constexpr ImGuiInputTextFlags inputFlags =
+                ImGuiInputTextFlags_EnterReturnsTrue |
+                ImGuiInputTextFlags_CtrlEnterForNewLine |
+                ImGuiInputTextFlags_CallbackEdit |
+                ImGuiInputTextFlags_NoHorizontalScroll;
+            const bool submitted = ImGui::InputTextMultiline(
+                "##OnlineChatInput", sChatInput.data(), sChatInput.size(),
+                ImVec2(-1.0f, composerHeight), inputFlags,
+                &chat_composer_edit_callback);
+            const bool inputFocused = ImGui::IsItemActive();
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                close_chat_input();
+            } else if (submitted) {
+                if (openedThisFrame) {
+                    // InputText may report the opening Enter as submitted and
+                    // deactivate itself before IsItemActive is queried. Keep
+                    // the explicit chat session alive and restore focus on the
+                    // next frame; only later Enter presses send or close.
+                    dusklight_online::log_info("CHAT_UI ignored activation Enter");
+                    sChatInputFocused = false;
+                    sChatFocusRequested = true;
+                    PADBlockInput(true);
+                } else {
+                    std::string normalized;
+                    if (normalize_chat_text(sChatInput.data(), normalized)) {
+                        sPendingChatSubmission = std::move(normalized);
+                    }
+                    // Empty input and invalid/control-only input both close
+                    // without emitting a packet.
+                    close_chat_input();
+                }
+            } else {
+                if (inputFocused && !sChatInputFocused) {
+                    dusklight_online::log_info("CHAT_UI keyboard focus acquired");
+                }
+                sChatInputFocused = inputFocused;
+                if (!inputFocused) {
+                    // Focus can settle a frame after SetKeyboardFocusHere and
+                    // can be transiently released by ImGui. Chat lifetime is
+                    // explicit; retry focus instead of treating that as close.
+                    sChatFocusRequested = true;
+                }
+                PADBlockInput(true);
+            }
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(10);
+    ImGui::PopStyleVar(9);
+}
+
 void draw_host_imgui_overlays() {
+    // Capture the host's pre-existing keyboard ownership before our chat
+    // window contributes to it. The next SDL event uses this to avoid opening
+    // chat over another ImGui text field or menu.
+    sHostWantsKeyboard = ImGui::GetIO().WantCaptureKeyboard || ImGui::GetIO().WantTextInput;
+    // RmlUi handles keyboard events before dusk::ui::handle_event, which is
+    // where Online can observe them. A command submission may close its
+    // console during that earlier dispatch, so retain the preceding frame's
+    // visibility to identify the Enter as belonging to Dusk rather than chat.
+    sHostDocumentWasVisible = another_document_visible();
     draw_imgui_player_list();
     draw_imgui_progression_prompt();
     draw_imgui_notifications();
+    draw_imgui_chat();
 }
 
 void draw_text_run(NameLabelFontAtlas& atlas, const cXyz& origin, const cXyz& right,
@@ -753,7 +1193,9 @@ ModResult install_visual_hooks(ModError* error) {
         return mods::set_error(error, MOD_UNAVAILABLE, "Host ImGui context accessor is unavailable");
     }
     sGetHostContext = reinterpret_cast<GetHostContextFn>(contextAddress);
-    if (mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
+    if (mods::hook::add_pre<HostUiEventHook>(&host_ui_event_pre) != MOD_OK ||
+        mods::hook::add_post<HostUiEventHook>(&host_ui_event_post) != MOD_OK ||
+        mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
         mods::hook::add_post<HostImGuiPostDrawHook>(&host_imgui_post_draw_post) != MOD_OK ||
         mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK) {
         uninstall_visual_hooks();
@@ -763,6 +1205,7 @@ ModResult install_visual_hooks(ModError* error) {
 }
 
 void uninstall_visual_hooks() {
+    mods::hook::uninstall<HostUiEventHook>();
     mods::hook::uninstall<MeterMapDrawHook>();
     mods::hook::uninstall<HostImGuiPostDrawHook>();
     mods::hook::uninstall<OpaqueDrawListHook>();
@@ -776,7 +1219,7 @@ void uninstall_visual_hooks() {
 }
 
 void update_visual_overlays(
-    bool connected, bool gameplayReady, bool nameLabelsEnabled, bool remoteModelEnabled,
+    bool connected, bool chatAvailable, bool gameplayReady, bool nameLabelsEnabled, bool remoteModelEnabled,
     bool playerListEnabled, std::string_view room, std::string_view localStatus,
     std::string_view localName,
     const std::map<std::string, PeerPoseSnapshot>& poses,
@@ -784,6 +1227,8 @@ void update_visual_overlays(
     const std::map<std::string, PlayerLocationView>& locations,
     const ProgressionPromptView& progressionPrompt) {
     sConnected = connected;
+    sChatAvailable = chatAvailable;
+    if (!sChatAvailable) close_chat_input();
     sGameplayReady = gameplayReady;
     sNameLabelsEnabled = nameLabelsEnabled;
     sRemoteModelEnabled = remoteModelEnabled;
@@ -819,8 +1264,25 @@ void push_online_player_notification(std::string playerName, std::string text,
     if (sNotifications.size() > 5) sNotifications.erase(sNotifications.begin());
 }
 
+void push_chat_message(std::string playerName, std::string text, uint32_t color) {
+    std::string normalized;
+    if (!normalize_chat_text(text, normalized)) return;
+    if (playerName.empty()) playerName = "Player";
+    sChatLines.push_back({std::move(playerName), std::move(normalized),
+                          brighten_display_color(display_color(color)),
+                          std::chrono::steady_clock::now()});
+    while (sChatLines.size() > kMaxChatHistory) sChatLines.pop_front();
+    sChatScrollToBottom = true;
+}
+
+std::optional<std::string> take_chat_submission() {
+    return std::exchange(sPendingChatSubmission, std::nullopt);
+}
+
 void reset_visual_overlays() {
+    close_chat_input();
     sConnected = false;
+    sChatAvailable = false;
     sGameplayReady = false;
     sPlayerListEnabled = false;
     sPoses.clear();
@@ -831,6 +1293,14 @@ void reset_visual_overlays() {
     sLocalName.clear();
     sProgressionPrompt = {};
     sNotifications.clear();
+    sChatLines.clear();
+    sPendingChatSubmission.reset();
+    sChatInput.fill('\0');
+    sHostWantsKeyboard = false;
+    sHostDocumentWasVisible = false;
+    sChatScrollToBottom = false;
+    sHostUiKeyRewritten = false;
+    sHostUiOriginalKey = SDLK_UNKNOWN;
 }
 
 }  // namespace dusklight_online::game
