@@ -572,6 +572,22 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(first.expect_type("peer_left")["client_id"], third_welcome["client_id"])
         self.assertEqual(second.expect_type("peer_left")["client_id"], third_welcome["client_id"])
 
+    def test_only_lobby_owner_can_kick_member(self) -> None:
+        owner, _ = self.join("Owner", "owner-kick")
+        member, member_welcome = self.join("Member", "owner-kick")
+        owner.expect_type("peer_joined")
+
+        member.send({"type": "kick", "target_client_id": "client_not_real"})
+        member.expect_error("owner_only")
+
+        owner.send({"type": "kick", "target_client_id": member_welcome["client_id"]})
+        kicked = member.expect_type("kicked")
+        self.assertEqual(kicked["reason"], "removed_by_host")
+        self.assertEqual(
+            owner.expect_type("peer_left", 4.0)["client_id"],
+            member_welcome["client_id"],
+        )
+
     def test_fragmented_and_coalesced_input(self) -> None:
         client = self.client()
         encoded = json.dumps(hello("Fragmented", "framing", action="create")).encode("utf-8") + b"\n"

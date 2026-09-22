@@ -436,9 +436,18 @@ int main(int argc, char** argv) {
         thirdGot |= consume_type(third,"item_get");
         return secondGot&&thirdGot;
     },10000)) fail("membership race lost authorized recipient");
-    third.disconnect();
-    if(!wait_until(owner,joiner,[&] { return owner.peers().size()==1; },20000)) fail("third departure");
-    std::cout << "concurrent membership admission and departure passed\n";
+    const std::string thirdId = third.status().clientId;
+    error.clear();
+    if (joiner.kick_peer(thirdId, &error) || error.empty())
+        fail("relay non-owner was allowed to request a kick");
+    error.clear();
+    if (!owner.kick_peer(thirdId, &error)) fail("relay owner kick: " + error);
+    if(!wait_until(owner,third,[&] {
+        joiner.tick();
+        return owner.peers().size()==1 && !third.status().enabled;
+    },20000)) fail("kicked relay member departure");
+    if (third.status().reconnecting) fail("kicked relay member attempted to reconnect");
+    std::cout << "concurrent membership admission and owner kick passed\n";
 
     auto changed = owner.status().settings;
     changed.remoteCollision = false;

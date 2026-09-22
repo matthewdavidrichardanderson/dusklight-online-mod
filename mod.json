@@ -51,7 +51,7 @@
     {
       "service_id": "dev.twilitrealm.dusklight.ui",
       "major": 2,
-      "min_minor": 2,
+      "min_minor": 3,
       "optional": false
     }
   ],

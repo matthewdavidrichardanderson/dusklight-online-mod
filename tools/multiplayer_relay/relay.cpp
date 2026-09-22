@@ -679,6 +679,43 @@ private:
             return;
         }
 
+        if (type == "kick") {
+            auto room = mRooms.find(client.roomId);
+            if (room == mRooms.end()) {
+                send_error(client, "lobby_not_found");
+                return;
+            }
+            if (room->second.ownerClientId != client.id) {
+                send_error(client, "owner_only");
+                return;
+            }
+            const auto targetField = message.find("target_client_id");
+            if (targetField == message.end() || !targetField->is_string()) {
+                send_error(client, "invalid_target");
+                return;
+            }
+            const std::string targetId = targetField->get<std::string>();
+            const bool admitted = targetId != client.id &&
+                std::find(room->second.clientIds.begin(), room->second.clientIds.end(),
+                          targetId) != room->second.clientIds.end();
+            auto target = mClients.find(targetId);
+            if (!admitted || target == mClients.end() || target->second.closeAfterFlush) {
+                send_error(client, "unknown_target");
+                return;
+            }
+            if (!send_json(target->second,
+                           {{"type", "kicked"}, {"reason", "removed_by_host"}})) {
+                target->second.disconnectRequested = true;
+            } else {
+                // Stop accepting anything else from the removed member, then
+                // close only after the reliable notice has been acknowledged.
+                target->second.closeAfterFlush = true;
+            }
+            log("kick room=" + client.roomId + " owner=" + client.id +
+                " target=" + targetId);
+            return;
+        }
+
         if (type == "puppet_preference") {
             client.wantsPuppet = message.value("want_puppet", client.wantsPuppet);
             client.wantsMidna = message.value("want_midna", client.wantsMidna);
@@ -933,7 +970,7 @@ private:
                 continue;
             }
             auto peerIt = mClients.find(peerId);
-            if (peerIt != mClients.end()) {
+            if (peerIt != mClients.end() && !peerIt->second.closeAfterFlush) {
                 if (!send_json(peerIt->second, message)) {
                     peerIt->second.disconnectRequested = true;
                 }
@@ -1015,7 +1052,8 @@ private:
 
             const std::string senderId = udp_sender_id(header);
             auto senderIt = mClients.find(senderId);
-            if (senderIt == mClients.end() || senderIt->second.roomId.empty()) {
+            if (senderIt == mClients.end() || senderIt->second.roomId.empty() ||
+                senderIt->second.closeAfterFlush) {
                 continue;
             }
             Client& sender = senderIt->second;
@@ -1132,7 +1170,8 @@ private:
         const auto senderId = "client_" + std::to_string(tunnel_read(wire.subspan(4, 8)));
         const auto targetId = "client_" + std::to_string(tunnel_read(wire.subspan(12, 8)));
         auto source = mClients.find(senderId), destination = mClients.find(targetId);
-        if (source == mClients.end() || destination == mClients.end() || source == destination) return;
+        if (source == mClients.end() || destination == mClients.end() || source == destination ||
+            source->second.closeAfterFlush || destination->second.closeAfterFlush) return;
         auto& sender = source->second; auto& target = destination->second;
         if (sender.roomId.empty() || sender.roomId != target.roomId ||
             !sender.udpAddrKnown || !same_udp_endpoint(from, sender.udpAddr)) return;
@@ -1177,7 +1216,7 @@ private:
         }
 
         auto peerIt = mClients.find(targetClientId);
-        if (peerIt == mClients.end()) {
+        if (peerIt == mClients.end() || peerIt->second.closeAfterFlush) {
             return false;
         }
 

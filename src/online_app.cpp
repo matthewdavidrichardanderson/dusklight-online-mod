@@ -359,10 +359,6 @@ window content pane.online-lobby-choice-pane > select-button.group-button {
     flex: 1 1 auto;
     min-width: 0;
 }
-.online-player-list {
-    display: flex;
-    flex-direction: column;
-}
 .online-player-row,
 .online-player-empty {
     display: flex;
@@ -372,6 +368,15 @@ window content pane.online-lobby-choice-pane > select-button.group-button {
     border: 1dp rgba(146, 135, 91, 55%);
     border-radius: 8dp;
     background-color: rgba(224, 219, 200, 5%);
+}
+.online-player-row {
+    justify-content: space-between;
+}
+.online-player-identity {
+    display: flex;
+    align-items: center;
+    flex: 1 1 auto;
+    min-width: 0;
 }
 .online-player-indicator {
     display: block;
@@ -400,6 +405,31 @@ window content pane.online-lobby-choice-pane > select-button.group-button {
     margin-top: 3dp;
     font-size: 16dp;
     color: rgba(224, 219, 200, 48%);
+}
+button.online-inline-kick {
+    flex: 0 0 auto;
+    min-width: 70dp;
+    height: 34dp;
+    margin-left: 14dp;
+    padding: 0dp 13dp;
+    border-radius: 6dp;
+    line-height: 34dp;
+    text-align: center;
+    font-family: "Fira Sans Condensed";
+    font-size: 16dp;
+    font-weight: bold;
+    color: #ff716a;
+    background-color: rgba(226, 83, 77, 14%);
+    box-shadow: rgba(226, 83, 77, 80%) 0 0 0 1dp;
+}
+button.online-inline-kick:not(:disabled):focus-visible,
+button.online-inline-kick:not(:disabled):active {
+    color: #fff0ed;
+    background-color: rgba(226, 83, 77, 36%);
+}
+button.online-inline-kick:disabled {
+    opacity: 0.4;
+    cursor: default;
 }
 button.online-peer-selected {
     color: #e0dbc8;
@@ -884,7 +914,8 @@ void OnlineApp::shutdown() {
     }
     panelStatus_ = 0;
     windowStatus_ = 0;
-    windowPlayers_ = 0;
+    windowPlayersEmpty_ = 0;
+    for (auto& slot : inlineKickRows_) slot = {};
     router_.reset();
     game_.reset();
     livePublishInitialized_ = false;
@@ -1219,6 +1250,69 @@ void OnlineApp::refresh_manual_peer_choices() {
     }
 }
 
+void OnlineApp::refresh_inline_player_rows() {
+    const auto& peers = transport_.peers();
+    const net::Status status = transport_.status();
+    const bool owner = status.enabled &&
+        (status.mode == net::Mode::DirectHost ||
+         (status.mode == net::Mode::Relay && status.isOwner));
+
+    const bool emptyVisible = peers.empty();
+    if (windowPlayersEmpty_ != 0 && emptyVisible != windowPlayersEmptyVisible_) {
+        if (svc_ui->elem_set_visible(mod_ctx, windowPlayersEmpty_, emptyVisible) == MOD_OK) {
+            windowPlayersEmptyVisible_ = emptyVisible;
+        } else {
+            windowPlayersEmpty_ = 0;
+        }
+    }
+
+    auto peer = peers.begin();
+    for (auto& slot : inlineKickRows_) {
+        const bool hasPeer = peer != peers.end();
+        if (hasPeer) {
+            const std::string peerName = peer->second.empty() ? "Player" : peer->second;
+            if (slot.peerId != peer->first) {
+                slot.peerId = peer->first;
+                slot.kickPending = false;
+            }
+            slot.peerName = peerName;
+            const std::string identity =
+                "<span class=\"online-player-indicator\"></span>"
+                "<span class=\"online-player-name\">" + rml_escape(peerName) + "</span>";
+            if (slot.identity != 0 && identity != slot.renderedIdentity) {
+                if (svc_ui->elem_set_rml(mod_ctx, slot.identity, identity.c_str()) != MOD_OK) {
+                    slot.identity = 0;
+                }
+                slot.renderedIdentity = identity;
+            }
+            ++peer;
+        } else {
+            slot.peerId.clear();
+            slot.peerName.clear();
+            slot.renderedIdentity.clear();
+            slot.kickPending = false;
+        }
+
+        if (slot.row != 0 && hasPeer != slot.rowVisible) {
+            if (svc_ui->elem_set_visible(mod_ctx, slot.row, hasPeer) == MOD_OK) {
+                slot.rowVisible = hasPeer;
+            } else {
+                slot.row = 0;
+                slot.identity = 0;
+                slot.button = 0;
+            }
+        }
+        const bool buttonVisible = hasPeer && owner;
+        if (slot.button != 0 && buttonVisible != slot.buttonVisible) {
+            if (svc_ui->elem_set_visible(mod_ctx, slot.button, buttonVisible) == MOD_OK) {
+                slot.buttonVisible = buttonVisible;
+            } else {
+                slot.button = 0;
+            }
+        }
+    }
+}
+
 void OnlineApp::set_manual_sync_pending_visual(bool pending) {
     const UiElementHandle buttons[] = {manualSyncFlagsButton_, manualSyncWarpButton_};
     for (const UiElementHandle button : buttons) {
@@ -1503,7 +1597,9 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                                        UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.windowStatus_ = 0;
-    app.windowPlayers_ = 0;
+    app.windowPlayersEmpty_ = 0;
+    app.windowPlayersEmptyVisible_ = true;
+    for (auto& slot : app.inlineKickRows_) slot = {};
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
@@ -1539,29 +1635,34 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     svc_ui->pane_add_rml(mod_ctx, right, status.c_str(), &app.windowStatus_);
     app.windowRenderedStatus_ = status;
     svc_ui->pane_add_section(mod_ctx, right, "Connected players");
-    const std::string players = app.connected_players_rml();
-    svc_ui->pane_add_rml(mod_ctx, right, players.c_str(), &app.windowPlayers_);
-    app.windowRenderedPlayers_ = players;
-    return MOD_OK;
-}
-
-std::string OnlineApp::connected_players_rml() const {
-    if (!transport_.peers().empty()) {
-        std::string players = "<div class=\"online-player-list\">";
-        for (const auto& [id, name] : transport_.peers()) {
-            players += "<div class=\"online-player-row\"><span class=\"online-player-indicator\"></span>"
-                       "<span class=\"online-player-name\">" + rml_escape(name.empty() ? "Player" : name) +
-                       "</span></div>";
-        }
-        players += "</div>";
-        return players;
-    } else {
-        return
-            "<div class=\"online-player-empty\">"
-            "<span class=\"online-player-empty-title\">No other players are connected.</span>"
-            "<span class=\"online-player-empty-detail\">Players will appear here after joining.</span>"
-            "</div>";
+    svc_ui->pane_add_rml(
+        mod_ctx, right,
+        "<span class=\"online-player-empty-title\">No other players are connected.</span>"
+        "<span class=\"online-player-empty-detail\">Players will appear here after joining.</span>",
+        &app.windowPlayersEmpty_);
+    if (app.windowPlayersEmpty_ != 0) {
+        svc_ui->elem_set_class(mod_ctx, app.windowPlayersEmpty_, "online-player-empty", true);
     }
+    for (auto& slot : app.inlineKickRows_) {
+        slot.app = &app;
+        UiRowDesc row = UI_ROW_DESC_INIT;
+        row.align = UI_ROW_ALIGN_SPACE_BETWEEN;
+        if (svc_ui->pane_add_row(mod_ctx, right, &row, &slot.row) != MOD_OK || slot.row == 0) {
+            slot.row = 0;
+            continue;
+        }
+        svc_ui->elem_set_class(mod_ctx, slot.row, "online-player-row", true);
+        svc_ui->pane_add_rml(mod_ctx, slot.row, "", &slot.identity);
+        if (slot.identity != 0) {
+            svc_ui->elem_set_class(mod_ctx, slot.identity, "online-player-identity", true);
+        }
+        slot.button = add_button(
+            slot.row, "KICK", &OnlineApp::inline_kick_pressed, &slot,
+            &OnlineApp::inline_kick_unavailable, nullptr, "online-inline-kick", nullptr,
+            "<p>Remove this player from the lobby.</p>");
+    }
+    app.refresh_inline_player_rows();
+    return MOD_OK;
 }
 
 ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiElementHandle left,
@@ -1821,15 +1922,7 @@ void OnlineApp::player_options_pressed(ModContext*, void* data) {
 
 ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
-    if (app.windowPlayers_ != 0) {
-        const std::string players = app.connected_players_rml();
-        if (players != app.windowRenderedPlayers_) {
-            if (svc_ui->elem_set_rml(mod_ctx, app.windowPlayers_, players.c_str()) != MOD_OK) {
-                app.windowPlayers_ = 0;
-            }
-            app.windowRenderedPlayers_ = players;
-        }
-    }
+    app.refresh_inline_player_rows();
     if (app.windowStatus_ != 0) {
         const std::string status = app.dashboard_rml();
         if (status != app.windowRenderedStatus_ &&
@@ -1837,7 +1930,8 @@ ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
             // A tab rebuild invalidates every element handle from its prior
             // generation. Stop immediately if the host rebuilt underneath us.
             app.windowStatus_ = 0;
-            app.windowPlayers_ = 0;
+            app.windowPlayersEmpty_ = 0;
+            for (auto& slot : app.inlineKickRows_) slot = {};
         }
         app.windowRenderedStatus_ = status;
     }
@@ -1859,7 +1953,8 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.window_ = 0;
     app.windowStatus_ = 0;
-    app.windowPlayers_ = 0;
+    app.windowPlayersEmpty_ = 0;
+    for (auto& slot : app.inlineKickRows_) slot = {};
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
@@ -1999,6 +2094,29 @@ bool OnlineApp::manual_peer_selected(ModContext*, void* data) {
     const auto& context = *static_cast<ManualPeerButtonContext*>(data);
     return context.app != nullptr && context.app->selectedManualPeer_ == context.index;
 }
+void OnlineApp::inline_kick_pressed(ModContext*, void* data) {
+    auto& slot = *static_cast<InlineKickRow*>(data);
+    if (slot.app == nullptr || slot.peerId.empty() || slot.kickPending) return;
+
+    auto& app = *slot.app;
+    const auto peer = app.transport_.peers().find(slot.peerId);
+    if (peer == app.transport_.peers().end()) {
+        app.refresh_inline_player_rows();
+        return;
+    }
+    const std::string peerName = peer->second.empty() ? "Player" : peer->second;
+    std::string error;
+    if (!app.transport_.kick_peer(slot.peerId, &error)) {
+        game::push_online_notification(
+            failure_message("Could not kick " + peerName,
+                            error.empty() ? "The request could not be sent." : error),
+            5.0f, true);
+        return;
+    }
+    slot.kickPending = true;
+    app.statusMessage_ = "Removing " + peerName + " from the lobby";
+    game::push_online_notification("Kick requested for " + peerName + ".");
+}
 void OnlineApp::manual_sync_warp_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->request_manual_sync(false);
 }
@@ -2023,6 +2141,15 @@ bool OnlineApp::manual_sync_unavailable(ModContext*, void* data) {
 }
 bool OnlineApp::sync_menu_unavailable(ModContext*, void* data) {
     return !static_cast<OnlineApp*>(data)->transport_.status().welcomed;
+}
+bool OnlineApp::inline_kick_unavailable(ModContext*, void* data) {
+    const auto& slot = *static_cast<InlineKickRow*>(data);
+    if (slot.app == nullptr || slot.peerId.empty() || slot.kickPending) return true;
+    const net::Status status = slot.app->transport_.status();
+    const bool owner = status.mode == net::Mode::DirectHost ||
+        (status.mode == net::Mode::Relay && status.isOwner);
+    return !status.enabled || !owner ||
+        slot.app->transport_.peers().find(slot.peerId) == slot.app->transport_.peers().end();
 }
 bool OnlineApp::session_active(ModContext*, void* data) {
     return static_cast<OnlineApp*>(data)->transport_.status().enabled;

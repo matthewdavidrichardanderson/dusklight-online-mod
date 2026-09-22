@@ -184,6 +184,7 @@ struct Transport::Impl {
         bool wantMidna = false;
         bool supportsSemanticVisuals = false;
         bool supportsSnapshotDeltas = false;
+        bool kickPending = false;
     };
 
     struct PeerPresence {
@@ -675,7 +676,7 @@ struct Transport::Impl {
              left);
         std::vector<std::string> failed;
         for (auto& [id, peer] : directPeers) {
-            if (peer.welcomed && !queue_peer(peer, left)) {
+            if (peer.welcomed && !peer.kickPending && !queue_peer(peer, left)) {
                 failed.push_back(id);
             }
         }
@@ -690,7 +691,7 @@ struct Transport::Impl {
         bool sentAny = false;
         std::vector<std::string> failed;
         for (auto& [id, peer] : directPeers) {
-            if (!peer.welcomed || id == excluded) {
+            if (!peer.welcomed || peer.kickPending || id == excluded) {
                 continue;
             }
             if (queue_peer(peer, message)) {
@@ -710,7 +711,7 @@ struct Transport::Impl {
     json direct_peer_list(const std::string& excluded) const {
         json peers = json::array();
         for (const auto& [id, peer] : directPeers) {
-            if (peer.welcomed && id != excluded) {
+            if (peer.welcomed && !peer.kickPending && id != excluded) {
                 peers.push_back({{"client_id", id}, {"name", peer.name}});
             }
         }
@@ -720,7 +721,8 @@ struct Transport::Impl {
     bool direct_semantic_visuals_ready(const Peer* pendingPeer = nullptr) const {
         for (const auto& [id, peer] : directPeers) {
             (void)id;
-            if ((peer.welcomed || &peer == pendingPeer) && !peer.supportsSemanticVisuals) {
+            if (!peer.kickPending && (peer.welcomed || &peer == pendingPeer) &&
+                !peer.supportsSemanticVisuals) {
                 return false;
             }
         }
@@ -731,7 +733,8 @@ struct Transport::Impl {
         if (!supportsSnapshotDeltas) return false;
         for (const auto& [id, peer] : directPeers) {
             (void)id;
-            if ((peer.welcomed || &peer == pendingPeer) && !peer.supportsSnapshotDeltas) {
+            if (!peer.kickPending && (peer.welcomed || &peer == pendingPeer) &&
+                !peer.supportsSnapshotDeltas) {
                 return false;
             }
         }
@@ -939,7 +942,8 @@ struct Transport::Impl {
                                      const std::string& excluded = {}) {
         bool sentAny = false;
         for (auto& [id, peer] : directPeers) {
-            if (id == excluded || !peer.welcomed || !peer.udpAddressKnown ||
+            if (id == excluded || !peer.welcomed || peer.kickPending ||
+                !peer.udpAddressKnown ||
                 !peer.wantPuppet || (type == udp::PacketType::MidnaMsgpack && !peer.wantMidna) ||
                 (type == udp::PacketType::SemanticPoseMsgpack &&
                  !peer.supportsSemanticVisuals) ||
@@ -1024,7 +1028,8 @@ struct Transport::Impl {
         const auto datagram = udp::encode_remote_object(senderId, object);
         bool sentAny = false;
         for (auto& [id, peer] : directPeers) {
-            if (id == excluded || !peer.welcomed || !peer.udpAddressKnown) {
+            if (id == excluded || !peer.welcomed || peer.kickPending ||
+                !peer.udpAddressKnown) {
                 continue;
             }
             sentAny = send_udp_datagram(peer.udpAddress, datagram) || sentAny;
@@ -1053,7 +1058,7 @@ struct Transport::Impl {
         }
         if (status.mode == Mode::DirectHost) {
             auto peer = directPeers.find(decoded.senderId);
-            if (peer == directPeers.end()) {
+            if (peer == directPeers.end() || peer->second.kickPending) {
                 return;
             }
             peer->second.udpAddress = from;
@@ -1203,7 +1208,8 @@ struct Transport::Impl {
                 std::string("direct") : info->senderId;
             if (status.mode == Mode::DirectHost) {
                 auto peer = directPeers.find(admittedSender);
-                if (peer == directPeers.end() || !peer->second.welcomed) {
+                if (peer == directPeers.end() || !peer->second.welcomed ||
+                    peer->second.kickPending) {
                     // Unknown sender IDs must allocate zero Decoder state.
                     continue;
                 }
@@ -1267,6 +1273,11 @@ struct Transport::Impl {
             return;
         }
         if (!sender.welcomed) {
+            return;
+        }
+        // Kicking revokes the guest immediately. Keep its reliable socket
+        // alive only long enough to deliver the explicit removal notice.
+        if (sender.kickPending) {
             return;
         }
 
@@ -1651,6 +1662,13 @@ struct Transport::Impl {
             status.snapshotDeltasReady =
                 message.value("snapshot_deltas_ready", false);
             emit(EventKind::PeerLeft, id, {}, message);
+        } else if (type == "kicked") {
+            // Do not let the normal established-session reconnect policy put a
+            // deliberately removed player straight back into the lobby.
+            automaticReconnect = false;
+            status.error = "Kicked by lobby host";
+            handshakeRejected = true;
+            return;
         } else if (type == "ice_signal") {
             if (meshEnabled && meshLinks.contains(message.value("client_id", ""))) {
                 const int kind = message.value("kind", -1);
@@ -1781,19 +1799,28 @@ struct Transport::Impl {
     }
 
     void pump_direct_peers() {
-        std::vector<std::string> failed;
+        std::vector<std::pair<std::string, std::string>> failed;
         for (auto& [id, peer] : directPeers) {
+            if (peer.kickPending) {
+                // UdpConnection::drained means the reliable kick notice was
+                // acknowledged. Old clients that do not understand the notice
+                // are still removed after acknowledging it.
+                if (!connections.alive(peer.socket) || connections.drained(peer.socket)) {
+                    failed.emplace_back(id, "removed by lobby host");
+                }
+                continue;
+            }
             if (!flush(peer.socket, peer.tx) ||
                 !receive(peer.socket, peer.rx,
                          [this, &peer](const json& message) {
                              handle_direct_message(message, peer);
                          }) ||
                 !flush(peer.socket, peer.tx)) {
-                failed.push_back(id);
+                failed.emplace_back(id, "remote closed");
             }
         }
-        for (const std::string& id : failed) {
-            remove_peer(id, "remote closed");
+        for (const auto& [id, reason] : failed) {
+            remove_peer(id, reason);
         }
     }
 
@@ -2028,6 +2055,7 @@ bool Transport::send_to(const std::string& peerId, const nlohmann::json& message
     if (impl_->status.mode == Mode::DirectHost) {
         auto peer = impl_->directPeers.find(peerId);
         return peer != impl_->directPeers.end() && peer->second.welcomed &&
+               !peer->second.kickPending &&
                impl_->queue_peer(peer->second, message);
     }
     nlohmann::json targeted = message;
@@ -2248,6 +2276,40 @@ bool Transport::publish_visual_preferences(bool wantPuppet, bool wantMidna) {
     return send({{"type", "puppet_preference"},
                  {"want_puppet", wantPuppet},
                  {"want_midna", false}});
+}
+
+bool Transport::kick_peer(const std::string& peerId, std::string* error) {
+    const auto reject = [error](const char* reason) {
+        if (error != nullptr) *error = reason;
+        return false;
+    };
+    if (peerId.empty()) return reject("Choose a connected player");
+
+    if (impl_->status.mode == Mode::DirectHost) {
+        auto peer = impl_->directPeers.find(peerId);
+        if (peer == impl_->directPeers.end() || !peer->second.welcomed) {
+            return reject("Player is no longer connected");
+        }
+        if (peer->second.kickPending) return reject("Player removal is already pending");
+        if (!impl_->queue_peer(peer->second,
+                              {{"type", "kicked"}, {"reason", "removed_by_host"}})) {
+            return reject("Could not notify the player");
+        }
+        peer->second.kickPending = true;
+        return true;
+    }
+
+    if (impl_->status.mode != Mode::Relay || !impl_->status.welcomed ||
+        !impl_->status.isOwner) {
+        return reject("Only the lobby host can kick players");
+    }
+    if (peerId == impl_->status.clientId || !impl_->peerNames.contains(peerId)) {
+        return reject("Player is no longer connected");
+    }
+    if (!send({{"type", "kick"}, {"target_client_id", peerId}})) {
+        return reject("Could not send the kick request");
+    }
+    return true;
 }
 
 void Transport::set_pose_delta_codec(PoseDeltaExpandCallback expand,

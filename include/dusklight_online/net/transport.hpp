@@ -202,6 +202,9 @@ public:
     // emit protocol-2 room_settings.
     bool publish_room_settings(const RoomSettings& settings);
     bool publish_visual_preferences(bool wantPuppet, bool wantMidna);
+    // Removes one guest from the lobby. Direct hosts enforce this locally;
+    // relay lobby owners request an owner-validated removal from the relay.
+    bool kick_peer(const std::string& peerId, std::string* error = nullptr);
     void set_pose_delta_codec(PoseDeltaExpandCallback expand,
                               PoseDeltaPrepareCallback prepare);
     void set_visual_wire_diagnostics(bool enabled);

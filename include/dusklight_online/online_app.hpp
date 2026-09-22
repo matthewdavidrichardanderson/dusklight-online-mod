@@ -2,6 +2,7 @@
 
 #include "dusklight_online/net/transport.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -68,8 +69,8 @@ private:
     UiStyleHandle overlayStyle_ = 0;
     UiElementHandle panelStatus_ = 0;
     UiElementHandle windowStatus_ = 0;
-    UiElementHandle windowPlayers_ = 0;
-    std::string windowRenderedPlayers_;
+    UiElementHandle windowPlayersEmpty_ = 0;
+    bool windowPlayersEmptyVisible_ = true;
     UiElementHandle sessionActionsHeading_ = 0;
     enum class ConnectionRole : uint8_t {
         Host,
@@ -107,6 +108,19 @@ private:
     };
     std::vector<ManualPeerButtonContext> manualPeerButtonContexts_;
     int64_t selectedManualPeer_ = 0;
+    struct InlineKickRow {
+        OnlineApp* app = nullptr;
+        UiElementHandle row = 0;
+        UiElementHandle identity = 0;
+        UiElementHandle button = 0;
+        std::string peerId;
+        std::string peerName;
+        std::string renderedIdentity;
+        bool rowVisible = true;
+        bool buttonVisible = true;
+        bool kickPending = false;
+    };
+    std::array<InlineKickRow, 7> inlineKickRows_{};
 
     ModResult register_config(ModError* error);
     ModResult register_ui(ModError* error);
@@ -117,7 +131,6 @@ private:
     net::RoomSettings displayed_settings() const;
     std::string status_text() const;
     std::string dashboard_rml() const;
-    std::string connected_players_rml() const;
     void open_window();
     void open_settings_window();
     void open_player_options_window();
@@ -130,6 +143,7 @@ private:
     void disconnect();
     void publish_live_options();
     void refresh_manual_peer_choices();
+    void refresh_inline_player_rows();
     void request_manual_sync(bool flagsOnly);
     void set_manual_sync_pending_visual(bool pending);
     void begin_lobby_attempt(std::string failurePrefix);
@@ -186,12 +200,14 @@ public:
     static void paste_relay_code_pressed(ModContext*, void*);
     static void manual_peer_pressed(ModContext*, void*);
     static bool manual_peer_selected(ModContext*, void*);
+    static void inline_kick_pressed(ModContext*, void*);
     static void manual_sync_warp_pressed(ModContext*, void*);
     static void manual_sync_flags_pressed(ModContext*, void*);
     static void refresh_peers_pressed(ModContext*, void*);
     static void refresh_sync_peers_pressed(ModContext*, void*);
     static bool manual_sync_unavailable(ModContext*, void*);
     static bool sync_menu_unavailable(ModContext*, void*);
+    static bool inline_kick_unavailable(ModContext*, void*);
     static bool session_active(ModContext*, void*);
     static bool host_inactive(ModContext*, void*);
     static bool joiner_inactive(ModContext*, void*);

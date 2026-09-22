@@ -407,10 +407,27 @@ int main() {
         fail("PvP was not forced off with remote collision");
     }
 
-    bob.disconnect();
-    pump(host, alice, bob, 30);
+    error.clear();
+    if (alice.kick_peer(bobId, &error) || error.empty()) {
+        fail("direct joiner was allowed to kick another player");
+    }
+    error.clear();
+    if (!host.kick_peer(bobId, &error)) {
+        fail("direct host kick failed: " + error);
+    }
+    pump(host, alice, bob, 120);
     if (!drain_for_type(alice, "peer_left")) {
-        fail("peer disconnect was not broadcast");
+        fail("kicked peer departure was not broadcast");
+    }
+    bool bobWasKicked = false;
+    while (bob.has_events()) {
+        const auto event = bob.pop_event();
+        bobWasKicked |= event.kind == EventKind::Disconnected &&
+            event.detail == "Kicked by lobby host";
+    }
+    if (!bobWasKicked || bob.status().enabled || bob.status().reconnecting ||
+        host.peers().contains(bobId)) {
+        fail("direct kick did not terminate the guest without reconnecting");
     }
     if (!host.status().semanticVisualsReady || !alice.status().semanticVisualsReady) {
         fail("semantic visual negotiation changed after peer left");

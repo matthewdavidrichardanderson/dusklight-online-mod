@@ -246,6 +246,7 @@ passes to the oldest remaining connection and the relay broadcasts
 | `reliable` | Deduplicate a bounded sequence window, broadcast, then `ack`. |
 | `sync_request` | Route only to `target_client_id`. |
 | `room_settings` | Owner-only update; validate and broadcast normalized settings. |
+| `kick` | Owner-only removal of `target_client_id`; reliably notify the target, then disconnect it. |
 
 For every routed client message, the relay overwrites `client_id` with the
 authenticated connection ID. Clients cannot impersonate another room member.
