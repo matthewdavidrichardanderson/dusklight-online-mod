@@ -5,6 +5,7 @@
   "author": "mdra5000",
   "description": "Dusklight Online Multiplayer",
   "icon": "res/icon.png",
+  "banner": "res/banner.png",
   "abi": 1,
   "imports": [
     {

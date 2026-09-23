@@ -221,6 +221,11 @@ configure_file(
     COPYONLY
 )
 configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/banner.png"
+    "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/banner.png"
+    COPYONLY
+)
+configure_file(
     "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/res/AlegreyaSC-Bold.ttf"
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/AlegreyaSC-Bold.ttf"
     COPYONLY
