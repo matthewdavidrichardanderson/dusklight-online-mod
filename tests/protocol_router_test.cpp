@@ -44,6 +44,10 @@ Event message(std::string type, bool syncFlags = true) {
     return event;
 }
 
+float monospace_chat_width(std::string_view text) {
+    return static_cast<float>(text.size());
+}
+
 }  // namespace
 
 int main() {
@@ -121,6 +125,64 @@ int main() {
     assert(wrappedChat.text ==
         std::string(dusklight_online::game::kMaxChatLineCodepoints, 'x') + "\nx");
     assert(wrappedChat.cursorByte == wrappedChat.text.size());
+
+    const auto wrappedWord = dusklight_online::game::wrap_chat_input(
+        std::string(48, 'x') + " hello", 54);
+    assert(wrappedWord.text == std::string(48, 'x') + "\nhello");
+    assert(wrappedWord.cursorByte == wrappedWord.text.size());
+    const auto wrappedSpaces = dusklight_online::game::wrap_chat_input(
+        std::string(48, 'x') + "  hello", 49);
+    assert(wrappedSpaces.text == std::string(48, 'x') + "\nhello");
+    assert(wrappedSpaces.cursorByte == 49);
+    const auto reflowedWord = dusklight_online::game::reflow_chat_input(
+        std::string(44, 'x') + "\nhello", 50,
+        wrappedWord.text, wrappedWord.autoBreaks);
+    assert(reflowedWord.text == std::string(44, 'x') + " hello");
+    assert(reflowedWord.cursorByte == reflowedWord.text.size());
+    const auto reflowedSpaces = dusklight_online::game::reflow_chat_input(
+        std::string(43, 'x') + "\nhello", 49,
+        wrappedSpaces.text, wrappedSpaces.autoBreaks);
+    assert(reflowedSpaces.text == std::string(43, 'x') + "  hello");
+    const auto wrappedManualAndAuto = dusklight_online::game::wrap_chat_input(
+        "first\n" + std::string(48, 'x') + " hello", 60);
+    const auto reflowedManualAndAuto = dusklight_online::game::reflow_chat_input(
+        "first\n" + std::string(44, 'x') + "\nhello", 56,
+        wrappedManualAndAuto.text, wrappedManualAndAuto.autoBreaks);
+    assert(reflowedManualAndAuto.text ==
+        "first\n" + std::string(44, 'x') + " hello");
+    const auto splitLongWord = dusklight_online::game::wrap_chat_input(
+        std::string(51, 'x'), 51);
+    assert(splitLongWord.text == std::string(50, 'x') + "\nx");
+    const auto reflowedLongWord = dusklight_online::game::reflow_chat_input(
+        std::string(49, 'x') + "\nx", 51,
+        splitLongWord.text, splitLongWord.autoBreaks);
+    assert(reflowedLongWord.text == std::string(50, 'x'));
+    assert(dusklight_online::game::normalize_chat_text(wrappedWord.text, normalizedChat));
+    const auto fittingWord = dusklight_online::game::wrap_chat_input(
+        std::string(47, 'x') + " hi", 50);
+    assert(fittingWord.text == std::string(47, 'x') + " hi");
+    const auto manualBreak = dusklight_online::game::wrap_chat_input(
+        std::string(49, 'x') + "  \nhello", 57);
+    assert(manualBreak.text == std::string(49, 'x') + "\nhello");
+    const auto wrappedUnicode = dusklight_online::game::wrap_chat_input(
+        std::string(49, 'x') + " \xf0\x9f\x90\xba", 54);
+    assert(wrappedUnicode.text == std::string(49, 'x') + "\n\xf0\x9f\x90\xba");
+    const auto pixelWrapped = dusklight_online::game::wrap_chat_input(
+        "abcdefgh ijk", 12, 10.0f, &monospace_chat_width);
+    assert(pixelWrapped.text == "abcdefgh\nijk");
+    const auto pixelReflowed = dusklight_online::game::reflow_chat_input(
+        "abcdef\nijk", 10, pixelWrapped.text, pixelWrapped.autoBreaks,
+        10.0f, &monospace_chat_width);
+    assert(pixelReflowed.text == "abcdef ijk");
+    const auto pixelSplitLongWord = dusklight_online::game::wrap_chat_input(
+        "abcdefghijk", 11, 10.0f, &monospace_chat_width);
+    assert(pixelSplitLongWord.text == "abcdefghij\nk");
+    const auto limitedLines = dusklight_online::game::wrap_chat_input(
+        std::string(50, 'x') + "\n" + std::string(50, 'x') + "\n" +
+        std::string(50, 'x') + "\n" + std::string(48, 'x') + " hello", 211);
+    assert(limitedLines.text == std::string(50, 'x') + "\n" +
+        std::string(50, 'x') + "\n" + std::string(50, 'x') + "\n" +
+        std::string(48, 'x'));
 
     // Latest pressure is metadata, never stage-deferred replay. A release
     // arriving during a cutscene must replace the hold immediately.

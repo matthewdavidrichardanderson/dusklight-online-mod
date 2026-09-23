@@ -146,6 +146,9 @@ std::vector<Notification> sNotifications;
 std::deque<ChatLine> sChatLines;
 std::optional<std::string> sPendingChatSubmission;
 std::array<char, kMaxChatTextBytes + 1> sChatInput{};
+std::string sChatWrappedInput;
+std::vector<ChatAutoBreak> sChatAutoBreaks;
+float sChatWrapWidth = 0.0f;
 bool sChatInputActive = false;
 bool sChatInputFocused = false;
 bool sChatOpenRequested = false;
@@ -176,6 +179,9 @@ void close_chat_input() {
     sChatOpenRequested = false;
     sChatFocusRequested = false;
     sChatInput.fill('\0');
+    sChatWrappedInput.clear();
+    sChatAutoBreaks.clear();
+    sChatWrapWidth = 0.0f;
     if (wasOpen) restore_pad_input_block();
 }
 
@@ -209,6 +215,8 @@ HookAction host_ui_event_pre(ModContext*, void* args, void*, void*) {
         sChatOpenRequested = true;
         sChatScrollToBottom = true;
         sChatInput.fill('\0');
+        sChatWrappedInput.clear();
+        sChatAutoBreaks.clear();
         dusklight_online::log_info("CHAT_UI open requested");
     }
 
@@ -804,11 +812,19 @@ size_t chat_composer_line_count() {
         sChatInput.begin(), end, '\n'));
 }
 
+float measure_chat_input_width(std::string_view text) {
+    return ImGui::CalcTextSize(text.data(), text.data() + text.size()).x;
+}
+
 int chat_composer_edit_callback(ImGuiInputTextCallbackData* data) {
     if (data == nullptr || data->EventFlag != ImGuiInputTextFlags_CallbackEdit) return 0;
-    const WrappedChatInput wrapped = wrap_chat_input(
+    const WrappedChatInput wrapped = reflow_chat_input(
         std::string_view(data->Buf, static_cast<size_t>(data->BufTextLen)),
-        static_cast<size_t>(std::max(0, data->CursorPos)));
+        static_cast<size_t>(std::max(0, data->CursorPos)),
+        sChatWrappedInput, sChatAutoBreaks,
+        sChatWrapWidth, &measure_chat_input_width);
+    sChatWrappedInput = wrapped.text;
+    sChatAutoBreaks = wrapped.autoBreaks;
     if (wrapped.text.size() == static_cast<size_t>(data->BufTextLen) &&
         std::memcmp(wrapped.text.data(), data->Buf, wrapped.text.size()) == 0) {
         return 0;
@@ -1003,6 +1019,13 @@ void draw_imgui_chat() {
                 sChatFocusRequested = false;
             }
             ImGui::SetNextItemWidth(-1.0f);
+            // InputTextMultiline does not soft-wrap. Leave room for its frame
+            // padding and scrollbar so a word fitting on the next visual line
+            // is moved before it reaches the clipped edge of the composer.
+            sChatWrapWidth = std::max(1.0f,
+                ImGui::GetContentRegionAvail().x -
+                ImGui::GetStyle().FramePadding.x * 2.0f -
+                ImGui::GetStyle().ScrollbarSize - 4.0f);
             constexpr ImGuiInputTextFlags inputFlags =
                 ImGuiInputTextFlags_EnterReturnsTrue |
                 ImGuiInputTextFlags_CtrlEnterForNewLine |
