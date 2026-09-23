@@ -2071,7 +2071,6 @@ void OnlineApp::inline_kick_pressed(ModContext*, void* data) {
     }
     slot.kickPending = true;
     app.statusMessage_ = "Removing " + peerName + " from the lobby";
-    game::push_online_notification("Kick requested for " + peerName + ".");
 }
 void OnlineApp::manual_sync_warp_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->request_manual_sync(false);
