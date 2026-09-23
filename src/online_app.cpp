@@ -1806,7 +1806,7 @@ ModResult OnlineApp::build_host_relay_settings(ModContext*, UiElementHandle pane
                       "online-wide-control", nullptr,
                       "<p>Run the relay service locally instead of using the server in the "
                       "relay code.</p>");
-    add_code_control(pane, "Relay code", &OnlineApp::relay_code_get,
+    add_code_control(pane, "NAT/Relay code", &OnlineApp::relay_code_get,
                      &OnlineApp::relay_code_set, &app,
                      "<p>The connection code for the relay server used by this lobby.</p>");
     add_button(pane, "Copy", &OnlineApp::copy_relay_code_pressed, &app, nullptr, nullptr,
@@ -1858,7 +1858,7 @@ ModResult OnlineApp::build_join_relay_settings(ModContext*, UiElementHandle pane
                       app.config_.relayLocal, 0, 0, 1, 0, nullptr, nullptr,
                       "online-wide-control", nullptr,
                       "<p>Connect through a relay service running on this PC.</p>");
-    add_code_control(pane, "Relay code", &OnlineApp::relay_code_get,
+    add_code_control(pane, "NAT/Relay code", &OnlineApp::relay_code_get,
                      &OnlineApp::relay_code_set, &app,
                      "<p>The connection code for the relay server used by the host.</p>");
     add_button(pane, "Paste", &OnlineApp::paste_relay_code_pressed, &app, nullptr, nullptr,
