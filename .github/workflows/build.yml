@@ -11,19 +11,25 @@ env:
 
 jobs:
   dusklight-sdk:
-    name: Resolve Dusklight SDK revision
+    name: Resolve Dusklight release tag
     runs-on: ubuntu-latest
     outputs:
-      revision: ${{ steps.resolve.outputs.revision }}
+      tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - name: Resolve upstream default branch
+      - name: Resolve latest published release
         id: resolve
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          revision=$(git ls-remote https://github.com/TwilitRealm/dusklight.git HEAD | cut -f1)
-          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          echo "Building against Dusklight $revision"
+          tag=$(curl --fail --silent --show-error --location --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://api.github.com/repos/TwilitRealm/dusklight/releases/latest | jq -er '.tag_name')
+          [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+          git ls-remote --exit-code --tags https://github.com/TwilitRealm/dusklight.git "refs/tags/$tag" > /dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building against Dusklight release $tag"
 
   build:
     name: Build ${{matrix.platform}}
@@ -65,7 +71,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: dusklight
-          key: dusklight-${{runner.os}}-${{needs.dusklight-sdk.outputs.revision}}
+          key: dusklight-${{runner.os}}-${{needs.dusklight-sdk.outputs.tag}}
 
       - name: Enable Visual Studio environment
         if: matrix.msvc_arch
@@ -87,7 +93,7 @@ jobs:
         shell: bash
         run: |
           args=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-                -DDUSKLIGHT_VERSION=${{needs.dusklight-sdk.outputs.revision}}
+                -DDUSKLIGHT_VERSION=${{needs.dusklight-sdk.outputs.tag}}
                 ${{matrix.cmake_args}})
           if [[ -n "${{matrix.android_ndk}}" ]]; then
             args+=(-DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/${{matrix.android_ndk}}/build/cmake/android.toolchain.cmake"

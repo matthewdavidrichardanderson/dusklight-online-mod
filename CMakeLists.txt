@@ -14,6 +14,7 @@ if (MSVC)
     file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" DUSKLIGHT_ONLINE_BUILD_SOURCE_ROOT)
     file(TO_CMAKE_PATH "${CMAKE_BINARY_DIR}" DUSKLIGHT_ONLINE_BUILD_BINARY_ROOT)
     add_compile_options(
+        "/Zc:__cplusplus"
         "/experimental:deterministic"
         "/pathmap:${DUSKLIGHT_ONLINE_BUILD_SOURCE_ROOT}=Z:\\src"
         "/pathmap:${DUSKLIGHT_ONLINE_BUILD_BINARY_ROOT}=Z:\\build"
