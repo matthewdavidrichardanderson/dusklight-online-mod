@@ -1,9 +1,10 @@
 {
   "id": "io.github.mdra5000.dusklight_online",
-  "name": "Dusklight Online",
+  "name": "MFB Multiplayer",
   "version": "0.1.1",
   "author": "mdra5000",
   "description": "Dusklight Online Multiplayer",
+  "icon": "res/icon.png",
   "abi": 1,
   "imports": [
     {

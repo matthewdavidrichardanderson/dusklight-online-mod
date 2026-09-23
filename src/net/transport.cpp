@@ -229,7 +229,12 @@ struct Transport::Impl {
     std::string cloudUrl;
     std::string cloudStunHost;
     uint16_t cloudStunPort = 0;
-    std::map<std::string, std::chrono::steady_clock::time_point> cloudLinkStarted;
+    struct CloudLinkAttempt {
+        std::chrono::steady_clock::time_point started;
+        uint32_t nextLogSecond = 3;
+        bool retried = false;
+    };
+    std::map<std::string, CloudLinkAttempt> cloudLinkStarted;
     bool listening = false;
     bool udpOpen = false;
     sockaddr_in udpRemoteAddress{};
@@ -691,7 +696,8 @@ struct Transport::Impl {
         meshLinks[id] = link;
         peerDelivery.try_emplace(id);
         meshRoutes[id] = false;
-        if (status.mode == Mode::CloudRoom) cloudLinkStarted[id] = std::chrono::steady_clock::now();
+        if (status.mode == Mode::CloudRoom)
+            cloudLinkStarted[id] = {std::chrono::steady_clock::now()};
         emit(EventKind::RouteChanged, id,
              status.mode == Mode::CloudRoom ? "connecting" : "relay");
     }
@@ -1668,6 +1674,8 @@ struct Transport::Impl {
                 meshEnabled = connections.mesh_open(status.clientId, UdpConnection::invalid,
                     cloudStunHost, cloudStunPort);
                 if (!meshEnabled) deliveryFailure = true;
+                emit(EventKind::Diagnostic, {},
+                     std::string("room_welcome mesh=") + (meshEnabled ? "ready" : "failed"));
                 status.udpReady = meshEnabled;
                 if (relayCreateRoom) relayMayRecreateRoom = true;
                 relayCreateRoom = false;
@@ -1766,10 +1774,23 @@ struct Transport::Impl {
             handshakeRejected = true;
             return;
         } else if (type == "ice_signal") {
-            if (meshEnabled && meshLinks.contains(message.value("client_id", ""))) {
+            const std::string source = message.value("client_id", "");
+            if (meshEnabled && meshLinks.contains(source)) {
                 const int kind = message.value("kind", -1);
-                if (kind >= 0 && kind <= 2) connections.mesh_signal(message.value("client_id", ""),
-                    {static_cast<IceAgent::Signal::Kind>(kind), message.value("data", ""), message.value("generation", 0U)});
+                if (kind >= 0 && kind <= 2) {
+                    const auto generation = message.value("generation", 0U);
+                    const bool accepted = connections.mesh_signal(source,
+                        {static_cast<IceAgent::Signal::Kind>(kind), message.value("data", ""), generation});
+                    if (kind == IceAgent::Signal::Description || !accepted)
+                        emit(EventKind::Diagnostic, source,
+                             "ice_rx kind=" + std::to_string(kind) +
+                             " gen=" + std::to_string(generation) +
+                             " accepted=" + (accepted ? "yes" : "no"));
+                } else {
+                    emit(EventKind::Diagnostic, source, "ice_rx invalid_kind");
+                }
+            } else if (status.mode == Mode::CloudRoom) {
+                emit(EventKind::Diagnostic, source, "ice_rx unknown_peer");
             }
             return;
         } else if (type == "owner_changed") {
@@ -1904,6 +1925,7 @@ struct Transport::Impl {
             if (event.kind == RoomChannel::EventKind::Open) {
                 status.state = State::Connected;
                 status.error.clear();
+                emit(EventKind::Diagnostic, {}, "room_websocket_open");
                 send_hello();
                 if (!helloSent) { fail("Cloud room handshake send failed"); return; }
             } else if (event.kind == RoomChannel::EventKind::Message) {
@@ -2028,10 +2050,26 @@ struct Transport::Impl {
                         if (current) cloudLinkStarted.erase(id);
                         else {
                             auto [it, inserted] = cloudLinkStarted.try_emplace(
-                                id, std::chrono::steady_clock::now());
-                            if (std::chrono::steady_clock::now() - it->second >
-                                std::chrono::seconds(45)) {
-                                fail("Direct NAT connection timed out; use Manual host with a relay code", false);
+                                id, CloudLinkAttempt{std::chrono::steady_clock::now()});
+                            auto& attempt = it->second;
+                            const auto elapsed = std::chrono::steady_clock::now() - attempt.started;
+                            const auto elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+                            if (elapsedSeconds >= attempt.nextLogSecond) {
+                                emit(EventKind::Diagnostic, id,
+                                     "ice_progress elapsed_s=" + std::to_string(elapsedSeconds) +
+                                     " " + connections.mesh_diagnostics(id));
+                                attempt.nextLogSecond += 4;
+                            }
+                            if (!attempt.retried && elapsed >= std::chrono::seconds(6)) {
+                                attempt.retried = true;
+                                if (connections.mesh_retry(id))
+                                    emit(EventKind::Diagnostic, id, "ice_retry " + connections.mesh_diagnostics(id));
+                            }
+                            if (elapsed >= std::chrono::seconds(15)) {
+                                emit(EventKind::Diagnostic, id,
+                                     "ice_timeout elapsed_s=" + std::to_string(elapsedSeconds) +
+                                     " " + connections.mesh_diagnostics(id));
+                                fail("Direct peer connection timed out after 15 seconds; use Manual host with a relay code", false);
                                 return;
                             }
                         }
@@ -2049,6 +2087,9 @@ struct Transport::Impl {
                         {"kind", static_cast<int>(signal.kind)}, {"data", signal.text}, {"generation", signal.generation}})) {
                         fail("ICE signaling queue full"); return;
                     }
+                    if (status.mode == Mode::CloudRoom && signal.kind == IceAgent::Signal::Description)
+                        emit(EventKind::Diagnostic, target,
+                             "ice_tx kind=0 gen=" + std::to_string(signal.generation));
                 }
             }
             pump_udp();

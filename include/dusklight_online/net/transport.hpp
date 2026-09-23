@@ -38,7 +38,7 @@ struct RoomSettings {
     bool syncFlags = true;
     bool syncWorld = false;
     bool remoteCollision = true;
-    bool pvp = false;
+    bool pvp = true;
 };
 
 [[nodiscard]] inline bool effective_remote_collision(const RoomSettings& settings) {
@@ -129,6 +129,7 @@ enum class EventKind : uint8_t {
     UdpAck,
     Error,
     RouteChanged,
+    Diagnostic,
 };
 
 struct EventContext {

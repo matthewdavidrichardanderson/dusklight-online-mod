@@ -46,6 +46,8 @@ public:
         uint32_t* queuedDatagrams = nullptr, uint64_t* queuedBytes = nullptr);
     int mesh_receive(std::string& peerId, std::span<uint8_t> bytes);
     bool mesh_direct(std::string_view peerId) const;
+    // Redacted ICE state/counters for diagnostics; never includes SDP or IPs.
+    std::string mesh_diagnostics(std::string_view peerId) const;
     // Explicit ICE retry retains the logical session and reliable queues.
     bool mesh_retry(std::string_view peerId);
 private:

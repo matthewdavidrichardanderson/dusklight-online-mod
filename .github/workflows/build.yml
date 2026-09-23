@@ -44,9 +44,10 @@ jobs:
           - platform: linux-aarch64
             runner: ubuntu-24.04-arm
           - platform: macos-arm64
-            runner: macos-latest
+            runner: macos-15
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES=arm64
           - platform: macos-x86_64
-            runner: macos-latest
+            runner: macos-15-intel
             cmake_args: -DCMAKE_OSX_ARCHITECTURES=x86_64
           - platform: ios-arm64
             runner: macos-latest
@@ -89,12 +90,25 @@ jobs:
         with:
           packages: ndk;${{matrix.android_ndk}}
 
+      - name: Install Linux room TLS build dependency
+        if: matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Install macOS room TLS build dependency
+        if: matrix.platform == 'macos-arm64' || matrix.platform == 'macos-x86_64'
+        run: brew install openssl@3
+
       - name: Configure CMake
         shell: bash
         run: |
           args=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
                 -DDUSKLIGHT_VERSION=${{needs.dusklight-sdk.outputs.tag}}
                 ${{matrix.cmake_args}})
+          if [[ "${{matrix.platform}}" == macos-* ]]; then
+            args+=(-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)")
+          fi
           if [[ -n "${{matrix.android_ndk}}" ]]; then
             args+=(-DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/${{matrix.android_ndk}}/build/cmake/android.toolchain.cmake"
                    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28)

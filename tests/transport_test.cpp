@@ -116,6 +116,9 @@ void pump(Transport& host, Transport& first, Transport& second, int ticks = 300)
 }  // namespace
 
 int main() {
+    constexpr dusklight_online::net::RoomSettings defaults{};
+    static_assert(defaults.dummyModel && defaults.syncFlags && !defaults.syncWorld &&
+                  defaults.remoteCollision && defaults.pvp);
 #if defined(_WIN32)
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {

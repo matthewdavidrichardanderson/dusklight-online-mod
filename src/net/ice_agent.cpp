@@ -58,6 +58,18 @@ bool IceAgent::connected() const {
     const auto state = juice_get_state(impl_->agent);
     return state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED;
 }
+std::string_view IceAgent::state_text() const {
+    if (!valid()) return "invalid";
+    switch (juice_get_state(impl_->agent)) {
+    case JUICE_STATE_DISCONNECTED: return "disconnected";
+    case JUICE_STATE_GATHERING: return "gathering";
+    case JUICE_STATE_CONNECTING: return "connecting";
+    case JUICE_STATE_CONNECTED: return "connected";
+    case JUICE_STATE_COMPLETED: return "completed";
+    case JUICE_STATE_FAILED: return "failed";
+    default: return "unknown";
+    }
+}
 bool IceAgent::signal(const Signal& value) {
     if (!valid() || value.text.find('\0') != std::string::npos) return false;
     if (value.kind == Signal::Description) {

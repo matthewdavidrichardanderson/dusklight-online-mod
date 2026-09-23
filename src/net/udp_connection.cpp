@@ -70,6 +70,7 @@ struct UdpConnection::Impl : DatagramTransport {
         bool hasEcho = false;
         uint32_t iceGeneration = 0, retryAt = 0, retryDelay = 30000;
         uint32_t lastIceChange = 0;
+        std::array<uint32_t, 3> iceSent{}, iceReceived{}, iceRejected{};
         std::string rx;
     };
     struct Raw { Address address; std::vector<uint8_t> bytes; };
@@ -565,20 +566,27 @@ bool UdpConnection::mesh_signal(std::string_view peerId, const IceAgent::Signal&
     const Id id = impl_->logical_peer(peer_number(peerId));
     if (id == invalid) return false;
     auto& peer = impl_->peers.at(id);
+    const auto kind = static_cast<size_t>(value.kind);
+    if (kind >= peer.iceReceived.size()) return false;
+    const auto reject = [&]() { ++peer.iceRejected[kind]; return false; };
     if (value.generation != peer.iceGeneration) {
         if (peer.logical >= impl_->localLogical || value.kind != IceAgent::Signal::Description ||
             value.generation != peer.iceGeneration + 1 ||
-            uint32_t(clock_ms() - peer.lastIceChange) < 1000) return false;
+            uint32_t(clock_ms() - peer.lastIceChange) < 1000) return reject();
         peer.ice = std::make_unique<IceAgent>(impl_->stunHost, impl_->stunPort);
         peer.iceGeneration = value.generation; peer.hasEcho = false;
         peer.lastIceChange = clock_ms();
     }
-    return peer.ice->signal(value);
+    if (!peer.ice->signal(value)) return reject();
+    ++peer.iceReceived[kind];
+    return true;
 }
 bool UdpConnection::mesh_pop_signal(std::string& peerId, IceAgent::Signal& value) {
     std::lock_guard lock(impl_->mutex);
     for (auto& [id, peer] : impl_->peers) {
         if (peer.logical && !peer.closed && peer.ice->pop_signal(value)) {
+            const auto kind = static_cast<size_t>(value.kind);
+            if (kind < peer.iceSent.size()) ++peer.iceSent[kind];
             value.generation = peer.iceGeneration;
             peerId = "client_" + std::to_string(peer.logical); return true;
         }
@@ -633,6 +641,22 @@ bool UdpConnection::mesh_direct(std::string_view peerId) const {
     std::lock_guard lock(impl_->mutex);
     const Id id = impl_->logical_peer(peer_number(peerId));
     return id != invalid && impl_->direct(impl_->peers.at(id), clock_ms());
+}
+std::string UdpConnection::mesh_diagnostics(std::string_view peerId) const {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    if (id == invalid) return "peer=missing";
+    const auto& peer = impl_->peers.at(id);
+    const auto counts = [](const std::array<uint32_t, 3>& values) {
+        return std::to_string(values[0]) + "/" + std::to_string(values[1]) + "/" +
+            std::to_string(values[2]);
+    };
+    return "state=" + std::string(peer.ice ? peer.ice->state_text() : "invalid") +
+        " gen=" + std::to_string(peer.iceGeneration) +
+        " tx_desc_cand_done=" + counts(peer.iceSent) +
+        " rx_desc_cand_done=" + counts(peer.iceReceived) +
+        " rejected_desc_cand_done=" + counts(peer.iceRejected) +
+        " echo=" + (peer.hasEcho ? "yes" : "no");
 }
 bool UdpConnection::mesh_retry(std::string_view peerId) {
     std::lock_guard lock(impl_->mutex);

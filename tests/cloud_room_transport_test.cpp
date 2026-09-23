@@ -19,6 +19,7 @@ struct Broker {
     std::map<std::string, Channel*> members;
     uint32_t nextId = 1;
     bool gameplayForwardingAttempt = false;
+    bool forwardIce = true;
     RoomSettings roomSettings;
     std::string owner;
     void accept(Channel& channel, const json& message);
@@ -82,6 +83,7 @@ void Broker::accept(Channel& channel, const json& message) {
                     {"name", channel.name}, {"want_puppet", true},
                     {"semantic_visuals_ready", true}, {"snapshot_deltas_ready", true}});
     } else if (type == "ice_signal") {
+        if (!forwardIce) return;
         auto it = members.find(message.value("target_client_id", ""));
         if (it != members.end()) it->second->push({{"type", "ice_signal"},
             {"client_id", channel.id}, {"kind", message.at("kind")},
@@ -135,7 +137,7 @@ int main() {
         fail(error.c_str());
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
-    bool sent = false, delivered = false;
+    bool sent = false, delivered = false, sawIceTx = false, sawIceRx = false;
     while (std::chrono::steady_clock::now() < deadline &&
            !(delivered && host.status().natPeerCount == 1 &&
              guest.status().natPeerCount == 1)) {
@@ -149,13 +151,18 @@ int main() {
         }
         while (guest.has_events()) {
             const auto event = guest.pop_event();
+            if (event.kind == EventKind::Diagnostic && event.detail.starts_with("ice_tx kind=0"))
+                sawIceTx = true;
+            if (event.kind == EventKind::Diagnostic && event.detail.starts_with("ice_rx kind=0") &&
+                event.detail.find("accepted=yes") != std::string::npos)
+                sawIceRx = true;
             if (event.message.is_object() && event.message.value("type", "") == "chat" &&
                 event.message.value("text", "") == "direct only") delivered = true;
         }
         if (broker.gameplayForwardingAttempt) fail("gameplay was sent to the room channel");
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    if (!sent || !delivered || host.status().natPeerCount != 1 ||
+    if (!sent || !delivered || !sawIceTx || !sawIceRx || host.status().natPeerCount != 1 ||
         guest.status().natPeerCount != 1 || host.status().relayPeerCount != 0) {
         std::cerr << "sent=" << sent << " delivered=" << delivered
                   << " host_nat=" << host.status().natPeerCount
@@ -166,5 +173,38 @@ int main() {
     }
     guest.disconnect();
     host.disconnect();
+
+    // A room-service membership is not a peer connection. Without signaling,
+    // the Cloud Room must fail promptly and explain which ICE step stalled.
+    Broker stalled;
+    stalled.forwardIce = false;
+    Transport stalledHost;
+    Transport stalledGuest;
+    configuration.createRoom = true;
+    if (!stalledHost.start_cloud_room(configuration, std::make_unique<Channel>(stalled), &error))
+        fail(error.c_str());
+    configuration.createRoom = false;
+    if (!stalledGuest.start_cloud_room(configuration, std::make_unique<Channel>(stalled), &error))
+        fail(error.c_str());
+    bool timedOut = false, sawTimeoutDiagnostic = false;
+    const auto stalledDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(18);
+    while (std::chrono::steady_clock::now() < stalledDeadline && !timedOut) {
+        stalledHost.tick();
+        stalledGuest.tick();
+        for (Transport* side : {&stalledHost, &stalledGuest}) {
+            while (side->has_events()) {
+                const auto event = side->pop_event();
+                if (event.kind == EventKind::Diagnostic && event.detail.starts_with("ice_timeout"))
+                    sawTimeoutDiagnostic = true;
+            }
+            timedOut |= side->status().error.find("Direct peer connection timed out after 15 seconds") !=
+                std::string::npos;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!timedOut || !sawTimeoutDiagnostic || stalled.gameplayForwardingAttempt)
+        fail("stalled Cloud Room ICE did not fail with diagnostics at the 15-second deadline");
+    stalledGuest.disconnect();
+    stalledHost.disconnect();
     std::cout << "cloud transport test passed\n";
 }

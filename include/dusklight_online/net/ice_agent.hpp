@@ -22,6 +22,7 @@ public:
     bool pop(std::vector<uint8_t>& bytes);
     bool send(std::span<const uint8_t> bytes);
     bool connected() const;
+    std::string_view state_text() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

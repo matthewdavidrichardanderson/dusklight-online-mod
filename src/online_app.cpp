@@ -42,6 +42,19 @@ const char* connection_label(const net::Status& status) {
     return "NAT/Relay";
 }
 
+std::string connected_health(const net::Status& status, size_t otherPlayers) {
+    if (status.mode != net::Mode::CloudRoom)
+        return status.mode == net::Mode::DirectHost || status.welcomed ?
+            "Connected" : "Joining lobby";
+    if (!status.welcomed) return "Joining lobby";
+    if (otherPlayers == 0) return "Room ready — waiting for players";
+    if (status.natPeerCount >= otherPlayers) return "Connected";
+    if (status.natPeerCount == 0)
+        return otherPlayers == 1 ? "Connecting to player" : "Connecting to players";
+    return "Connecting to players (" + std::to_string(status.natPeerCount) +
+        "/" + std::to_string(otherPlayers) + " ready)";
+}
+
 ModResult add_config(const char* name, ConfigVarType type, const char* defaultString,
                      int64_t defaultInt, bool defaultBool, ConfigVarHandle& output,
                      ModError* error) {
@@ -687,13 +700,19 @@ void OnlineApp::update() {
             wasRelayOwner_ = isOwner;
         }
         switch (event.kind) {
+        case net::EventKind::Diagnostic:
+            log_info("MP_CLOUD_DIAG peer=" + (event.peerId.empty() ? "-" : event.peerId) +
+                     " " + event.detail);
+            break;
         case net::EventKind::RouteChanged:
             log_info("MP_PEER_ROUTE peer=" + event.peerId + " realtime=" + event.detail + " reliable=" + event.detail);
             break;
         case net::EventKind::Connected: {
             const bool reconnected = !connectedLobbyName_.empty();
             connectedLobbyName_ = transport_.status().room;
-            statusMessage_ = "Connected to " + connectedLobbyName_;
+            statusMessage_ = event.ingress.mode == net::Mode::CloudRoom ?
+                "Joined Cloudflare room " + connectedLobbyName_ :
+                "Connected to " + connectedLobbyName_;
             game::push_online_notification(
                 std::string(reconnected ? "Reconnected to lobby " :
                             relayHostIntent_ ? "Hosting lobby " : "Joined lobby ") +
@@ -708,6 +727,8 @@ void OnlineApp::update() {
             break;
         }
         case net::EventKind::Disconnected:
+            if (event.ingress.mode == net::Mode::CloudRoom)
+                log_info("MP_CLOUD_DISCONNECT reason=" + event.detail);
             if (transport_.status().reconnecting) {
                 statusMessage_ = "Connection lost — reconnecting to lobby " + connectedLobbyName_;
                 game::push_online_notification(statusMessage_ + ".", 5.0f, true);
@@ -749,6 +770,8 @@ void OnlineApp::update() {
             }
             break;
         case net::EventKind::Error:
+            if (event.ingress.mode == net::Mode::CloudRoom)
+                log_info("MP_CLOUD_ERROR reason=" + event.detail);
             if (!pendingLobbyFailurePrefix_.empty()) {
                 statusMessage_ = "Online error: " + event.detail;
                 notify_lobby_attempt_failure(event.detail);
@@ -810,7 +833,7 @@ void OnlineApp::update() {
                 bool_value(config_.remoteCollision, true);
         const bool pvpEnabled = currentStatus.enabled ?
             net::effective_pvp(currentStatus.settings) :
-            remoteCollisionEnabled && bool_value(config_.pvp, false);
+            remoteCollisionEnabled && bool_value(config_.pvp, true);
         // Semantic recreation is the normal representation. Matrix streaming is
         // retained only as an explicit developer diagnostic and is never a room
         // setting that another peer can enable or disable.
@@ -944,7 +967,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"sync-flags", true, &config_.syncFlags},
         BoolVar{"display-midna", false, &config_.displayMidna},
         BoolVar{"remote-collision", true, &config_.remoteCollision},
-        BoolVar{"pvp", false, &config_.pvp},
+        BoolVar{"pvp", true, &config_.pvp},
         BoolVar{"player-list-overlay", false, &config_.playerList},
     };
     for (const auto& variable : booleans) {
@@ -1008,7 +1031,7 @@ net::RoomSettings OnlineApp::configured_settings() const {
     settings.syncFlags = bool_value(config_.syncFlags, true);
     settings.syncWorld = false;
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
-    settings.pvp = bool_value(config_.pvp, false) && settings.remoteCollision;
+    settings.pvp = bool_value(config_.pvp, true) && settings.remoteCollision;
     return settings;
 }
 
@@ -1034,8 +1057,7 @@ std::string OnlineApp::status_text() const {
         } else {
             switch (status.state) {
             case net::State::Connected:
-                health = status.mode == net::Mode::DirectHost || status.welcomed ?
-                    "Connected" : "Joining lobby";
+                health = connected_health(status, playerCount - 1u);
                 break;
             case net::State::Connecting: health = "Connecting"; break;
             case net::State::Listening: health = "Ready — waiting for players"; break;
@@ -1084,8 +1106,7 @@ std::string OnlineApp::dashboard_rml() const {
         } else {
             switch (status.state) {
             case net::State::Connected:
-                health = status.mode == net::Mode::DirectHost || status.welcomed ?
-                    "Connected" : "Joining lobby";
+                health = connected_health(status, playerCount - 1u);
                 break;
             case net::State::Connecting: health = "Connecting"; break;
             case net::State::Listening: health = "Ready — waiting for players"; break;
@@ -1145,7 +1166,7 @@ void OnlineApp::open_player_options_window() {
     if (playerOptionsWindow_ != 0) return;
     static UiTabDesc tab;
     tab = UI_TAB_DESC_INIT;
-    tab.title = "Player options";
+    tab.title = "Cosmetic options";
     tab.build = &OnlineApp::build_player_options_tab;
     tab.user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
@@ -1620,7 +1641,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     add_button(left, "Join lobby", &OnlineApp::join_lobby_pressed, &app);
 
     svc_ui->pane_add_section(mod_ctx, left, "Session");
-    add_button(left, "Player options", &OnlineApp::player_options_pressed, &app);
+    add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
     add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
     add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
                &OnlineApp::sync_menu_unavailable);
@@ -1678,7 +1699,7 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
                                               UiElementHandle, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
-    svc_ui->pane_add_section(mod_ctx, left, "Player options");
+    svc_ui->pane_add_section(mod_ctx, left, "Cosmetic options");
     app.match_player_colour();
     static constexpr const char* presets[] = {
         "508040", "3E8AC4", "BC5350", "9A72BD", "D99A45", "D27DA7", "E6DEC6", "555B65"

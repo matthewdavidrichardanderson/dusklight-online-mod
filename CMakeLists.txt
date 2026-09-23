@@ -37,6 +37,49 @@ endif ()
 
 include(FetchContent)
 include(cmake/LibJuice.cmake)
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    # Room signaling owns its WebSocket client so its availability does not
+    # depend on the host's optional WebSocket service or system curl version.
+    if (NOT TARGET CURL::libcurl_static)
+        FetchContent_Declare(
+            online_curl
+            GIT_REPOSITORY https://github.com/curl/curl.git
+            GIT_TAG curl-8_22_0
+            GIT_SHALLOW TRUE
+        )
+        block()
+            set(BUILD_SHARED_LIBS OFF)
+            set(BUILD_STATIC_LIBS ON)
+            set(BUILD_CURL_EXE OFF)
+            set(BUILD_EXAMPLES OFF)
+            set(BUILD_TESTING OFF)
+            set(CURL_DISABLE_INSTALL ON)
+            set(CURL_DISABLE_LDAP ON)
+            if (WIN32)
+                set(CURL_USE_SCHANNEL ON)
+                set(CURL_USE_OPENSSL OFF)
+            else ()
+                set(CURL_USE_OPENSSL ON)
+                if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+                    # Keep TLS self-contained and validate certificates with
+                    # the macOS trust store. No Homebrew dylibs are shipped.
+                    set(OPENSSL_USE_STATIC_LIBS TRUE)
+                    find_package(OpenSSL REQUIRED)
+                    if (NOT OPENSSL_SSL_LIBRARY MATCHES "\\.a$" OR
+                        NOT OPENSSL_CRYPTO_LIBRARY MATCHES "\\.a$")
+                        message(FATAL_ERROR "macOS room signaling requires static OpenSSL libraries")
+                    endif ()
+                    set(USE_APPLE_SECTRUST ON)
+                endif ()
+            endif ()
+            set(CURL_USE_LIBPSL OFF)
+            set(CURL_ZLIB OFF)
+            set(CURL_BROTLI OFF)
+            set(CURL_ZSTD OFF)
+            FetchContent_MakeAvailable(online_curl)
+        endblock()
+    endif ()
+endif ()
 if (NOT TARGET nlohmann_json::nlohmann_json)
     FetchContent_Declare(
         nlohmann_json
@@ -172,6 +215,11 @@ configure_file(
 )
 set(DUSKLIGHT_ONLINE_GENERATED_RES_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/res")
 file(MAKE_DIRECTORY "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.png"
+    "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/icon.png"
+    COPYONLY
+)
 configure_file(
     "${DUSKLIGHT_REMOTE_LINK_SOURCE_ROOT}/res/AlegreyaSC-Bold.ttf"
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/AlegreyaSC-Bold.ttf"
@@ -332,6 +380,26 @@ target_link_libraries(dusklight_online PRIVATE
     ${CMAKE_DL_LIBS}
 )
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InterpolationSDKStub.cmake")
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_NATIVE_ROOM_CHANNEL=1)
+    target_sources(dusklight_online PRIVATE src/net/native_room_channel.cpp)
+    target_link_libraries(dusklight_online PRIVATE CURL::libcurl_static)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # The host may also load libcurl. Keep this private static copy from
+        # being resolved against (or interposing on) the host's curl symbols.
+        target_link_options(dusklight_online PRIVATE "-Wl,--exclude-libs,libcurl.a")
+    endif ()
+    if (PROJECT_IS_TOP_LEVEL)
+        add_executable(dusklight_online_room_channel_live_test EXCLUDE_FROM_ALL
+            tests/native_room_channel_live_test.cpp
+            src/net/native_room_channel.cpp
+        )
+        target_compile_features(dusklight_online_room_channel_live_test PRIVATE cxx_std_20)
+        target_include_directories(dusklight_online_room_channel_live_test PRIVATE include)
+        target_link_libraries(dusklight_online_room_channel_live_test PRIVATE
+            CURL::libcurl_static nlohmann_json::nlohmann_json)
+    endif ()
+endif ()
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
     if (PROJECT_IS_TOP_LEVEL)
