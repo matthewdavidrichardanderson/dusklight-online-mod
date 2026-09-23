@@ -579,6 +579,9 @@ bool base64_decode(const std::string& text, std::vector<uint8_t>& out) {
 }
 
 constexpr uint16_t kUnsyncedEventBits[] = {0x0580, 0x4D08, 0x0502, 0x6140};
+static_assert(dSv_event_flag_c::M_033 == 0x0840);
+static_assert(dSv_event_flag_c::M_035 == 0x0810);
+static_assert(dSv_event_flag_c::M_036 == 0x0808);
 
 bool is_unsynced_event_bit(uint16_t flag) {
     return std::find(std::begin(kUnsyncedEventBits), std::end(kUnsyncedEventBits), flag) !=
@@ -622,6 +625,35 @@ bool is_unsynced_switch_bit(int stage, int flag) {
            (stage == dStage_SaveTbl_PRISON && flag == 0x1F) ||
            (stage == dStage_SaveTbl_LANAYRU && flag == 0x1E);
 }
+
+// F_SP121's two wagon-escort R_Gate actors use dungeon-switch bits 0x81
+// (room 15) and 0x82 (room 3). Their unlock events and collision must stay
+// native to each player's escort, not arrive as a remote room switch.
+constexpr bool is_local_escort_gate_switch(int stage, int flag, int actor, int room,
+                                           std::string_view stageName) {
+    return stage == dStage_SaveTbl_FIELD && stageName == "F_SP121" &&
+           actor == fpcNm_Obj_RiderGate_e &&
+           ((room == 15 && flag == 0x81) || (room == 3 && flag == 0x82));
+}
+
+// The field-stage key count is initialized to two only for the wagon escort
+// and reset to zero on other scene transitions by dComIfGp_setNextStage.
+constexpr bool is_local_escort_key_count(int stage) {
+    return stage == dStage_SaveTbl_FIELD;
+}
+
+static_assert(is_local_escort_gate_switch(dStage_SaveTbl_FIELD, 0x81,
+                                          fpcNm_Obj_RiderGate_e, 15, "F_SP121"));
+static_assert(is_local_escort_gate_switch(dStage_SaveTbl_FIELD, 0x82,
+                                          fpcNm_Obj_RiderGate_e, 3, "F_SP121"));
+static_assert(!is_local_escort_gate_switch(dStage_SaveTbl_FIELD, 0x81,
+                                           fpcNm_Obj_RiderGate_e, 3, "F_SP121"));
+static_assert(!is_local_escort_gate_switch(dStage_SaveTbl_FIELD, 0x81,
+                                           fpcNm_Obj_RiderGate_e, 15, "F_SP122"));
+static_assert(!is_local_escort_gate_switch(dStage_SaveTbl_LV1, 0x81,
+                                           fpcNm_Obj_RiderGate_e, 15, "F_SP121"));
+static_assert(is_local_escort_key_count(dStage_SaveTbl_FIELD));
+static_assert(!is_local_escort_key_count(dStage_SaveTbl_LV1));
 
 bool is_lakebed_staircase_switch(int stage, int flag) {
     return stage == dStage_SaveTbl_LV3 && flag >= 0 && flag <= 3;
@@ -1460,6 +1492,7 @@ void stage_key_num_set_post(ModContext*, void* args, void*, void*) {
     const int count = mods::arg<u8>(args, 1);
     if (previous < 0 || stage != current_stage_table() || !valid_stage(stage) ||
         count < 0 || count > 99 ||
+        is_local_escort_key_count(stage) ||
         (sActiveAdapter->randomizer_active() && count > previous)) {
         return;
     }
@@ -1485,7 +1518,8 @@ void meter_move_key_post(ModContext*, void*, void*, void*) {
         pending = sPendingMeterKeyMutations.back();
         sPendingMeterKeyMutations.pop_back();
     }
-    if (!pending.publish || sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
+    if (!pending.publish || is_local_escort_key_count(pending.stage) ||
+        sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
         pending.stage != current_stage_table() || !valid_stage(pending.stage)) return;
     const int count = dComIfGs_getKeyNum();
     if (sActiveAdapter->randomizer_active() && count > pending.previous) return;
@@ -2015,11 +2049,13 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
          permanent_room_actor_switch_flag(actorName, fopAcM_GetParam(process)) != flag)) return;
     const int stage = current_stage_table();
     if (!valid_stage(stage)) return;
+    const char* stageName = dComIfGp_getStartStageName();
+    if (is_local_escort_gate_switch(stage, flag, actorName, room,
+                                    stageName != nullptr ? stageName : "")) return;
     // Permanent actors already emitted a transient exact-room action above,
     // and their native durable bit is carried by switch_bit. Re-emitting the
     // room switch would allow a delayed room replay to visibly break the actor.
     if (permanentActor) return;
-    const char* stageName = dComIfGp_getStartStageName();
     sActiveAdapter->publish_local({
         {"type", "room_switch_bit"}, {"stage", stage}, {"flag", flag}, {"room", room},
         {"source_actor", actorName}, {"source_room", room},
@@ -2069,7 +2105,29 @@ bool GameAdapter::randomizer_active() const {
     return saveFileName != nullptr && std::string_view(saveFileName) == "randomizer";
 }
 
+bool GameAdapter::local_wagon_escort_unfinished() {
+    if (dComIfGs_isEventBit(dSv_event_flag_c::M_035)) return false;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage != nullptr && std::string_view(stage) == "F_SP121" &&
+        dComIfGp_getStageStagInfo() != nullptr) {
+        // A void restarts with layer override -1. Inspect the effective layer,
+        // and remember participation after the player leaves that scene.
+        const int layer = dComIfG_play_c::getLayerNo(0);
+        if (layer == 2 || layer == 3) localWagonEscortStarted_ = true;
+    }
+    return localWagonEscortStarted_;
+}
+
 void GameAdapter::notify_local_event_bit(uint16_t flag) {
+    if ((flag == dSv_event_flag_c::M_033 || flag == dSv_event_flag_c::M_036) &&
+        !dComIfGs_isEventBit(dSv_event_flag_c::M_035)) {
+        localWagonEscortStarted_ = true;
+    } else if (flag == dSv_event_flag_c::M_035) {
+        localWagonEscortStarted_ = false;
+        std::erase_if(deferredStoryEvents_, [](const nlohmann::json& queued) {
+            return queued.value("flag", -1) == dSv_event_flag_c::M_035;
+        });
+    }
     if (!is_ordon_day_boundary_event_bit(flag) || pendingOrdonEventBits_.erase(flag) == 0) {
         return;
     }
@@ -2675,6 +2733,7 @@ void GameAdapter::clear_replaced_save_progression_state() {
 
 void GameAdapter::notify_local_save_reset() {
     // No detached Note/owner data may survive a selected-save boundary.
+    localWagonEscortStarted_ = false;
     ooccooState_.reset();
     ooccooBoundToSave_ = false;
     ooccooCatchupPending_ = true;
@@ -3303,6 +3362,9 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         }
     }
     const net::Status status = transport_.status();
+    if (!opening_or_title_active() && dComIfGp_getStageStagInfo() != nullptr) {
+        (void)local_wagon_escort_unfinished();
+    }
     if (!status.welcomed) clear_local_audio_events();
     set_bomb_sync_enabled(status.welcomed && syncWorldEnabled);
     for (auto& [peerId, age] : peerProgressionAges_) {
@@ -4582,6 +4644,18 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
     const uint16_t flag = static_cast<uint16_t>(rawFlag);
     if (is_unsynced_event_bit(flag)) return ApplyResult::IgnoredByPolicy;
     const bool set = message.value("set", true);
+    if (flag == dSv_event_flag_c::M_035) {
+        if (!set) {
+            std::erase_if(deferredStoryEvents_, [](const nlohmann::json& queued) {
+                return queued.value("flag", -1) == dSv_event_flag_c::M_035;
+            });
+        } else if (local_wagon_escort_unfinished()) {
+            nlohmann::json queued = message;
+            queued["_peer_id"] = routed.peerId;
+            enqueue_unique_deferred_mutation(deferredStoryEvents_, std::move(queued));
+            return ApplyResult::Retained;
+        }
+    }
     if (is_faron_warp_sequence_event_bit(flag) && should_defer_faron_warp_sequence()) {
         deferredFaronInbound_.push_back(routed);
         return ApplyResult::Retained;
@@ -4650,13 +4724,18 @@ void GameAdapter::flush_story_messages() {
         deferredStoryEvents_.clear();
         RemoteApplicationGuard applying(applyingRemote_);
         for (nlohmann::json& payload : pending) {
+            if (payload.value("flag", -1) == dSv_event_flag_c::M_035 &&
+                local_wagon_escort_unfinished()) {
+                deferredStoryEvents_.push_back(std::move(payload));
+                continue;
+            }
             const std::string peer = payload.value("_peer_id", std::string());
             payload.erase("_peer_id");
             RoutedMessage routed{peer, std::move(payload),
                                  {MessageDomain::Progression, false, true}};
             (void)apply_event_bit(routed);
+            appliedDeferredRemote = true;
         }
-        appliedDeferredRemote = true;
     }
 
     // Faron warp switch/event mutations are one ordered stream. Replay every
@@ -4887,6 +4966,10 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         if (!valid_stage(stage) || flag < 0 || flag >= 0xFF || room < 0 || room >= 64) {
             return reject("invalid room_switch_bit bounds");
         }
+        if (is_local_escort_gate_switch(stage, flag, sourceActor, room,
+                                        message.value("source_stage", std::string()))) {
+            return ApplyResult::IgnoredByPolicy;
+        }
         const bool webSwitch = is_web_switch_actor(sourceActor);
         const bool permanentActor = is_permanent_room_actor(sourceActor);
         if (!is_small_key_door_switch_actor(sourceActor) && !webSwitch && !permanentActor) {
@@ -5071,6 +5154,7 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         if (!valid_stage(stage) || count < 0 || count > 99) {
             return reject("invalid key_num bounds");
         }
+        if (is_local_escort_key_count(stage)) return ApplyResult::IgnoredByPolicy;
         if (randomizer_active() && count > stage_bits(stage).getKeyNum()) {
             // The reward event owns positive gains; key expenditure still
             // travels as an absolute decrease so doors stay synchronized.
@@ -5542,7 +5626,8 @@ nlohmann::json GameAdapter::make_save_snapshot() {
         if (!kinds.empty()) dungeonStages.push_back({{"stage", stage}, {"kinds", kinds}});
 
         const int keys = bits.getKeyNum();
-        if (keys > 0) keyCounts.push_back({{"stage", stage}, {"count", keys}});
+        if (keys > 0 && !is_local_escort_key_count(stage))
+            keyCounts.push_back({{"stage", stage}, {"count", keys}});
     }
 
     json lightCounts = json::array();
@@ -5730,6 +5815,7 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     // before installing the peer state, or periodic repair can undo the sync.
     // Other items/equipment retain exact replacement semantics. The deliberate
     // Ooccoo exception above prevents importing another player's return point.
+    localWagonEscortStarted_ = false;
     clear_replaced_save_progression_state();
     if (flagsOnly) {
         dSv_player_c& localPlayer = g_dComIfG_gameInfo.info.getPlayer();
@@ -5895,6 +5981,13 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         if (value < 0 || value > 0xFFFF) continue;
         const uint16_t flag = static_cast<uint16_t>(value);
         if (!is_unsynced_event_bit(flag)) {
+            if (flag == dSv_event_flag_c::M_035 && local_wagon_escort_unfinished()) {
+                enqueue_unique_deferred_mutation(deferredStoryEvents_, {
+                    {"type", "event_bit"}, {"flag", flag}, {"set", true},
+                    {"_peer_id", routed.peerId},
+                });
+                continue;
+            }
             if (flag == 0x2B08 && !dComIfGs_isEventBit(flag)) {
                 const char* currentStage = dComIfGp_getStartStageName();
                 if (currentStage != nullptr && is_mirror_complete_reload_stage(currentStage))
@@ -5958,7 +6051,8 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
     for (const auto& entry : message.value("key_counts", nlohmann::json::array())) {
         if (!entry.is_object()) continue;
         const int stage = entry.value("stage", -1), count = entry.value("count", -1);
-        if (valid_stage(stage) && count >= 0 && count <= 99) {
+        if (valid_stage(stage) && count >= 0 && count <= 99 &&
+            !is_local_escort_key_count(stage)) {
             dComIfGs_setKeyNum(stage, static_cast<u8>(count));
         }
     }

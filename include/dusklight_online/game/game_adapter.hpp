@@ -172,6 +172,7 @@ private:
     bool ordonReloadSawStageLoad_ = false;
     bool mirrorReloadPending_ = false;
     nlohmann::json zoraThawPending_;
+    bool localWagonEscortStarted_ = false;
     std::deque<nlohmann::json> deferredStoryEvents_;
     std::deque<nlohmann::json> deferredLocalEvents_;
     uint32_t faronDayBroadcastHoldTicks_ = 0;
@@ -275,6 +276,7 @@ private:
                                              const dusk::multiplayer::PeerPoseSnapshot& pose);
     void maybe_queue_progression_event_prompt(std::string_view peerId, uint16_t flag);
     void maybe_queue_progression_switch_prompt(std::string_view peerId, int stage, int flag);
+    bool local_wagon_escort_unfinished();
 };
 
 }  // namespace dusklight_online::game
