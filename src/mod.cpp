@@ -12,6 +12,7 @@
 #include "mods/svc/config.h"
 #include "mods/svc/ui.h"
 #include "mods/svc/texture.h"
+#include "mods/svc/websocket.h"
 #include "dusklight_online/game/appearance.hpp"
 
 #include <memory>
@@ -26,6 +27,7 @@ IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_SERVICE(TextureService, svc_texture);
+IMPORT_OPTIONAL_SERVICE(WebSocketService, svc_websocket);
 // ItemService's observer API has been stable since minor 0. Import that
 // prefix explicitly so this mod remains loadable on both the old combined
 // multiplayer host and current hosts with the expanded resolution API.

@@ -53,6 +53,12 @@
       "major": 2,
       "min_minor": 3,
       "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.websocket",
+      "major": 1,
+      "min_minor": 0,
+      "optional": true
     }
   ],
   "exports": []

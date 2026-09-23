@@ -47,6 +47,7 @@ private:
         ConfigVarHandle relayCode = 0;
         ConfigVarHandle relayRoom = 0;
         ConfigVarHandle relayPassword = 0;
+        ConfigVarHandle relayManualHost = 0;
         ConfigVarHandle relayLocal = 0;
         ConfigVarHandle dummyModel = 0;
         ConfigVarHandle nameLabels = 0;
@@ -72,6 +73,7 @@ private:
     UiElementHandle windowPlayersEmpty_ = 0;
     bool windowPlayersEmptyVisible_ = true;
     UiElementHandle sessionActionsHeading_ = 0;
+    std::array<UiElementHandle, 3> manualHostControls_{};
     enum class ConnectionRole : uint8_t {
         Host,
         Join,
@@ -166,6 +168,7 @@ public:
                                     UiElementHandle, void*, ModError*);
     static ModResult build_lobby_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                      UiElementHandle, void*, ModError*);
+    static ModResult update_lobby_window(ModContext*, void*, ModError*);
     static ModResult build_host_direct_settings(ModContext*, UiElementHandle, void*, ModError*);
     static ModResult build_host_relay_settings(ModContext*, UiElementHandle, void*, ModError*);
     static ModResult build_join_direct_settings(ModContext*, UiElementHandle, void*, ModError*);

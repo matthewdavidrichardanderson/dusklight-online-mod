@@ -168,6 +168,29 @@ bool should_forward_direct(const std::string& type) {
     return type != "hello" && type != "ping" && type != "pong" && type != "error";
 }
 
+bool cloud_control_type(std::string_view type) {
+    return type == "hello" || type == "ice_signal" || type == "room_settings" ||
+           type == "settings_ready" || type == "kick";
+}
+
+bool valid_room_name(std::string_view name) {
+    if (name.empty() || name.size() > 64 || name.front() == ' ' || name.back() == ' ') return false;
+    for (char c : name) {
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-')) return false;
+    }
+    return true;
+}
+
+std::string cloud_room_url(std::string_view base, std::string_view room) {
+    std::string result(base);
+    if (result.starts_with("https://")) result.replace(0, 8, "wss://");
+    while (result.ends_with('/')) result.pop_back();
+    result += "/room/";
+    for (char c : room) result += c == ' ' ? "%20" : std::string(1, c);
+    return result;
+}
+
 }  // namespace
 
 struct Transport::Impl {
@@ -202,6 +225,11 @@ struct Transport::Impl {
     VisualSendStats lastVisualSend;
     socket_t socket = kInvalidSocket;
     UdpConnection connections;
+    std::unique_ptr<RoomChannel> cloudChannel;
+    std::string cloudUrl;
+    std::string cloudStunHost;
+    uint16_t cloudStunPort = 0;
+    std::map<std::string, std::chrono::steady_clock::time_point> cloudLinkStarted;
     bool listening = false;
     bool udpOpen = false;
     sockaddr_in udpRemoteAddress{};
@@ -539,6 +567,7 @@ struct Transport::Impl {
     }
     void close_all() {
         stop_udp_tx_pacer();
+        if (cloudChannel) cloudChannel->close();
         connections.close();
         socket = kInvalidSocket;
         listening = udpOpen = false;
@@ -555,6 +584,7 @@ struct Transport::Impl {
         peerNames.clear();
         meshEnabled = false; meshPuppets.clear();
         meshRoutes.clear(); meshLinks.clear(); meshRx.clear();
+        cloudLinkStarted.clear();
         peerDelivery.clear();
         deferredSends.clear(); futureGameplay.clear(); barrierExpected.clear(); barrierSeen.clear(); futureBarrierSeen.clear();
         deliveryBytes = 0; settingsGeneration = 0; announcedStage.clear(); deliveryFailure = false;
@@ -592,6 +622,10 @@ struct Transport::Impl {
             password.clear();
             sessionId.clear();
             sessionKey.clear();
+            cloudChannel.reset();
+            cloudUrl.clear();
+            cloudStunHost.clear();
+            cloudStunPort = 0;
         }
         if (preserveAcceptedEvents) events = std::move(accepted);
     }
@@ -632,6 +666,15 @@ struct Transport::Impl {
         return flush(target, buffer);
     }
 
+    bool queue_primary(const json& message) {
+        if (status.mode != Mode::CloudRoom) return queue(socket, tx, message);
+        // This is an egress security boundary, not merely a Worker policy.
+        // Gameplay payloads can only travel on the native ICE mesh.
+        if (!cloudChannel || !cloud_control_type(message.value("type", ""))) return false;
+        const std::string wire = message.dump();
+        return wire.size() <= 16 * 1024 && cloudChannel->send(wire);
+    }
+
     bool queue_peer(Peer& peer, const json& message) {
         if (queue(peer.socket, peer.tx, message)) return true;
         // Match final's central send_json_to_peer failure contract: a peer
@@ -648,7 +691,9 @@ struct Transport::Impl {
         meshLinks[id] = link;
         peerDelivery.try_emplace(id);
         meshRoutes[id] = false;
-        emit(EventKind::RouteChanged, id, "relay");
+        if (status.mode == Mode::CloudRoom) cloudLinkStarted[id] = std::chrono::steady_clock::now();
+        emit(EventKind::RouteChanged, id,
+             status.mode == Mode::CloudRoom ? "connecting" : "relay");
     }
 
     void remove_peer(const std::string& peerId, const std::string& reason) {
@@ -771,12 +816,13 @@ struct Transport::Impl {
     }
 
     void send_hello() {
-        if (helloSent || socket == kInvalidSocket) {
+        if (helloSent || (status.mode != Mode::CloudRoom && socket == kInvalidSocket)) {
             return;
         }
         json hello = {
             {"type", "hello"},
-            {"protocol_version", status.mode == Mode::Relay ? 2 : 1},
+            {"protocol_version", status.mode == Mode::CloudRoom ? 3 :
+                                 (status.mode == Mode::Relay ? 2 : 1)},
             {"room_id", status.room},
             {"session_id", sessionId},
             {"password", password},
@@ -788,13 +834,33 @@ struct Transport::Impl {
                 {kSnapshotDeltaCapability, supportsSnapshotDeltas},
             }},
         };
-        if (status.mode == Mode::Relay) {
+        if (is_room_mode(status.mode)) {
             hello["action"] = relayCreateRoom ? "create" : "join";
             if (relayCreateRoom) {
                 hello["settings"] = settings_json(status.settings);
             }
         }
-        helloSent = queue(socket, tx, hello);
+        helloSent = queue_primary(hello);
+    }
+
+    bool begin_cloud() {
+        events.clear();
+        ++connectionEpoch;
+        stop_udp_tx_pacer();
+        connections.close();
+        socket = kInvalidSocket;
+        udpOpen = false;
+        if (!connections.open("0.0.0.0", 0, 1, false) || !open_udp("0.0.0.0", 0)) {
+            fail("Direct UDP socket could not open", false);
+            return false;
+        }
+        std::string error;
+        if (!cloudChannel || !cloudChannel->open(cloudUrl, error)) {
+            fail(error.empty() ? "Cloudflare room connection could not open" : error, false);
+            return false;
+        }
+        status.state = State::Connecting;
+        return true;
     }
 
     bool begin_connect() {
@@ -873,7 +939,7 @@ struct Transport::Impl {
     }
 
     std::string local_udp_sender_id() const {
-        if ((status.mode == Mode::DirectJoin || status.mode == Mode::Relay) &&
+        if ((status.mode == Mode::DirectJoin || is_room_mode(status.mode)) &&
             !status.clientId.empty()) {
             return status.clientId;
         }
@@ -1183,6 +1249,7 @@ struct Transport::Impl {
                 handle_udp_result(udpDecoder.accept(wire), udpRemoteAddress);
             }
         }
+        if (status.mode == Mode::CloudRoom) return;
         while (true) {
             UdpConnection::Address address;
             const int count = connections.receive_realtime(address, packet);
@@ -1359,16 +1426,18 @@ struct Transport::Impl {
         }
         // A relay broadcast uploads its body ONCE, even though recipients may
         // have different sequence numbers because of earlier targeted syncs.
-        return fallback.empty() || queue(socket,tx,{{"type","peer_reliable"},
-            {"recipients",fallback},{"body",body}});
+        return fallback.empty() || status.mode == Mode::CloudRoom ||
+            queue_primary({{"type","peer_reliable"},{"recipients",fallback},{"body",body}});
     }
     bool resend_delivery(const std::string& name, bool direct) {
         for (const auto& [sequence,item] : peerDelivery.at(name).sent) {
             if (direct) {
                 std::string unused;
                 if (!queue(meshLinks.at(name),unused,{{"sequence",sequence},{"body",item.value}})) return false;
-            } else if (!queue(socket,tx,{{"type","peer_reliable"},
-                {"recipients",json::array({{{"id",name},{"sequence",sequence}}})},{"body",item.value}})) return false;
+            } else if (status.mode != Mode::CloudRoom &&
+                       !queue_primary({{"type","peer_reliable"},
+                           {"recipients",json::array({{{"id",name},{"sequence",sequence}}})},
+                           {"body",item.value}})) return false;
         }
         return true;
     }
@@ -1420,22 +1489,23 @@ struct Transport::Impl {
         return send_delivery(recipients,{{"generation",settingsGeneration},{"payload",message}});
     }
     bool send_mesh_message(const json& message) {
-        const bool setting = message.value("type", "") == "room_settings";
+        const auto type = message.value("type", "");
+        const bool setting = type == "room_settings";
         if (settingsRequested || settingsBarrier) return defer_gameplay(message);
         if (!setting) {
-            if (message.value("type", "") == "progression_state") {
+            if (status.mode != Mode::CloudRoom && type == "progression_state") {
                 const auto stage = message.value("stage", "");
                 if (stage != announcedStage) {
                     // Stage filtering is relay metadata, updated only on a
                     // stage change. Gameplay never waits for its receipt.
-                    if (!queue(socket,tx,{{"type","peer_stage"},{"stage",stage}})) return false;
+                    if (!queue_primary({{"type","peer_stage"},{"stage",stage}})) return false;
                     announcedStage = stage;
                 }
             }
             return send_peer_gameplay(message);
         }
         settingsRequested = true; barrierStarted = std::chrono::steady_clock::now();
-        return queue(socket,tx,message);
+        return queue_primary(message);
     }
     void flush_deferred_gameplay() {
         while (!settingsRequested && !settingsBarrier && !deferredSends.empty() && !deliveryFailure) {
@@ -1445,7 +1515,12 @@ struct Transport::Impl {
         }
     }
     void apply_peer_gameplay(const std::string& name, json message) {
-        if (!message.is_object() || message.dump().size() > reliableJsonLimit || !peer_delivery_type(message.value("type", "")) ||
+        const auto type = message.value("type", "");
+        const bool cloudPeerControl = status.mode == Mode::CloudRoom &&
+            (type == "ping" || type == "pong" || type == "presence" ||
+             type == "puppet_preference");
+        if (!message.is_object() || message.dump().size() > reliableJsonLimit ||
+            !(peer_delivery_type(type) || cloudPeerControl) ||
             (!message.value("target_client_id", "").empty() && message.value("target_client_id", "") != status.clientId)) {
             deliveryFailure = true; return;
         }
@@ -1454,6 +1529,14 @@ struct Transport::Impl {
     }
     void receive_primary(const json& message) {
         const auto type = message.value("type", "");
+        if (status.mode == Mode::CloudRoom && type != "welcome" &&
+            type != "peer_joined" && type != "peer_left" &&
+            type != "owner_changed" && type != "room_settings" &&
+            type != "settings_prepare" && type != "ice_signal" &&
+            type != "kicked" && type != "error") {
+            deliveryFailure = true;
+            return;
+        }
         if (meshEnabled && (type == "peer_reliable" || type == "peer_receipt")) {
             receive_delivery(message.at("client_id").get<std::string>(), message.at("frame"));
             return;
@@ -1542,14 +1625,17 @@ struct Transport::Impl {
             bool accepted;
             if (delivery_direct(name)) {
                 std::string unused; accepted = queue(meshLinks.at(name),unused,receipt);
-            } else accepted = queue(socket,tx,{{"type","peer_receipt"},{"target_client_id",name},{"frame",receipt}});
+            } else if (status.mode == Mode::CloudRoom) {
+                // Keep the receipt pending until the direct path recovers.
+                continue;
+            } else accepted = queue_primary({{"type","peer_receipt"},{"target_client_id",name},{"frame",receipt}});
             if (!accepted) deliveryFailure = true;
             state.ackPending = 0;
         }
         if (settingsBarrier && !barrierObserver && !barrierReady &&
             std::all_of(barrierExpected.begin(),barrierExpected.end(),[&](const auto& id){return barrierSeen.contains(id);})) {
             barrierReady = true;
-            if (!queue(socket,tx,{{"type","settings_ready"},{"generation",settingsGeneration+1}})) deliveryFailure = true;
+            if (!queue_primary({{"type","settings_ready"},{"generation",settingsGeneration+1}})) deliveryFailure = true;
         }
         if ((settingsBarrier || settingsRequested) && std::chrono::steady_clock::now()-barrierStarted > std::chrono::seconds(30))
             deliveryFailure = true;
@@ -1564,7 +1650,7 @@ struct Transport::Impl {
         const std::string type = message.value("type", "");
         if (type == "welcome") {
             status.welcomed = true;
-            if (status.mode == Mode::Relay) {
+            if (is_room_mode(status.mode)) {
                 settingsGeneration = message.value("settings_generation",uint64_t(0));
                 settingsBarrier = barrierObserver = message.value("settings_pending",false);
                 if (settingsBarrier) barrierStarted = std::chrono::steady_clock::now();
@@ -1578,7 +1664,16 @@ struct Transport::Impl {
                 message.value("semantic_visuals_ready", false);
             status.snapshotDeltasReady =
                 message.value("snapshot_deltas_ready", false);
-            if (status.mode == Mode::Relay) {
+            if (status.mode == Mode::CloudRoom) {
+                meshEnabled = connections.mesh_open(status.clientId, UdpConnection::invalid,
+                    cloudStunHost, cloudStunPort);
+                if (!meshEnabled) deliveryFailure = true;
+                status.udpReady = meshEnabled;
+                if (relayCreateRoom) relayMayRecreateRoom = true;
+                relayCreateRoom = false;
+                status.settings = parse_settings(message.value("settings", json::object()),
+                                                 status.settings);
+            } else if (status.mode == Mode::Relay) {
                 const int port = message.value("stun_port", 0);
                 meshEnabled = connections.mesh_open(status.clientId, socket,
                     port > 0 ? status.host : std::string{}, static_cast<uint16_t>(std::clamp(port, 0, 65535)));
@@ -1642,6 +1737,7 @@ struct Transport::Impl {
             if (meshLinks.contains(id)) drain_peer_gameplay(id,meshLinks.at(id));
             peerNames.erase(id);
             connections.mesh_remove(id);
+            cloudLinkStarted.erase(id);
             meshRoutes.erase(id); meshLinks.erase(id); meshRx.erase(id);
             if (auto it = peerDelivery.find(id); it != peerDelivery.end()) {
                 for (const auto& [sequence,item] : it->second.sent) deliveryBytes -= item.bytes;
@@ -1714,16 +1810,19 @@ struct Transport::Impl {
                                   status.settings.remoteCollision;
             emit(EventKind::Message, {}, {}, message);
         } else if (type == "ping") {
-            queue(socket, tx, {{"type", "pong"}});
+            if (status.mode == Mode::CloudRoom)
+                send_peer_gameplay({{"type", "pong"},
+                                    {"target_client_id", message.value("client_id", "")}});
+            else queue_primary({{"type", "pong"}});
         } else if (type == "error") {
             const std::string reason = message.value("error", "remote error");
             emit(EventKind::Error, {}, reason, message);
-            if (status.mode == Mode::Relay && !status.welcomed) {
+            if (is_room_mode(status.mode) && !status.welcomed) {
                 const bool recreate = reason == "lobby_not_found" && relayMayRecreateRoom;
                 relayCreateRoom = recreate;
                 automaticReconnect = recreate;
                 handshakeRejected = true;
-                status.error = recreate ? "Relay room vanished; recreating it" : reason;
+                status.error = recreate ? "Room vanished; recreating it" : reason;
             }
         } else {
             if (meshEnabled && type == "puppet_preference")
@@ -1798,6 +1897,43 @@ struct Transport::Impl {
         }
     }
 
+    void pump_cloud() {
+        if (!cloudChannel) { fail("Cloud room channel unavailable", false); return; }
+        RoomChannel::Event event{};
+        for (size_t n = 0; n < 128 && cloudChannel->poll(event); ++n) {
+            if (event.kind == RoomChannel::EventKind::Open) {
+                status.state = State::Connected;
+                status.error.clear();
+                send_hello();
+                if (!helloSent) { fail("Cloud room handshake send failed"); return; }
+            } else if (event.kind == RoomChannel::EventKind::Message) {
+                if (event.text.size() > 16 * 1024) {
+                    fail("Cloud room message exceeds limit", false); return;
+                }
+                try {
+                    const auto message = json::parse(event.text);
+                    if (!message.is_object() || !message.contains("type") ||
+                        !message["type"].is_string()) {
+                        fail("Invalid cloud room message", false); return;
+                    }
+                    receive_primary(message);
+                } catch (const json::exception&) {
+                    fail("Invalid cloud room JSON", false); return;
+                }
+                if (handshakeRejected || deliveryFailure) {
+                    const bool rejected = handshakeRejected;
+                    fail(rejected ? status.error : "Invalid cloud room protocol message",
+                         rejected ? automaticReconnect : true, !rejected);
+                    return;
+                }
+            } else if (event.kind == RoomChannel::EventKind::Closed) {
+                fail(event.text.empty() ? "Cloud room connection closed" : event.text);
+                return;
+            }
+            if (eventQueueOverflow) { fail("transport event queue limit reached"); return; }
+        }
+    }
+
     void pump_direct_peers() {
         std::vector<std::pair<std::string, std::string>> failed;
         for (auto& [id, peer] : directPeers) {
@@ -1840,6 +1976,8 @@ struct Transport::Impl {
             if ((reconnectTicks++ % 30) == 0) {
                 if (status.mode == Mode::DirectHost) {
                     begin_host();
+                } else if (status.mode == Mode::CloudRoom) {
+                    begin_cloud();
                 } else {
                     begin_connect();
                 }
@@ -1847,7 +1985,8 @@ struct Transport::Impl {
             return;
         }
         if (status.state == State::Connecting) {
-            update_connecting();
+            if (status.mode == Mode::CloudRoom) pump_cloud();
+            else update_connecting();
             return;
         }
         if (status.mode == Mode::DirectHost &&
@@ -1864,8 +2003,8 @@ struct Transport::Impl {
             return;
         }
         if (status.state == State::Connected) {
-            send_hello();
-            pump_primary();
+            if (status.mode == Mode::CloudRoom) pump_cloud();
+            else { send_hello(); pump_primary(); }
             if (status.state == State::Disconnected) return;
             if (meshEnabled) {
 #if defined(DUSKLIGHT_TRANSPORT_TESTING)
@@ -1882,7 +2021,20 @@ struct Transport::Impl {
                     if (current != direct) {
                         direct = current;
                         if (!resend_delivery(id,direct)) deliveryFailure = true;
-                        emit(EventKind::RouteChanged, id, direct ? "direct" : "relay");
+                        emit(EventKind::RouteChanged, id, direct ? "direct" :
+                            (status.mode == Mode::CloudRoom ? "connecting" : "relay"));
+                    }
+                    if (status.mode == Mode::CloudRoom) {
+                        if (current) cloudLinkStarted.erase(id);
+                        else {
+                            auto [it, inserted] = cloudLinkStarted.try_emplace(
+                                id, std::chrono::steady_clock::now());
+                            if (std::chrono::steady_clock::now() - it->second >
+                                std::chrono::seconds(45)) {
+                                fail("Direct NAT connection timed out; use Manual host with a relay code", false);
+                                return;
+                            }
+                        }
                     }
                 }
                 std::string target;
@@ -1893,7 +2045,7 @@ struct Transport::Impl {
                 serviceSignals = std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") == nullptr;
 #endif
                 for (size_t n = 0; serviceSignals && n < 128 && connections.mesh_pop_signal(target, signal); ++n) {
-                    if (!queue(socket, tx, {{"type", "ice_signal"}, {"target_client_id", target},
+                    if (!queue_primary({{"type", "ice_signal"}, {"target_client_id", target},
                         {"kind", static_cast<int>(signal.kind)}, {"data", signal.text}, {"generation", signal.generation}})) {
                         fail("ICE signaling queue full"); return;
                     }
@@ -2028,6 +2180,50 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
     return true;
 }
 
+bool Transport::start_cloud_room(const CloudRoomConfig& config,
+                                 std::unique_ptr<RoomChannel> channel,
+                                 std::string* error) {
+    const auto reject = [error](const char* reason) {
+        if (error) *error = reason;
+        return false;
+    };
+    if (!channel) return reject("Cloud room channel unavailable");
+    if (!valid_room_name(config.room))
+        return reject("Lobby name must be 1-64 letters, numbers, spaces, _ or - with no outer spaces");
+    if (config.password.size() < 6 || config.password.size() > 128)
+        return reject("Lobby password must be between 6 and 128 characters");
+    std::string server = config.serverUrl;
+    while (server.ends_with('/')) server.pop_back();
+    if (!(server.starts_with("https://") || server.starts_with("wss://")))
+        return reject("Room service URL must begin with https:// or wss://");
+    const auto authority = server.substr(server.find("://") + 3);
+    if (authority.empty() || authority.find_first_of("/?#@\\") != std::string::npos)
+        return reject("Room service URL must contain only a secure hostname");
+    if (!acquire_network_stack(impl_->networkStackOwned, error)) return false;
+    impl_->reset_runtime(false);
+    impl_->status.enabled = true;
+    impl_->status.mode = Mode::CloudRoom;
+    impl_->status.name = config.name.empty() ? (config.createRoom ? "Host" : "Player") : config.name;
+    impl_->status.room = config.room;
+    impl_->status.host = server;
+    impl_->status.settings = config.settings;
+    impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
+    impl_->password = config.password;
+    impl_->relayCreateRoom = config.createRoom;
+    impl_->wantPuppet = config.wantPuppet;
+    impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;
+    impl_->cloudUrl = cloud_room_url(server, config.room);
+    impl_->cloudStunHost = config.stunHost;
+    impl_->cloudStunPort = config.stunPort;
+    impl_->cloudChannel = std::move(channel);
+    impl_->automaticReconnect = true;
+    if (!impl_->begin_cloud() && impl_->status.state == State::Disconnected) {
+        if (error) *error = impl_->status.error;
+        return false;
+    }
+    return true;
+}
+
 void Transport::tick() {
     impl_->tick();
 }
@@ -2039,9 +2235,14 @@ bool Transport::send(const nlohmann::json& message) {
     if (impl_->status.mode == Mode::DirectHost) {
         return impl_->broadcast(message);
     }
-    const bool peerGameplay = impl_->meshEnabled && (peer_delivery_type(message.value("type","")) || message.value("type","") == "room_settings");
+    const auto type = message.value("type", "");
+    const bool cloudPeerControl = impl_->status.mode == Mode::CloudRoom &&
+        (type == "ping" || type == "pong" || type == "presence" ||
+         type == "puppet_preference");
+    const bool peerGameplay = impl_->meshEnabled &&
+        (peer_delivery_type(type) || cloudPeerControl || type == "room_settings");
     if (impl_->status.state != State::Connected ||
-        !(peerGameplay ? impl_->send_mesh_message(message) : impl_->queue(impl_->socket, impl_->tx, message))) {
+        !(peerGameplay ? impl_->send_mesh_message(message) : impl_->queue_primary(message))) {
         impl_->fail("send failed");
         return false;
     }
@@ -2060,9 +2261,13 @@ bool Transport::send_to(const std::string& peerId, const nlohmann::json& message
     }
     nlohmann::json targeted = message;
     targeted["target_client_id"] = peerId;
+    const auto type = targeted.value("type", "");
+    const bool cloudPeerControl = impl_->status.mode == Mode::CloudRoom &&
+        (type == "ping" || type == "pong" || type == "presence" ||
+         type == "puppet_preference");
     if (impl_->status.state != State::Connected ||
-        !(impl_->meshEnabled && peer_delivery_type(targeted.value("type","")) ?
-            impl_->send_mesh_message(targeted) : impl_->queue(impl_->socket, impl_->tx, targeted))) {
+        !(impl_->meshEnabled && (peer_delivery_type(type) || cloudPeerControl) ?
+            impl_->send_mesh_message(targeted) : impl_->queue_primary(targeted))) {
         impl_->fail("targeted send failed");
         return false;
     }
@@ -2083,14 +2288,14 @@ bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type)
     if (impl_->status.mode == Mode::DirectHost) {
         return impl_->send_visual_to_direct_peers(message, impl_->local_udp_sender_id(), type);
     }
-    if (!impl_->udpRemoteAddressKnown) {
+    if (!impl_->meshEnabled && !impl_->udpRemoteAddressKnown) {
         return false;
     }
     nlohmann::json wireMessage = message;
     const std::string senderId = impl_->local_udp_sender_id();
     const std::string receiverId = impl_->status.mode == Mode::DirectJoin ? "direct" : "";
     const uint32_t sequence = wireMessage.value("sequence", 0U);
-    const uint32_t baseline = impl_->status.mode == Mode::Relay ?
+    const uint32_t baseline = is_room_mode(impl_->status.mode) ?
         impl_->relay_common_ack_sequence(senderId, type) :
         impl_->pose_ack_sequence(receiverId, senderId, type);
     const bool allowSnapshotDelta = impl_->status.snapshotDeltasReady;
@@ -2184,7 +2389,7 @@ bool Transport::send_remote_object(const udp::RemoteObjectPacket& object) {
     if (impl_->status.mode == Mode::DirectHost) {
         return impl_->send_object_to_direct_peers(object, impl_->local_udp_sender_id());
     }
-    return impl_->udpRemoteAddressKnown &&
+    return (impl_->meshEnabled || impl_->udpRemoteAddressKnown) &&
            impl_->send_udp_datagram(
                impl_->udpRemoteAddress,
                udp::encode_remote_object(impl_->local_udp_sender_id(), object));
@@ -2203,7 +2408,7 @@ Status Transport::status() const {
     Status result = impl_->status;
     for (const auto& [id, direct] : impl_->meshRoutes) {
         if (direct) ++result.natPeerCount;
-        else ++result.relayPeerCount;
+        else if (result.mode == Mode::Relay) ++result.relayPeerCount;
     }
     return result;
 }
@@ -2230,13 +2435,13 @@ Event Transport::pop_event() {
 }
 
 bool Transport::publish_room_settings(const RoomSettings& settings) {
-    if (impl_->status.mode == Mode::Relay && !impl_->status.isOwner) {
+    if (is_room_mode(impl_->status.mode) && !impl_->status.isOwner) {
         return false;
     }
-    if (impl_->status.mode != Mode::Relay && impl_->status.mode != Mode::DirectHost) {
+    if (!is_room_mode(impl_->status.mode) && impl_->status.mode != Mode::DirectHost) {
         return false;
     }
-    if (impl_->status.mode == Mode::Relay) {
+    if (is_room_mode(impl_->status.mode)) {
         auto requested = settings; requested.pvp &= requested.remoteCollision;
         return send({{"type","room_settings"},{"settings",settings_json(requested)}});
     }
@@ -2299,7 +2504,7 @@ bool Transport::kick_peer(const std::string& peerId, std::string* error) {
         return true;
     }
 
-    if (impl_->status.mode != Mode::Relay || !impl_->status.welcomed ||
+    if (!is_room_mode(impl_->status.mode) || !impl_->status.welcomed ||
         !impl_->status.isOwner) {
         return reject("Only the lobby host can kick players");
     }

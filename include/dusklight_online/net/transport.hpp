@@ -19,7 +19,12 @@ enum class Mode : uint8_t {
     DirectHost,
     DirectJoin,
     Relay,
+    CloudRoom,
 };
+
+[[nodiscard]] inline bool is_room_mode(Mode mode) {
+    return mode == Mode::Relay || mode == Mode::CloudRoom;
+}
 
 enum class State : uint8_t {
     Disconnected,
@@ -84,6 +89,33 @@ struct RelayConfig {
     bool wantPuppet = true;
     bool wantMidna = false;
     bool supportsSnapshotDeltas = true;
+};
+
+struct CloudRoomConfig {
+    std::string name = "Player";
+    std::string room = "Lobby";
+    std::string password;
+    std::string serverUrl;
+    std::string stunHost = "stun.cloudflare.com";
+    uint16_t stunPort = 3478;
+    bool createRoom = false;
+    RoomSettings settings;
+    bool wantPuppet = true;
+    bool supportsSnapshotDeltas = true;
+};
+
+// The native WebSocket service lives in the mod, not in the standalone
+// transport tests. Keeping this interface narrow also makes it impossible
+// for the room server to become a gameplay carrier by accident.
+class RoomChannel {
+public:
+    enum class EventKind { Open, Message, Closed };
+    struct Event { EventKind kind; std::string text; };
+    virtual ~RoomChannel() = default;
+    virtual bool open(std::string_view url, std::string& error) = 0;
+    virtual bool send(std::string_view text) = 0;
+    virtual bool poll(Event& event) = 0;
+    virtual void close() = 0;
 };
 
 enum class EventKind : uint8_t {
@@ -182,6 +214,8 @@ public:
     bool start_direct_host(const DirectHostConfig& config, std::string* error = nullptr);
     bool start_direct_join(const DirectJoinConfig& config, std::string* error = nullptr);
     bool start_relay(const RelayConfig& config, std::string* error = nullptr);
+    bool start_cloud_room(const CloudRoomConfig& config, std::unique_ptr<RoomChannel> channel,
+                          std::string* error = nullptr);
 
     void tick();
     bool send(const nlohmann::json& message);

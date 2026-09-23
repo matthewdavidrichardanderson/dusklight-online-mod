@@ -35,7 +35,7 @@ public:
     // Relay idle wait: wake for received data without imposing a polling delay.
     // Does not service game callbacks or bypass the shared datagram budget.
     void wait_for_activity(uint32_t timeoutMs);
-    // Relay-admitted logical links. Both paths share one KCP session/budget.
+    // Logical ICE links. An invalid relay ID forbids gameplay fallback.
     bool mesh_open(std::string_view localId, Id relay, std::string_view stunHost, uint16_t stunPort);
     Id mesh_admit(std::string_view peerId, bool reliable = false);
     void mesh_remove(std::string_view peerId);

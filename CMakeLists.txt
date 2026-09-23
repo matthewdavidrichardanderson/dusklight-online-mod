@@ -304,6 +304,7 @@ add_mod(dusklight_online
     SOURCES
         src/mod.cpp
         src/online_app.cpp
+        src/net/sdk_room_channel.cpp
         ${ONLINE_CORE_SOURCES}
         ${ONLINE_GAME_SOURCES}
     BUNDLE
@@ -486,6 +487,20 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         target_link_libraries(dusklight_online_transport_test PRIVATE ws2_32)
     endif ()
     add_test(NAME dusklight_online_transport COMMAND dusklight_online_transport_test)
+
+    add_executable(dusklight_online_cloud_room_transport_test
+        tests/cloud_room_transport_test.cpp
+        ${ONLINE_CORE_SOURCES}
+    )
+    target_compile_features(dusklight_online_cloud_room_transport_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_cloud_room_transport_test PRIVATE include src)
+    target_link_libraries(dusklight_online_cloud_room_transport_test PRIVATE
+        nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
+    if (WIN32)
+        target_link_libraries(dusklight_online_cloud_room_transport_test PRIVATE ws2_32)
+    endif ()
+    add_test(NAME dusklight_online_cloud_room_transport
+             COMMAND dusklight_online_cloud_room_transport_test)
 
     add_executable(dusklight_online_udp_codec_test
         tests/udp_codec_test.cpp

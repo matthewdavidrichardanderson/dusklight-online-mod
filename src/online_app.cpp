@@ -7,6 +7,7 @@
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
+#include "dusklight_online/net/sdk_room_channel.hpp"
 
 #include <mods/service.hpp>
 #include <mods/svc/config.h>
@@ -29,8 +30,11 @@ namespace dusklight_online {
 namespace {
 
 constexpr uint32_t kManualSyncCooldownTicks = 5 * 30;
+constexpr const char* kCloudRoomServiceUrl =
+    "https://dusklight-online-rooms.matthewdavidrichardanderson.workers.dev";
 
 const char* connection_label(const net::Status& status) {
+    if (status.mode == net::Mode::CloudRoom) return "NAT (Cloudflare room)";
     if (status.mode != net::Mode::Relay) return "Direct";
     if (status.natPeerCount && status.relayPeerCount) return "NAT/Relay (mixed)";
     if (status.natPeerCount) return "NAT";
@@ -504,6 +508,9 @@ button.online-copy-action:disabled,
 .online-session-actions-hidden {
     display: none;
 }
+window content pane.online-form-pane > .online-manual-only-hidden {
+    display: none;
+}
 window content pane.online-form-pane > button.online-primary-action:not(:disabled):focus-visible,
 window content pane.online-form-pane > button.online-primary-action:not(:disabled):active,
 window content pane.online-form-pane > button.online-danger-action:not(:disabled):focus-visible,
@@ -524,6 +531,7 @@ const char* mode_text(net::Mode mode) {
     case net::Mode::DirectHost: return "direct host";
     case net::Mode::DirectJoin: return "direct join";
     case net::Mode::Relay: return "relay";
+    case net::Mode::CloudRoom: return "cloud room";
     default: return "disabled";
     }
 }
@@ -540,7 +548,7 @@ const char* state_text(net::State state) {
 bool room_settings_locked(const net::Status& status, bool relayHostIntent) {
     if (!status.enabled) return false;
     if (status.mode == net::Mode::DirectJoin) return true;
-    if (status.mode == net::Mode::Relay) return !relayHostIntent && !status.isOwner;
+    if (net::is_room_mode(status.mode)) return !relayHostIntent && !status.isOwner;
     return false;
 }
 
@@ -668,7 +676,7 @@ void OnlineApp::update() {
         }
         if (event.kind == net::EventKind::Message &&
             event.message.value("type", std::string()) == "owner_changed" &&
-            event.ingress.mode == net::Mode::Relay) {
+            net::is_room_mode(event.ingress.mode)) {
             const std::string ownerId = event.message.value("owner_client_id", std::string());
             const bool isOwner = !event.ingress.clientId.empty() &&
                                  ownerId == event.ingress.clientId;
@@ -692,7 +700,7 @@ void OnlineApp::update() {
                 connectedLobbyName_ + ".");
             pendingLobbyFailurePrefix_.clear();
             pendingLobbyFailureNotified_ = false;
-            relayOwnerStateKnown_ = event.ingress.mode == net::Mode::Relay;
+            relayOwnerStateKnown_ = net::is_room_mode(event.ingress.mode);
             wasRelayOwner_ = relayOwnerStateKnown_ &&
                 event.message.value("owner_client_id", std::string()) ==
                     event.message.value("client_id", event.ingress.clientId);
@@ -930,6 +938,7 @@ ModResult OnlineApp::register_config(ModError* error) {
     const std::array booleans = {
         BoolVar{"match-outfit-color", true, &config_.matchOutfitColor},
         BoolVar{"relay-local", false, &config_.relayLocal},
+        BoolVar{"relay-manual-host", false, &config_.relayManualHost},
         BoolVar{"remote-model", true, &config_.dummyModel},
         BoolVar{"name-labels", true, &config_.nameLabels},
         BoolVar{"sync-flags", true, &config_.syncFlags},
@@ -1172,6 +1181,7 @@ void OnlineApp::open_lobby_window(ConnectionRole role) {
     tab = UI_TAB_DESC_INIT;
     tab.title = role == ConnectionRole::Host ? "Host lobby" : "Join lobby";
     tab.build = &OnlineApp::build_lobby_tab;
+    tab.update = &OnlineApp::update_lobby_window;
     tab.user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = &tab;
@@ -1211,7 +1221,7 @@ void OnlineApp::refresh_inline_player_rows() {
     const net::Status status = transport_.status();
     const bool owner = status.enabled &&
         (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner));
+         (net::is_room_mode(status.mode) && status.isOwner));
 
     const bool emptyVisible = peers.empty();
     if (windowPlayersEmpty_ != 0 && emptyVisible != windowPlayersEmptyVisible_) {
@@ -1401,6 +1411,28 @@ void OnlineApp::join_direct() {
 
 void OnlineApp::host_relay() {
     relayHostIntent_ = false;
+    if (!bool_value(config_.relayManualHost)) {
+        net::CloudRoomConfig cloud;
+        cloud.name = string_value(config_.playerName);
+        cloud.room = string_value(config_.relayRoom);
+        cloud.password = string_value(config_.relayPassword);
+        cloud.serverUrl = kCloudRoomServiceUrl;
+        cloud.createRoom = true;
+        cloud.settings = configured_settings();
+        cloud.wantPuppet = cloud.settings.dummyModel;
+        std::string error;
+        if (!transport_.start_cloud_room(cloud, net::make_sdk_room_channel(), &error)) {
+            statusMessage_ = "Cloud room host failed: " + error;
+            game::push_online_notification(
+                failure_message("Could not create the NAT lobby", error), 5.0f, true);
+        } else {
+            begin_lobby_attempt("Could not create the NAT lobby");
+            relayHostIntent_ = true;
+            activeCode_.clear();
+            statusMessage_ = "Creating NAT lobby via Cloudflare room service";
+        }
+        return;
+    }
     net::RelayConfig config;
     config.name = string_value(config_.playerName);
     config.room = string_value(config_.relayRoom);
@@ -1441,6 +1473,27 @@ void OnlineApp::host_relay() {
 
 void OnlineApp::join_relay() {
     relayHostIntent_ = false;
+    if (!bool_value(config_.relayManualHost)) {
+        net::CloudRoomConfig cloud;
+        cloud.name = string_value(config_.playerName);
+        cloud.room = string_value(config_.relayRoom);
+        cloud.password = string_value(config_.relayPassword);
+        cloud.serverUrl = kCloudRoomServiceUrl;
+        cloud.createRoom = false;
+        cloud.settings = configured_settings();
+        cloud.wantPuppet = bool_value(config_.dummyModel, true);
+        std::string error;
+        if (!transport_.start_cloud_room(cloud, net::make_sdk_room_channel(), &error)) {
+            statusMessage_ = "Cloud room join failed: " + error;
+            game::push_online_notification(
+                failure_message("Could not join the NAT lobby", error), 5.0f, true);
+        } else {
+            begin_lobby_attempt("Could not join the NAT lobby");
+            activeCode_.clear();
+            statusMessage_ = "Joining NAT lobby via Cloudflare room service";
+        }
+        return;
+    }
     const std::string code = string_value(config_.relayCode);
     std::string error;
     const auto endpoint = dusk::multiplayer::decode_invite_code(code, &error);
@@ -1787,11 +1840,12 @@ ModResult OnlineApp::build_host_direct_settings(ModContext*, UiElementHandle pan
 ModResult OnlineApp::build_host_relay_settings(ModContext*, UiElementHandle pane, void* data,
                                                ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
+    app.manualHostControls_ = {};
     svc_ui->elem_set_class(mod_ctx, pane, "online-form-pane", true);
     svc_ui->pane_add_section(mod_ctx, pane, "NAT/Relay settings");
     add_button(pane, "Host NAT/Relay lobby", &OnlineApp::host_relay_pressed, &app,
                &OnlineApp::session_active, nullptr, "online-primary-action", nullptr,
-               "<p>Create a lobby using NAT traversal with relay fallback.</p>");
+               "<p>Use Cloudflare for room discovery and direct NAT traversal. Manual host uses your own relay.</p>");
     add_button(pane, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
                &OnlineApp::relay_host_inactive, nullptr, "online-danger-action", nullptr,
                "<p>Close the current NAT/Relay lobby and disconnect every guest.</p>");
@@ -1800,18 +1854,26 @@ ModResult OnlineApp::build_host_relay_settings(ModContext*, UiElementHandle pane
     add_form_string(pane, "Lobby name", app.config_.relayRoom, 64, "online-half-field",
                     "<p>The lobby name guests must enter to find your session.</p>");
     add_form_string(pane, "Password", app.config_.relayPassword, 128, "online-half-field",
-                    "<p>An optional password guests must enter to join the lobby.</p>");
-    add_bound_control(pane, UI_CONTROL_TOGGLE, "Use relay on this PC",
-                      app.config_.relayLocal, 0, 0, 1, 0, nullptr, nullptr,
+                    "<p>Required: 6-128 characters. Guests enter the same password.</p>");
+    add_bound_control(pane, UI_CONTROL_TOGGLE, "Manual host",
+                      app.config_.relayManualHost, 0, 0, 1, 0, nullptr, nullptr,
                       "online-wide-control", nullptr,
-                      "<p>Run the relay service locally instead of using the server in the "
-                      "relay code.</p>");
-    add_code_control(pane, "NAT/Relay code", &OnlineApp::relay_code_get,
-                     &OnlineApp::relay_code_set, &app,
-                     "<p>The connection code for the relay server used by this lobby.</p>");
-    add_button(pane, "Copy", &OnlineApp::copy_relay_code_pressed, &app, nullptr, nullptr,
-               "online-copy-action", nullptr,
-               "<p>Copy the relay server code to the clipboard.</p>");
+                      "<p>Off: Cloudflare room discovery, direct connections only. On: your own relay with a TP1 code.</p>");
+    app.manualHostControls_[0] = add_bound_control(
+        pane, UI_CONTROL_TOGGLE, "Use relay on this PC", app.config_.relayLocal,
+        0, 0, 1, 0, nullptr, nullptr, "online-wide-control", nullptr,
+        "<p>Run the manual relay locally instead of using the server in the TP1 code.</p>");
+    app.manualHostControls_[1] = add_code_control(
+        pane, "NAT/Relay code", &OnlineApp::relay_code_get,
+        &OnlineApp::relay_code_set, &app,
+        "<p>The TP1 code for the manually hosted relay.</p>");
+    app.manualHostControls_[2] = add_button(
+        pane, "Copy", &OnlineApp::copy_relay_code_pressed, &app, nullptr, nullptr,
+        "online-copy-action", nullptr,
+        "<p>Copy the manual relay code to the clipboard.</p>");
+    const bool manual = app.bool_value(app.config_.relayManualHost);
+    for (auto handle : app.manualHostControls_)
+        if (handle) svc_ui->elem_set_class(mod_ctx, handle, "online-manual-only-hidden", !manual);
     return MOD_OK;
 }
 
@@ -1840,11 +1902,12 @@ ModResult OnlineApp::build_join_direct_settings(ModContext*, UiElementHandle pan
 ModResult OnlineApp::build_join_relay_settings(ModContext*, UiElementHandle pane, void* data,
                                                ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
+    app.manualHostControls_ = {};
     svc_ui->elem_set_class(mod_ctx, pane, "online-form-pane", true);
     svc_ui->pane_add_section(mod_ctx, pane, "NAT/Relay settings");
     add_button(pane, "Join NAT/Relay lobby", &OnlineApp::join_relay_pressed, &app,
                &OnlineApp::session_active, nullptr, "online-primary-action", nullptr,
-               "<p>Join using NAT traversal with relay fallback.</p>");
+               "<p>Use Cloudflare for room discovery and direct NAT traversal. Manual host uses the host's relay.</p>");
     add_button(pane, "Disconnect", &OnlineApp::disconnect_pressed, &app,
                &OnlineApp::relay_join_inactive, nullptr, "online-danger-action", nullptr,
                "<p>Leave the current NAT/Relay lobby.</p>");
@@ -1853,17 +1916,26 @@ ModResult OnlineApp::build_join_relay_settings(ModContext*, UiElementHandle pane
     add_form_string(pane, "Lobby name", app.config_.relayRoom, 64, "online-half-field",
                     "<p>The exact lobby name supplied by the host.</p>");
     add_form_string(pane, "Password", app.config_.relayPassword, 128, "online-half-field",
-                    "<p>The lobby password supplied by the host, if one is required.</p>");
-    add_bound_control(pane, UI_CONTROL_TOGGLE, "Use relay on this PC",
-                      app.config_.relayLocal, 0, 0, 1, 0, nullptr, nullptr,
+                    "<p>The 6-128 character password supplied by the host.</p>");
+    add_bound_control(pane, UI_CONTROL_TOGGLE, "Manual host",
+                      app.config_.relayManualHost, 0, 0, 1, 0, nullptr, nullptr,
                       "online-wide-control", nullptr,
-                      "<p>Connect through a relay service running on this PC.</p>");
-    add_code_control(pane, "NAT/Relay code", &OnlineApp::relay_code_get,
-                     &OnlineApp::relay_code_set, &app,
-                     "<p>The connection code for the relay server used by the host.</p>");
-    add_button(pane, "Paste", &OnlineApp::paste_relay_code_pressed, &app, nullptr, nullptr,
-               "online-copy-action", nullptr,
-               "<p>Paste a relay server code from the clipboard.</p>");
+                      "<p>Off: Cloudflare room discovery, direct connections only. On: connect through the host's own relay.</p>");
+    app.manualHostControls_[0] = add_bound_control(
+        pane, UI_CONTROL_TOGGLE, "Use relay on this PC", app.config_.relayLocal,
+        0, 0, 1, 0, nullptr, nullptr, "online-wide-control", nullptr,
+        "<p>Connect through a manually hosted relay service running on this PC.</p>");
+    app.manualHostControls_[1] = add_code_control(
+        pane, "NAT/Relay code", &OnlineApp::relay_code_get,
+        &OnlineApp::relay_code_set, &app,
+        "<p>The TP1 code for the host's manually hosted relay.</p>");
+    app.manualHostControls_[2] = add_button(
+        pane, "Paste", &OnlineApp::paste_relay_code_pressed, &app, nullptr, nullptr,
+        "online-copy-action", nullptr,
+        "<p>Paste the manual relay code from the clipboard.</p>");
+    const bool manual = app.bool_value(app.config_.relayManualHost);
+    for (auto handle : app.manualHostControls_)
+        if (handle) svc_ui->elem_set_class(mod_ctx, handle, "online-manual-only-hidden", !manual);
     return MOD_OK;
 }
 
@@ -1905,6 +1977,16 @@ ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
     return MOD_OK;
 }
 
+ModResult OnlineApp::update_lobby_window(ModContext*, void* data, ModError*) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const bool manual = app.bool_value(app.config_.relayManualHost);
+    for (auto& handle : app.manualHostControls_) {
+        if (handle && svc_ui->elem_set_class(mod_ctx, handle,
+            "online-manual-only-hidden", !manual) != MOD_OK) handle = 0;
+    }
+    return MOD_OK;
+}
+
 void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.window_ = 0;
@@ -1915,6 +1997,7 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
     app.sessionActionsHeading_ = 0;
+    app.manualHostControls_ = {};
 }
 
 void OnlineApp::settings_window_closed(ModContext*, UiWindowHandle, void* data) {
@@ -1932,6 +2015,7 @@ void OnlineApp::sync_window_closed(ModContext*, UiWindowHandle, void* data) {
 void OnlineApp::lobby_window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.lobbyWindow_ = 0;
+    app.manualHostControls_ = {};
 }
 
 bool OnlineApp::player_colour_locked(ModContext*, void* data) {
@@ -2102,7 +2186,7 @@ bool OnlineApp::inline_kick_unavailable(ModContext*, void* data) {
     if (slot.app == nullptr || slot.peerId.empty() || slot.kickPending) return true;
     const net::Status status = slot.app->transport_.status();
     const bool owner = status.mode == net::Mode::DirectHost ||
-        (status.mode == net::Mode::Relay && status.isOwner);
+        (net::is_room_mode(status.mode) && status.isOwner);
     return !status.enabled || !owner ||
         slot.app->transport_.peers().find(slot.peerId) == slot.app->transport_.peers().end();
 }
@@ -2114,13 +2198,13 @@ bool OnlineApp::host_inactive(ModContext*, void* data) {
     const net::Status status = app.transport_.status();
     return !status.enabled ||
         (status.mode != net::Mode::DirectHost &&
-         !(status.mode == net::Mode::Relay && (app.relayHostIntent_ || status.isOwner)));
+         !(net::is_room_mode(status.mode) && (app.relayHostIntent_ || status.isOwner)));
 }
 bool OnlineApp::joiner_inactive(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
     return !status.enabled || status.mode == net::Mode::DirectHost ||
-        (status.mode == net::Mode::Relay && (app.relayHostIntent_ || status.isOwner));
+        (net::is_room_mode(status.mode) && (app.relayHostIntent_ || status.isOwner));
 }
 bool OnlineApp::direct_host_inactive(ModContext*, void* data) {
     const net::Status status = static_cast<OnlineApp*>(data)->transport_.status();
@@ -2133,13 +2217,13 @@ bool OnlineApp::direct_join_inactive(ModContext*, void* data) {
 bool OnlineApp::relay_host_inactive(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
-    return !status.enabled || status.mode != net::Mode::Relay ||
+    return !status.enabled || !net::is_room_mode(status.mode) ||
         (!app.relayHostIntent_ && !status.isOwner);
 }
 bool OnlineApp::relay_join_inactive(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     const net::Status status = app.transport_.status();
-    return !status.enabled || status.mode != net::Mode::Relay ||
+    return !status.enabled || !net::is_room_mode(status.mode) ||
         app.relayHostIntent_ || status.isOwner;
 }
 bool OnlineApp::room_setting_locked(ModContext*, void* data) {
@@ -2176,7 +2260,7 @@ void OnlineApp::dummy_model_set(ModContext*, void* data, const UiControlValue* v
     svc_config->set_bool(mod_ctx, app.config_.dummyModel, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner))) {
+         (net::is_room_mode(status.mode) && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.dummyModel = value->bool_value;
         settings.syncWorld = false;
@@ -2195,7 +2279,7 @@ void OnlineApp::sync_flags_set(ModContext*, void* data, const UiControlValue* va
     svc_config->set_bool(mod_ctx, app.config_.syncFlags, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner))) {
+         (net::is_room_mode(status.mode) && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.syncFlags = value->bool_value;
         settings.syncWorld = false;
@@ -2215,7 +2299,7 @@ void OnlineApp::remote_collision_set(ModContext*, void* data, const UiControlVal
     if (!value->bool_value) svc_config->set_bool(mod_ctx, app.config_.pvp, false);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner))) {
+         (net::is_room_mode(status.mode) && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.remoteCollision = value->bool_value;
         if (!settings.remoteCollision) settings.pvp = false;
@@ -2236,7 +2320,7 @@ void OnlineApp::pvp_set(ModContext*, void* data, const UiControlValue* value) {
     svc_config->set_bool(mod_ctx, app.config_.pvp, value->bool_value);
     if (status.enabled &&
         (status.mode == net::Mode::DirectHost ||
-         (status.mode == net::Mode::Relay && status.isOwner))) {
+         (net::is_room_mode(status.mode) && status.isOwner))) {
         net::RoomSettings settings = status.settings;
         settings.pvp = value->bool_value && settings.remoteCollision;
         settings.syncWorld = false;

@@ -525,7 +525,8 @@ void UdpConnection::wait_for_activity(uint32_t timeoutMs) {
 }
 bool UdpConnection::mesh_open(std::string_view localId, Id relay, std::string_view host, uint16_t port) {
     std::lock_guard lock(impl_->mutex);
-    if (impl_->server || !peer_number(localId) || !impl_->peers.contains(relay)) return false;
+    if (impl_->server || !peer_number(localId) ||
+        (relay != invalid && !impl_->peers.contains(relay))) return false;
     impl_->localLogical = peer_number(localId); impl_->relayId = relay;
     impl_->stunHost = host; impl_->stunPort = port;
     return true;
@@ -622,7 +623,10 @@ bool UdpConnection::mesh_send_many(std::span<const std::string> names, std::span
         if (impl_->direct(peer, now)) ok = enqueue(id, bytes) && ok;
         else if (std::find(fallback.begin(), fallback.end(), peer.logical) == fallback.end()) fallback.push_back(peer.logical);
     }
-    if (!fallback.empty()) ok = enqueue(impl_->relayId, peer_group(impl_->localLogical, fallback, bytes)) && ok;
+    // Cloud rooms have no relay peer. Visuals are lossy: omit them until a
+    // direct ICE path is usable rather than uploading them to a room service.
+    if (!fallback.empty() && impl_->relayId != invalid)
+        ok = enqueue(impl_->relayId, peer_group(impl_->localLogical, fallback, bytes)) && ok;
     impl_->budget.update(now); return ok;
 }
 bool UdpConnection::mesh_direct(std::string_view peerId) const {
