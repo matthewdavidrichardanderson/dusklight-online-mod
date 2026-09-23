@@ -2148,6 +2148,7 @@ void GameAdapter::notify_local_ooccoo_warp_out() {
         svc_log->warn(mod_ctx, "OOCCOO native warp-out had no valid Jr return mark");
         return;
     }
+    ooccooState_.observe_native_completion(facts.completed);
     ooccooState_.record_local(facts);
     svc_log->info(mod_ctx, ("OOCCOO native warp-out stage=" + std::to_string(owner) +
         " room=" + std::to_string(facts.anchors[owner - ooccoo::FirstDungeon].room)).c_str());
@@ -5370,7 +5371,9 @@ bool GameAdapter::ooccoo_sync_active() const {
 
 void GameAdapter::bind_ooccoo_to_save() {
     if (ooccooBoundToSave_ || opening_or_title_active()) return;
-    ooccooState_.seed(native_ooccoo_facts(true, stage_ready()));
+    const auto facts = native_ooccoo_facts(true, stage_ready());
+    ooccooState_.observe_native_completion(facts.completed);
+    ooccooState_.seed(facts);
     ooccooBoundToSave_ = true;
 }
 
@@ -5391,14 +5394,17 @@ nlohmann::json GameAdapter::ooccoo_snapshot_state() {
     bind_ooccoo_to_save();
     // Snapshot serialization does not infer an owner from the displayed item
     // or clear a receipt. The native warp-out hook records its mark explicitly.
-    return ooccoo::encode(ooccoo::join(ooccooState_.progress(),
-        native_ooccoo_facts(false, stage_ready())));
+    auto snapshot = ooccooState_.progress();
+    snapshot.completed = native_ooccoo_facts(false, stage_ready()).completed;
+    return ooccoo::encode(snapshot);
 }
 
 bool GameAdapter::accept_ooccoo_state(const nlohmann::json& state) {
     const auto decoded = ooccoo::decode(state);
     if (!decoded || !ooccoo_sync_active()) return false;
     bind_ooccoo_to_save();
+    ooccooState_.observe_native_completion(
+        native_ooccoo_facts(false, stage_ready()).completed);
     if (ooccooState_.merge_remote(*decoded)) {
         const auto merged = ooccooState_.progress();
         svc_log->info(mod_ctx, ("OOCCOO remote progress acquired=" +
@@ -5424,6 +5430,7 @@ void GameAdapter::apply_shared_ooccoo_local_form() {
     const auto nativeFacts = native_ooccoo_facts(false, true);
     const bool newlyCompleted =
         (nativeFacts.completed & ~ooccooState_.progress().completed) != 0;
+    ooccooState_.observe_native_completion(nativeFacts.completed);
     ooccooState_.seed(nativeFacts);
     if (newlyCompleted && !applyingRemote_) {
         svc_log->info(mod_ctx, ("OOCCOO local completion mask=" +
@@ -5436,9 +5443,9 @@ void GameAdapter::apply_shared_ooccoo_local_form() {
     for (int stage = ooccoo::FirstDungeon; stage <= ooccoo::CityDungeon; ++stage) {
         const auto bit = ooccoo::dungeon_bit(stage);
         auto applyFacts = [&](dSv_memBit_c& bits) {
-            if ((progress.completed & bit) != 0) {
-                if (!bits.isStageBossEnemy()) bits.onStageBossEnemy();
-            } else if ((progress.acquired & bit) != 0) {
+            // Ooccoo completion controls her form, not the game's boss-clear flag.
+            // A newly loaded save may legitimately have that flag unset.
+            if ((progress.completed & bit) == 0 && (progress.acquired & bit) != 0) {
                 if (!bits.isDungeonItemWarp()) bits.onDungeonItemWarp();
             }
         };

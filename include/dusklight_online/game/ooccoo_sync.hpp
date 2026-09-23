@@ -113,8 +113,8 @@ constexpr ReturnAnchor choose_anchor(int owner, ReturnAnchor a, ReturnAnchor b) 
 }
 
 // Acquisition/completion and actual warp-out return anchors cross the network.
-// Completion dominates acquisition; union makes concurrent pickups, retries
-// and old snapshots order-independent.
+// Acquisition receipts and return anchors are shared. Completion is carried on
+// the wire for compatibility, but local boss flags decide whether it applies.
 // The special City item does not set vanilla's ordinary OOCCOO_NOTE flag.
 struct Progress {
     uint8_t acquired = 0;
@@ -177,8 +177,14 @@ public:
 
     // Save hydration and actual local grants don't redeliver an already owned
     // item. The engine has performed the local give itself.
+    void observe_native_completion(uint8_t completed) {
+        progress_.completed = static_cast<uint8_t>(completed & DungeonMask);
+        pending_ &= entitlements(progress_);
+    }
     void seed(Progress facts) {
+        const auto nativeCompleted = progress_.completed;
         progress_ = join(progress_, facts);
+        progress_.completed = nativeCompleted;
         pending_ &= entitlements(progress_);
     }
     void record_local(Progress facts) {
@@ -190,12 +196,15 @@ public:
         const auto before = progress_;
         const auto oldEntitlements = entitlements(before);
         progress_ = join(progress_, facts);
+        // A peer's cached completion is not evidence about this save's boss flag.
+        progress_.completed = before.completed;
         const auto available = entitlements(progress_);
         pending_ = static_cast<uint16_t>((pending_ | (available & ~oldEntitlements)) & available);
         return before != progress_;
     }
     void restore(Progress facts, uint16_t pending, bool managedForm = false) {
         progress_ = facts;
+        progress_.completed = 0; // Re-read from the selected game's native flags.
         pending_ = static_cast<uint16_t>(pending & entitlements(progress_));
         managedForm_ = managedForm;
     }

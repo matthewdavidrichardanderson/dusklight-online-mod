@@ -120,9 +120,16 @@ void remote_junior_and_completion() {
     check(holding.item == Junior && holding.installReturnStage == -1,
           "valid Jr return mark is preserved between updates");
     outside.merge_remote({0, 1, false, false});
+    check(outside.reconcile(field, Junior, 16, true).item == Junior,
+          "remote cached completion alone cannot remove Jr");
+    outside.observe_native_completion(1);
     const auto cleared = outside.reconcile(field, Junior, 16, true);
     check(cleared.item == None && cleared.resetReturn && !outside.managed_form(),
-          "remote boss completion removes Jr and clears the mark");
+          "native boss flag removes Jr and clears the mark");
+    outside.observe_native_completion(0);
+    outside.merge_remote({0, 1, false, false});
+    check(outside.reconcile(field, Junior, 16, true).item == Junior,
+          "clearing the boss flag makes the return usable despite an old packet");
 
     State sameDungeon;
     sameDungeon.merge_remote(anchored_forest_receipt());
@@ -137,8 +144,11 @@ void remote_junior_and_completion() {
     check(lateAnchor.reconcile(field, Note, -1, true).item == Junior,
           "late anchor upgrades the provisional Note to Jr");
     lateAnchor.merge_remote({0, 1, false, false});
+    check(lateAnchor.reconcile(field, Note, -1, true).item == Junior,
+          "remote cached completion cannot remove a managed Note");
+    lateAnchor.observe_native_completion(1);
     check(lateAnchor.reconcile(field, Note, -1, true).item == None,
-          "managed Note also clears after remote completion");
+          "managed Note clears after the native boss flag is set");
 
     State local;
     local.record_local(anchored_forest_receipt());
@@ -219,8 +229,10 @@ void lifecycle_and_completion() {
 
     State complete;
     complete.merge_remote({0, 1, false, false});
-    check(complete.pending() == 0 && complete.progress().acquired == 0,
-          "boss bit alone isn't collection");
+    check(complete.pending() == 0 && complete.progress().acquired == 0 &&
+          complete.progress().completed == 0,
+          "remote boss bit alone is neither collection nor local completion");
+    complete.observe_native_completion(1);
     complete.merge_remote(forestReceipt);
     check(complete.pending() == 0, "completed dungeon dominates late acquisition");
     check(complete.reconcile(forest, Parent, -1, true).item == None, "matching completed dungeon removes Sr");
@@ -229,6 +241,15 @@ void lifecycle_and_completion() {
     complete.merge_remote(minesReceipt);
     check(complete.reconcile(forest, Parent, -1, true).item == Note,
           "a new B acquisition still delivers when old A completes");
+    complete.observe_native_completion(0);
+    check(complete.reconcile(forest, Parent, -1, true).item == Parent,
+          "native flag unset preserves Ooccoo even with cached completion");
+
+    State delayed;
+    delayed.merge_remote({0, 1, false, false});
+    delayed.merge_remote(forestReceipt);
+    check(delayed.pending() == 1,
+          "completion packet arriving first cannot suppress an unfinished pickup");
 
     State pending;
     pending.merge_remote(forestReceipt);
@@ -237,6 +258,8 @@ void lifecycle_and_completion() {
     check(restored.reconcile(cave, None, -1, true).item == Note, "save/load preserves deferred receipt");
     restored.restore(forestReceipt, 0x1FF);
     check(restored.pending() == 1, "saved pending bits limited to proven active receipts");
+    restored.restore({1, 1, false, false}, 0);
+    check(restored.progress().completed == 0, "saved completion cache is re-read from native flags");
     restored.reset(); // same operation used at save reset / flag-off / session reset
     check(restored.progress() == Progress{} && restored.pending() == 0, "scope reset clears pending and owner data");
     check(restored.reconcile(mines, None, -1, true).item == None, "new save cannot inherit old Ooccoo");
@@ -254,8 +277,8 @@ void lifecycle_and_completion() {
 }
 
 void convergence_properties() {
-    // Exhaustive pairwise acquisition/completion masks, plus ordering all seven
-    // different dungeon receipts. These test the production model, not a copy.
+    // Exhaustive pairwise acquisition masks with legacy completion fields,
+    // plus ordering all seven different dungeon receipts.
     for (unsigned a = 0; a < 128; ++a) for (unsigned b = 0; b < 128; ++b) {
         Progress x{static_cast<uint8_t>(a), static_cast<uint8_t>(b), false, false};
         Progress y{static_cast<uint8_t>(b), static_cast<uint8_t>(a), true, true};
@@ -265,8 +288,9 @@ void convergence_properties() {
         State left, right;
         left.merge_remote(x); left.merge_remote(y);
         right.merge_remote(y); right.merge_remote(x);
-        check(left.progress() == right.progress() && left.pending() == right.pending(),
-              "receipt/completion delivery order converges before projection");
+        check(left.progress() == right.progress() && left.pending() == right.pending() &&
+              left.progress().completed == 0,
+              "receipt order converges without accepting remote completion");
         check(left.reconcile(cave, None, -1, true).item != Junior,
               "remote data never creates a Jr");
     }

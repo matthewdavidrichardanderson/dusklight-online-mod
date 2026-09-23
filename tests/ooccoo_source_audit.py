@@ -72,6 +72,20 @@ def main() -> None:
     require("dMeter2Info_getWarpStatus() != 0" in apply and "dComIfGp_isPauseFlag()" in apply,
             "active warps/menus defer mutation")
     require("if (here == stage) applyFacts" in apply, "live bit writes require validated scene identity")
+    require("bits.onStageBossEnemy()" not in apply and
+            "(progress.completed & bit) == 0" in apply,
+            "cached Ooccoo completion cannot restore a cleared boss flag")
+    require("ooccooState_.observe_native_completion(nativeFacts.completed)" in apply and
+            "progress_.completed = before.completed" in model,
+            "Ooccoo decisions use native completion, not received completion")
+    receive = section("bool GameAdapter::accept_ooccoo_state(",
+                      "void GameAdapter::apply_shared_ooccoo_local_form(")
+    require(receive.index("observe_native_completion(") < receive.index("merge_remote(*decoded)"),
+            "native completion is refreshed before incoming receipts are merged")
+    snapshot = section("nlohmann::json GameAdapter::ooccoo_snapshot_state(",
+                       "bool GameAdapter::accept_ooccoo_state(")
+    require("snapshot.completed = native_ooccoo_facts(false, stage_ready()).completed" in snapshot,
+            "Ooccoo snapshots cannot republish stale completed bits")
     require("native_ooccoo_facts(false, true)" in apply, "reconcile cannot mint acquisitions from raw flags")
     require("newlyCompleted" in apply and '"type", "ooccoo_state"' in apply,
             "local boss completion publishes Ooccoo progress")
