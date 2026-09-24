@@ -1385,8 +1385,11 @@ void meter_map_draw_post(ModContext*, void* args, void*, void*) {
     draw_minimap_markers(mods::arg<dMeterMap_c*>(args, 0));
 }
 
-void field_map_icons_draw_post(ModContext*, void* args, void*, void*) {
+HookAction field_map_icons_draw_pre(ModContext*, void* args, void*, void*) {
+    // The native icon pass draws portals after this callback, keeping them
+    // visible over remote player markers at the same map position.
     draw_field_map_markers(mods::arg<dMenuMapCommon_c*>(args, 0));
+    return HOOK_CONTINUE;
 }
 
 void host_imgui_post_draw_post(ModContext*, void*, void*, void*) {
@@ -1426,7 +1429,7 @@ ModResult install_visual_hooks(ModError* error) {
         mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
         mods::hook::add_post<HostImGuiPostDrawHook>(&host_imgui_post_draw_post) != MOD_OK ||
         mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK ||
-        mods::hook::add_post<FieldMapIconsDrawHook>(&field_map_icons_draw_post) != MOD_OK) {
+        mods::hook::add_pre<FieldMapIconsDrawHook>(&field_map_icons_draw_pre) != MOD_OK) {
         uninstall_visual_hooks();
         return mods::set_error(error, MOD_UNAVAILABLE, "Online visual draw hooks are unavailable");
     }
