@@ -69,6 +69,12 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "D
             set(BUILD_TESTING OFF)
             set(CURL_DISABLE_INSTALL ON)
             set(CURL_DISABLE_LDAP ON)
+            # This curl copy only opens secure WebSockets. Optional protocols
+            # can silently pull Homebrew dylibs into the packaged macOS mod.
+            set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+            set(CURL_USE_LIBSSH OFF CACHE BOOL "" FORCE)
+            set(USE_NGHTTP2 OFF CACHE BOOL "" FORCE)
+            set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
             if (WIN32)
                 set(CURL_USE_SCHANNEL ON)
                 set(CURL_USE_OPENSSL OFF)

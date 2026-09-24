@@ -118,6 +118,25 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Check packaged macOS library dependencies
+        if: matrix.platform == 'macos-arm64' || matrix.platform == 'macos-x86_64'
+        shell: bash
+        run: |
+          packages=(build/mods/*.dusk)
+          test -f "${packages[0]}"
+          module_entry=$(unzip -Z1 "${packages[0]}" | grep -E '^lib/macos-[^/]+/mod\.so$')
+          test -n "$module_entry"
+          unzip -p "${packages[0]}" "$module_entry" > "$RUNNER_TEMP/dusklight-online-mod.so"
+          otool -L "$RUNNER_TEMP/dusklight-online-mod.so"
+          unexpected=$(otool -L "$RUNNER_TEMP/dusklight-online-mod.so" |
+            awk 'NR > 1 { print $1 }' |
+            grep -Ev '^(/usr/lib/|/System/Library/|@)' || true)
+          if [[ -n "$unexpected" ]]; then
+            echo "Packaged mod depends on non-system macOS libraries:"
+            echo "$unexpected"
+            exit 1
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
