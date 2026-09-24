@@ -226,6 +226,7 @@ private:
     std::string pendingProgressionCueKey_;
     std::string awaitingManualSyncCueKey_;
     std::string awaitingManualSyncPeerId_;
+    uint64_t awaitingManualSyncRequestId_ = 0;
     std::set<std::string> handledProgressionCues_;
     std::set<std::string> shownPoseProgressionCues_;
     struct PendingSyncReply {
@@ -233,12 +234,16 @@ private:
         std::string cueKey;
         bool flagsOnly = false;
         uint32_t waitTicks = 0;
+        uint64_t requestId = 0;
     };
     std::vector<PendingSyncReply> pendingSyncReplies_;
     enum class ManualSyncState : uint8_t { None, Waiting, Succeeded, Failed };
     ManualSyncState manualSyncState_ = ManualSyncState::None;
     bool manualSyncFlagsOnly_ = false;
+    bool manualSyncRequestedFromTitle_ = false;
     std::string manualSyncPeerId_;
+    uint64_t manualSyncRequestId_ = 0;
+    uint64_t nextManualSyncRequestId_ = 0;
     uint32_t manualSyncWaitTicks_ = 0;
     bool manualSyncTimedOut_ = false;
 
@@ -259,7 +264,7 @@ private:
     void flush_ooccoo_catchup();
     nlohmann::json ooccoo_snapshot_state();
     void send_snapshot_to(std::string_view peerId = {}, bool manual = false,
-                          bool flagsOnly = false);
+                          bool flagsOnly = false, uint64_t requestId = 0);
     std::string encode_manual_full_state();
     bool apply_manual_full_state(const std::string& encoded, bool flagsOnly,
                                  std::string_view peerId);
@@ -291,6 +296,8 @@ private:
     bool request_manual_sync_impl(std::string_view peerId, bool flagsOnly,
                                   std::string_view cueKey, std::string* error,
                                   bool trackStatus = true);
+    [[nodiscard]] bool expecting_manual_sync_reply(std::string_view peerId,
+                                                    uint64_t requestId) const;
     void update_progression_prompts();
     void maybe_queue_progression_pose_prompt(std::string_view peerId,
                                              const dusk::multiplayer::PeerPoseSnapshot& pose);

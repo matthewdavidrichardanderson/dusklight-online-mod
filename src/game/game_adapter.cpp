@@ -543,6 +543,10 @@ struct ManualSyncStatePacket {
 
 constexpr size_t kManualSyncStatePacketSize = sizeof(ManualSyncStatePacket) + sizeof(dSv_info_c);
 constexpr int kManualSyncDefaultStartEvent = 0xCA;
+uint64_t manual_sync_request_id(const nlohmann::json& message) {
+    const auto it = message.find("manual_sync_request_id");
+    return it != message.end() && it->is_number_unsigned() ? it->get<uint64_t>() : 0;
+}
 constexpr char kBase64Chars[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -2825,10 +2829,13 @@ void GameAdapter::notify_local_save_reset() {
     pendingProgressionCueKey_.clear();
     awaitingManualSyncCueKey_.clear();
     awaitingManualSyncPeerId_.clear();
+    awaitingManualSyncRequestId_ = 0;
     handledProgressionCues_.clear();
     manualSyncState_ = ManualSyncState::None;
     manualSyncFlagsOnly_ = false;
+    manualSyncRequestedFromTitle_ = false;
     manualSyncPeerId_.clear();
+    manualSyncRequestId_ = 0;
     manualSyncWaitTicks_ = 0;
     manualSyncTimedOut_ = false;
 }
@@ -3069,6 +3076,7 @@ bool GameAdapter::request_manual_sync_impl(std::string_view peerId, bool flagsOn
                                            std::string* error, bool trackStatus) {
     const net::Status status = transport_.status();
     const std::string target(peerId);
+    const bool atTitle = fpcM_SearchByName(fpcNm_TITLE_e) != nullptr;
     if (!status.welcomed) {
         if (error != nullptr) *error = "Not connected.";
         return false;
@@ -3081,14 +3089,17 @@ bool GameAdapter::request_manual_sync_impl(std::string_view peerId, bool flagsOn
         if (error != nullptr) *error = "Choose a connected peer to sync from.";
         return false;
     }
-    if (flagsOnly && (!stage_ready() || opening_or_title_active())) {
-        if (error != nullptr) *error = "Wait for a stable loaded room before syncing flags.";
+    if (trackStatus && manualSyncState_ == ManualSyncState::Waiting) {
+        if (error != nullptr) *error = "A sync request is already pending.";
         return false;
     }
     nlohmann::json request = {
         {"type", "sync_request"}, {"target_client_id", target},
         {"manual_sync_mode", flagsOnly ? "flags" : "warp"},
     };
+    uint64_t requestId = ++nextManualSyncRequestId_;
+    if (requestId == 0) requestId = ++nextManualSyncRequestId_;
+    request["manual_sync_request_id"] = requestId;
     if (!flagsOnly && !cueKey.empty()) request["cue_key"] = cueKey;
     if (!transport_.send_to(target, request)) {
         if (error != nullptr) *error = "Could not send the sync request.";
@@ -3096,14 +3107,30 @@ bool GameAdapter::request_manual_sync_impl(std::string_view peerId, bool flagsOn
     }
     awaitingManualSyncCueKey_ = flagsOnly ? std::string() : std::string(cueKey);
     awaitingManualSyncPeerId_ = flagsOnly ? std::string() : target;
+    awaitingManualSyncRequestId_ = cueKey.empty() ? 0 : requestId;
     if (trackStatus) {
         manualSyncState_ = ManualSyncState::Waiting;
         manualSyncFlagsOnly_ = flagsOnly;
+        manualSyncRequestedFromTitle_ = atTitle;
         manualSyncPeerId_ = target;
+        manualSyncRequestId_ = requestId;
         manualSyncWaitTicks_ = 0;
         manualSyncTimedOut_ = false;
+        svc_log->info(mod_ctx, ("Manual sync requested id=" + std::to_string(requestId) +
+            " peer=" + target +
+            " mode=" + (flagsOnly ? "flags" : "warp") +
+            " origin=" + (atTitle ? "title" : "gameplay")).c_str());
     }
     return true;
+}
+
+bool GameAdapter::expecting_manual_sync_reply(std::string_view peerId,
+                                               uint64_t requestId) const {
+    return requestId != 0 &&
+           ((manualSyncState_ == ManualSyncState::Waiting && manualSyncPeerId_ == peerId &&
+             manualSyncRequestId_ == requestId) ||
+            (!awaitingManualSyncCueKey_.empty() && awaitingManualSyncPeerId_ == peerId &&
+             awaitingManualSyncRequestId_ == requestId));
 }
 
 bool GameAdapter::applying_remote() const { return applyingRemote_; }
@@ -3375,10 +3402,13 @@ void GameAdapter::clear_disabled_sync_flags_state() {
     pendingProgressionCueKey_.clear();
     awaitingManualSyncCueKey_.clear();
     awaitingManualSyncPeerId_.clear();
+    awaitingManualSyncRequestId_ = 0;
     pendingSyncReplies_.clear();
     if (manualSyncState_ == ManualSyncState::Waiting) manualSyncState_ = ManualSyncState::Failed;
     manualSyncFlagsOnly_ = false;
+    manualSyncRequestedFromTitle_ = false;
     manualSyncPeerId_.clear();
+    manualSyncRequestId_ = 0;
     manualSyncWaitTicks_ = 0;
     manualSyncTimedOut_ = false;
     peerProgressionStates_.clear();
@@ -3417,6 +3447,9 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
             ++manualSyncWaitTicks_ >= kManualSyncRequestTimeoutTicks) {
             manualSyncState_ = ManualSyncState::Failed;
             manualSyncTimedOut_ = true;
+            manualSyncRequestedFromTitle_ = false;
+            svc_log->warn(mod_ctx,
+                ("Manual sync timed out peer=" + manualSyncPeerId_).c_str());
         }
         tick_manual_transition();
         update_pending_sync_replies();
@@ -3841,15 +3874,25 @@ bool GameAdapter::allow_stage_unready(const RoutedMessage& message) const {
            message.payload.value("type", std::string()) == "save_snapshot" &&
            message.payload.value("manual_sync", false) &&
            message.payload.contains("full_state") &&
-           message.payload.value("manual_sync_mode", "warp") != "flags";
+           message.payload.value("manual_sync_mode", "warp") != "flags" &&
+           manualSyncRequestedFromTitle_ &&
+           manualSyncState_ == ManualSyncState::Waiting &&
+           manualSyncPeerId_ == message.peerId &&
+           manualSyncRequestId_ == manual_sync_request_id(message.payload);
 }
 
 bool GameAdapter::discard_stage_message(const RoutedMessage& message) const {
-    return fpcM_SearchByName(fpcNm_TITLE_e) != nullptr &&
-           message.payload.value("type", std::string()) == "save_snapshot" &&
-           message.payload.value("manual_sync", false) &&
-           message.payload.contains("full_state") &&
-           message.payload.value("manual_sync_mode", "warp") == "flags";
+    if (message.payload.value("type", std::string()) != "save_snapshot" ||
+        !message.payload.value("manual_sync", false) ||
+        !message.payload.contains("full_state")) return false;
+    const uint64_t requestId = manual_sync_request_id(message.payload);
+    if (!expecting_manual_sync_reply(message.peerId, requestId)) {
+        svc_log->warn(mod_ctx,
+            ("Discarded expired manual sync snapshot id=" +
+             std::to_string(requestId) + " peer=" + message.peerId).c_str());
+        return true;
+    }
+    return false;
 }
 
 ApplyResult GameAdapter::consume(const RoutedMessage& message) {
@@ -4392,9 +4435,11 @@ void GameAdapter::peer_left(std::string_view peerId) {
     if (awaitingManualSyncPeerId_ == key) {
         awaitingManualSyncPeerId_.clear();
         awaitingManualSyncCueKey_.clear();
+        awaitingManualSyncRequestId_ = 0;
     }
     if (manualSyncPeerId_ == key && manualSyncState_ == ManualSyncState::Waiting) {
         manualSyncState_ = ManualSyncState::Failed;
+        manualSyncRequestedFromTitle_ = false;
     }
     pvpRemoteHitLastSequence_.erase(key);
     chatMessageTimes_.erase(key);
@@ -4514,12 +4559,15 @@ void GameAdapter::reset_session() {
     pendingProgressionCueKey_.clear();
     awaitingManualSyncCueKey_.clear();
     awaitingManualSyncPeerId_.clear();
+    awaitingManualSyncRequestId_ = 0;
     handledProgressionCues_.clear();
     shownPoseProgressionCues_.clear();
     pendingSyncReplies_.clear();
     manualSyncState_ = ManualSyncState::None;
     manualSyncFlagsOnly_ = false;
+    manualSyncRequestedFromTitle_ = false;
     manualSyncPeerId_.clear();
+    manualSyncRequestId_ = 0;
     manualSyncWaitTicks_ = 0;
     manualSyncTimedOut_ = false;
 }
@@ -5043,7 +5091,9 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         }
         const std::string cueKey = message.value("cue_key", std::string());
         const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
+        const uint64_t requestId = manual_sync_request_id(message);
         const bool safeNow = stage_ready() && !opening_or_title_active() &&
+                             fpcM_SearchByName(fpcNm_GAMEOVER_e) == nullptr &&
                              local_state_ready_for_cue(cueKey);
         if (!safeNow) {
             const auto duplicate = std::find_if(
@@ -5053,17 +5103,20 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
                            reply.flagsOnly == flagsOnly;
                 });
             if (duplicate == pendingSyncReplies_.end()) {
-                pendingSyncReplies_.push_back({routed.peerId, cueKey, flagsOnly, 0});
+                pendingSyncReplies_.push_back({routed.peerId, cueKey, flagsOnly, 0, requestId});
                 std::ostringstream line;
                 line << "Online sync request queued peer=" << routed.peerId
                      << " mode=" << (flagsOnly ? "flags" : "warp")
                      << " cue=" << (cueKey.empty() ? "manual" : cueKey);
                 dusklight_online::log_info(line.str());
+            } else {
+                duplicate->requestId = requestId;
+                duplicate->waitTicks = 0;
             }
             return ApplyResult::Retained;
         }
         if (!cueKey.empty()) handledProgressionCues_.insert(routed.peerId + ':' + cueKey);
-        send_snapshot_to(routed.peerId, true, flagsOnly);
+        send_snapshot_to(routed.peerId, true, flagsOnly, requestId);
         return ApplyResult::Applied;
     }
     if (type == "dark_clear_lv") return apply_dark_clear(message.value("no", -1));
@@ -5873,22 +5926,33 @@ nlohmann::json GameAdapter::make_save_snapshot() {
     return snapshot;
 }
 
-void GameAdapter::send_snapshot_to(std::string_view peerId, bool manual, bool flagsOnly) {
+void GameAdapter::send_snapshot_to(std::string_view peerId, bool manual, bool flagsOnly,
+                                   uint64_t requestId) {
     nlohmann::json snapshot = make_save_snapshot();
     if (manual) {
         const std::string fullState = encode_manual_full_state();
         if (fullState.empty()) {
             lastError_ = "could not encode manual sync state";
+            svc_log->warn(mod_ctx, "Manual sync reply could not encode save state");
             return;
         }
         snapshot["manual_sync"] = true;
         snapshot["manual_sync_mode"] = flagsOnly ? "flags" : "warp";
         snapshot["full_state"] = fullState;
+        if (requestId != 0) snapshot["manual_sync_request_id"] = requestId;
     }
     if (peerId.empty()) {
         transport_.send(snapshot);
     } else {
-        transport_.send_to(std::string(peerId), snapshot);
+        const bool sent = transport_.send_to(std::string(peerId), snapshot);
+        if (manual) {
+            const std::string line = "Manual sync reply id=" + std::to_string(requestId) +
+                " peer=" + std::string(peerId) +
+                " mode=" + (flagsOnly ? "flags" : "warp") +
+                " send=" + (sent ? "ok" : "failed");
+            if (sent) svc_log->info(mod_ctx, line.c_str());
+            else svc_log->warn(mod_ctx, line.c_str());
+        }
     }
 }
 
@@ -5960,6 +6024,7 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
                                        awaitingManualSyncCueKey_);
         awaitingManualSyncCueKey_.clear();
         awaitingManualSyncPeerId_.clear();
+        awaitingManualSyncRequestId_ = 0;
     }
 
     dSv_info_c peerInfo{};
@@ -6025,6 +6090,9 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     pendingManualVibration_ = vibration;
     manualTransitionActive_ = true;
     const s16 spawnPoint = packet.startPoint == -4 ? -1 : packet.startPoint;
+    svc_log->info(mod_ctx,
+        ("Manual sync warp starting stage=" + std::string(packet.stageName) +
+         " room=" + std::to_string(packet.roomNo)).c_str());
     if (spawnPoint == -1) {
         dComIfGs_setRestartRoomParam(
             daPy_py_c::setParamData(packet.roomNo, 0, kManualSyncDefaultStartEvent, 0));
@@ -6036,11 +6104,11 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
 
 void GameAdapter::update_pending_sync_replies() {
     if (pendingSyncReplies_.empty()) return;
-    const bool baseSafe = stage_ready() && !opening_or_title_active();
-    // Match the AIO behavior: the requester's five-second timeout is UI
-    // feedback, not permission to discard the request on the replying peer.
-    // Cutscenes and scene loads can easily outlast that window, so retain the
-    // request without aging it until taking a complete save snapshot is safe.
+    const bool baseSafe = stage_ready() && !opening_or_title_active() &&
+                          fpcM_SearchByName(fpcNm_GAMEOVER_e) == nullptr;
+    // The donor cannot know whether the requester timed out. Keep the request
+    // until a safe snapshot is possible; the requester rejects late replies
+    // using the original request ID.
     if (!baseSafe) return;
     for (auto it = pendingSyncReplies_.begin(); it != pendingSyncReplies_.end();) {
         if (it->waitTicks < std::numeric_limits<uint32_t>::max()) ++it->waitTicks;
@@ -6065,7 +6133,7 @@ void GameAdapter::update_pending_sync_replies() {
              << " wait_ticks=" << it->waitTicks
              << " cue=" << (it->cueKey.empty() ? "manual" : it->cueKey);
         dusklight_online::log_info(line.str());
-        send_snapshot_to(it->peerId, true, it->flagsOnly);
+        send_snapshot_to(it->peerId, true, it->flagsOnly, it->requestId);
         it = pendingSyncReplies_.erase(it);
     }
 }
@@ -6113,6 +6181,7 @@ void GameAdapter::tick_manual_transition() {
     }
     dComIfGs_setItem(SLOT_18, dComIfGs_getItem(SLOT_18, false));
     manualTransitionActive_ = false;
+    svc_log->info(mod_ctx, "Manual sync transition completed");
     pendingBombBagSaveWarp_.reset();
     localObservedState_ = nlohmann::json();
     observedRupees_ = dComIfGs_getRupee();
@@ -6121,12 +6190,25 @@ void GameAdapter::tick_manual_transition() {
 ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
     const nlohmann::json& message = routed.payload;
     if (message.value("manual_sync", false) && message.contains("full_state")) {
+        const uint64_t requestId = manual_sync_request_id(message);
+        if (!expecting_manual_sync_reply(routed.peerId, requestId)) {
+            svc_log->warn(mod_ctx,
+                ("Discarded unsolicited or expired manual sync reply id=" +
+                 std::to_string(requestId) + " peer=" + routed.peerId).c_str());
+            return ApplyResult::IgnoredByPolicy;
+        }
+        const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
+        const bool titleWarp = !flagsOnly && manualSyncRequestedFromTitle_ &&
+                               fpcM_SearchByName(fpcNm_TITLE_e) != nullptr;
+        if (fpcM_SearchByName(fpcNm_GAMEOVER_e) != nullptr ||
+            (!titleWarp && (!stage_ready() || opening_or_title_active()))) {
+            return ApplyResult::Deferred;
+        }
         // Validate BEFORE replacing any raw save data. Old manual snapshots
         // have no safe ownership model and are deliberately not accepted.
         const auto ooccooProgress = message.contains("ooccoo_state") ?
             ooccoo::decode(message["ooccoo_state"]) : std::nullopt;
         if (!ooccooProgress) return reject("manual sync requires Ooccoo protocol version 2");
-        const bool flagsOnly = message.value("manual_sync_mode", "warp") == "flags";
         const bool applied = apply_manual_full_state(
             message.value("full_state", std::string()), flagsOnly, routed.peerId);
         if (applied) {
@@ -6138,9 +6220,15 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
             ooccooReplyPending_ = false;
         }
         if (manualSyncState_ == ManualSyncState::Waiting &&
-            manualSyncPeerId_ == routed.peerId) {
+            manualSyncPeerId_ == routed.peerId && manualSyncRequestId_ == requestId) {
             manualSyncState_ = applied ? ManualSyncState::Succeeded : ManualSyncState::Failed;
+            manualSyncRequestedFromTitle_ = false;
         }
+        svc_log->info(mod_ctx,
+            ("Manual sync reply id=" + std::to_string(requestId) +
+             " peer=" + routed.peerId +
+             " mode=" + (flagsOnly ? "flags" : "warp") +
+             " result=" + (applied ? "applied" : "rejected")).c_str());
         return applied ? ApplyResult::Applied : reject("manual sync state rejected");
     }
 
