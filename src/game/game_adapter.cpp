@@ -2433,93 +2433,79 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
     transport_.set_pose_delta_codec(&expand_remote_pose_delta,
                                     &prepare_remote_pose_delta);
     transport_.set_visual_wire_diagnostics(visual_wire_trace_enabled());
-    const char* failedHook = nullptr;
-    ModResult failedHookResult = MOD_OK;
-    const auto requireHook = [&](ModResult result, const char* operation) {
-        if (result == MOD_OK) return true;
-        failedHook = operation;
-        failedHookResult = result;
-        return false;
-    };
-#define REQUIRE_HOOK(operation) requireHook((operation), #operation)
-    if (!REQUIRE_HOOK(install_remote_actor_profile(error)) ||
-        !REQUIRE_HOOK(install_audio_hooks(error)) ||
-        !REQUIRE_HOOK(install_floor_switch_hooks(*this, error)) ||
-        !REQUIRE_HOOK(install_bomb_hooks(transport_, error)) ||
-        !REQUIRE_HOOK(install_visual_hooks(error)) ||
-        !REQUIRE_HOOK(mods::hook::install<ToggleAutoSaveHook>()) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<OoccooReunionHook>(&ooccoo_reunion_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<OoccooWarpActorHook>(&ooccoo_warp_actor_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<OoccooWarpOutHook>(&ooccoo_warp_out_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<PvpDamageVectorHook>(&pvp_damage_vector_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<BombArrowPvpHitHook>(&bomb_arrow_pvp_hit_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<RemoteEnemyGroupHook>(&remote_enemy_group_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<RemoteWolfLockHook>(&remote_wolf_lock_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<RemoteAttentionMarkHook>(&remote_attention_mark_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<SafeLineQueueHook>(&safe_line_queue_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<DeleteTagRepairHook>(&delete_tag_repair_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<NullParticleDeleteHook>(&null_particle_delete_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<PoePickupHook>(&poe_pickup_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<PoePickupHook>(&poe_pickup_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<EventBitOnHook>(&event_bit_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<EventBitOffHook>(&event_bit_off_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MemoryTboxOnHook>(&memory_tbox_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MemoryItemOnHook>(&memory_item_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MemorySwitchOnHook>(&memory_switch_on_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MemorySwitchOnHook>(&memory_switch_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MemorySwitchOffHook>(&memory_switch_off_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MemorySwitchOffHook>(&memory_switch_off_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MemoryDungeonItemOnHook>(&memory_dungeon_item_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<VisitedRoomOnHook>(&visited_room_on_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<VisitedRoomOnHook>(&visited_room_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<PlayerItemFirstOnHook>(&player_item_first_on_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<PlayerItemFirstOnHook>(&player_item_first_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<PlayerItemFirstOffHook>(&player_item_first_off_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<PlayerItemFirstOffHook>(&player_item_first_off_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<PlayerCollectSetHook>(&player_collect_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<PlayerCrystalSetHook>(&player_crystal_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<PlayerMirrorSetHook>(&player_mirror_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<FishingAddCountHook>(&fishing_add_count_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<LightDropNumSetHook>(&light_drop_num_set_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<LightDropNumSetHook>(&light_drop_num_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<LightDropFlagOnHook>(&light_drop_flag_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<EmptyBottleSetHook>(&empty_bottle_set_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<EmptyBottleSetHook>(&empty_bottle_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<EmptyBottleItemSetHook>(&empty_bottle_item_set_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<EmptyBottleItemSetHook>(&empty_bottle_item_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<EventRegSetHook>(&event_reg_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<SmellTypeSetHook>(&smell_type_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<DarkClearSetHook>(&dark_clear_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<TransformSetHook>(&transform_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<LetterGetSetHook>(&letter_get_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<StageKeyNumSetHook>(&stage_key_num_set_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<StageKeyNumSetHook>(&stage_key_num_set_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MeterMoveKeyHook>(&meter_move_key_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MeterMoveKeyHook>(&meter_move_key_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MeterMoveLifeHook>(&meter_move_life_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MeterMoveLifeHook>(&meter_move_life_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MeterMoveRupeeHook>(&meter_move_rupee_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<MeterMoveRupeeHook>(&meter_move_rupee_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<ProcessExecuteHook>(&process_execute_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<ProcessExecuteHook>(&process_execute_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<Door20CheckExecuteHook>(&door20_check_execute_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<Door20StopOpenHook>(&door20_stop_open_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<Door20StopOpenHook>(&door20_stop_open_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MirrorTableExecuteHook>(&mirror_table_execute_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<MirrorChainDrawHook>(&mirror_chain_draw_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<InfoSwitchOnHook>(&info_switch_on_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<InfoSwitchOnHook>(&info_switch_on_post)) ||
-        !REQUIRE_HOOK(mods::hook::add_pre<InfoSwitchOffHook>(&info_switch_off_pre)) ||
-        !REQUIRE_HOOK(mods::hook::add_post<InfoSwitchOffHook>(&info_switch_off_post))) {
+    if (install_remote_actor_profile(error) != MOD_OK ||
+        install_audio_hooks(error) != MOD_OK ||
+        install_floor_switch_hooks(*this, error) != MOD_OK ||
+        install_bomb_hooks(transport_, error) != MOD_OK ||
+        install_visual_hooks(error) != MOD_OK ||
+        mods::hook::install<ToggleAutoSaveHook>() != MOD_OK ||
+        mods::hook::add_pre<OoccooReunionHook>(&ooccoo_reunion_pre) != MOD_OK ||
+        mods::hook::add_pre<OoccooWarpActorHook>(&ooccoo_warp_actor_pre) != MOD_OK ||
+        mods::hook::add_post<OoccooWarpOutHook>(&ooccoo_warp_out_post) != MOD_OK ||
+        mods::hook::add_pre<PvpDamageVectorHook>(&pvp_damage_vector_pre) != MOD_OK ||
+        mods::hook::add_post<BombArrowPvpHitHook>(&bomb_arrow_pvp_hit_post) != MOD_OK ||
+        mods::hook::add_pre<RemoteEnemyGroupHook>(&remote_enemy_group_pre) != MOD_OK ||
+        mods::hook::add_pre<RemoteWolfLockHook>(&remote_wolf_lock_pre) != MOD_OK ||
+        mods::hook::add_post<RemoteAttentionMarkHook>(&remote_attention_mark_post) != MOD_OK ||
+        mods::hook::add_pre<SafeLineQueueHook>(&safe_line_queue_pre) != MOD_OK ||
+        mods::hook::add_pre<DeleteTagRepairHook>(&delete_tag_repair_pre) != MOD_OK ||
+        mods::hook::add_pre<NullParticleDeleteHook>(&null_particle_delete_pre) != MOD_OK ||
+        mods::hook::add_pre<PoePickupHook>(&poe_pickup_pre) != MOD_OK ||
+        mods::hook::add_post<PoePickupHook>(&poe_pickup_post) != MOD_OK ||
+        mods::hook::add_post<EventBitOnHook>(&event_bit_on_post) != MOD_OK ||
+        mods::hook::add_post<EventBitOffHook>(&event_bit_off_post) != MOD_OK ||
+        mods::hook::add_post<MemoryTboxOnHook>(&memory_tbox_on_post) != MOD_OK ||
+        mods::hook::add_post<MemoryItemOnHook>(&memory_item_on_post) != MOD_OK ||
+        mods::hook::add_pre<MemorySwitchOnHook>(&memory_switch_on_pre) != MOD_OK ||
+        mods::hook::add_post<MemorySwitchOnHook>(&memory_switch_on_post) != MOD_OK ||
+        mods::hook::add_pre<MemorySwitchOffHook>(&memory_switch_off_pre) != MOD_OK ||
+        mods::hook::add_post<MemorySwitchOffHook>(&memory_switch_off_post) != MOD_OK ||
+        mods::hook::add_post<MemoryDungeonItemOnHook>(&memory_dungeon_item_on_post) != MOD_OK ||
+        mods::hook::add_pre<VisitedRoomOnHook>(&visited_room_on_pre) != MOD_OK ||
+        mods::hook::add_post<VisitedRoomOnHook>(&visited_room_on_post) != MOD_OK ||
+        mods::hook::add_pre<PlayerItemFirstOnHook>(&player_item_first_on_pre) != MOD_OK ||
+        mods::hook::add_post<PlayerItemFirstOnHook>(&player_item_first_on_post) != MOD_OK ||
+        mods::hook::add_pre<PlayerItemFirstOffHook>(&player_item_first_off_pre) != MOD_OK ||
+        mods::hook::add_post<PlayerItemFirstOffHook>(&player_item_first_off_post) != MOD_OK ||
+        mods::hook::add_post<PlayerCollectSetHook>(&player_collect_set_post) != MOD_OK ||
+        mods::hook::add_post<PlayerCrystalSetHook>(&player_crystal_set_post) != MOD_OK ||
+        mods::hook::add_post<PlayerMirrorSetHook>(&player_mirror_set_post) != MOD_OK ||
+        mods::hook::add_post<FishingAddCountHook>(&fishing_add_count_post) != MOD_OK ||
+        mods::hook::add_pre<LightDropNumSetHook>(&light_drop_num_set_pre) != MOD_OK ||
+        mods::hook::add_post<LightDropNumSetHook>(&light_drop_num_set_post) != MOD_OK ||
+        mods::hook::add_post<LightDropFlagOnHook>(&light_drop_flag_on_post) != MOD_OK ||
+        mods::hook::add_pre<EmptyBottleSetHook>(&empty_bottle_set_pre) != MOD_OK ||
+        mods::hook::add_post<EmptyBottleSetHook>(&empty_bottle_set_post) != MOD_OK ||
+        mods::hook::add_pre<EmptyBottleItemSetHook>(&empty_bottle_item_set_pre) != MOD_OK ||
+        mods::hook::add_post<EmptyBottleItemSetHook>(&empty_bottle_item_set_post) != MOD_OK ||
+        mods::hook::add_post<EventRegSetHook>(&event_reg_set_post) != MOD_OK ||
+        mods::hook::add_post<SmellTypeSetHook>(&smell_type_set_post) != MOD_OK ||
+        mods::hook::add_post<DarkClearSetHook>(&dark_clear_set_post) != MOD_OK ||
+        mods::hook::add_post<TransformSetHook>(&transform_set_post) != MOD_OK ||
+        mods::hook::add_post<LetterGetSetHook>(&letter_get_set_post) != MOD_OK ||
+        mods::hook::add_pre<StageKeyNumSetHook>(&stage_key_num_set_pre) != MOD_OK ||
+        mods::hook::add_post<StageKeyNumSetHook>(&stage_key_num_set_post) != MOD_OK ||
+        mods::hook::add_pre<MeterMoveKeyHook>(&meter_move_key_pre) != MOD_OK ||
+        mods::hook::add_post<MeterMoveKeyHook>(&meter_move_key_post) != MOD_OK ||
+        mods::hook::add_pre<MeterMoveLifeHook>(&meter_move_life_pre) != MOD_OK ||
+        mods::hook::add_post<MeterMoveLifeHook>(&meter_move_life_post) != MOD_OK ||
+        mods::hook::add_pre<MeterMoveRupeeHook>(&meter_move_rupee_pre) != MOD_OK ||
+        mods::hook::add_post<MeterMoveRupeeHook>(&meter_move_rupee_post) != MOD_OK ||
+        mods::hook::add_pre<ProcessExecuteHook>(&process_execute_pre) != MOD_OK ||
+        mods::hook::add_post<ProcessExecuteHook>(&process_execute_post) != MOD_OK ||
+        mods::hook::add_post<Door20CheckExecuteHook>(&door20_check_execute_post) != MOD_OK ||
+        mods::hook::add_pre<Door20StopOpenHook>(&door20_stop_open_pre) != MOD_OK ||
+        mods::hook::add_post<Door20StopOpenHook>(&door20_stop_open_post) != MOD_OK ||
+        mods::hook::add_pre<MirrorTableExecuteHook>(&mirror_table_execute_pre) != MOD_OK ||
+        mods::hook::add_pre<MirrorChainDrawHook>(&mirror_chain_draw_pre) != MOD_OK ||
+        mods::hook::add_pre<InfoSwitchOnHook>(&info_switch_on_pre) != MOD_OK ||
+        mods::hook::add_post<InfoSwitchOnHook>(&info_switch_on_post) != MOD_OK ||
+        mods::hook::add_pre<InfoSwitchOffHook>(&info_switch_off_pre) != MOD_OK ||
+        mods::hook::add_post<InfoSwitchOffHook>(&info_switch_off_post) != MOD_OK) {
         shutdown_hooks();
-        std::string message = std::string("required hook failed: ") + failedHook;
-        if (error != nullptr && error->message[0] != '\0') {
-            message += ": ";
-            message += error->message;
-        }
-        return mods::set_error(error, failedHookResult, message.c_str());
+        return mods::set_error(error, MOD_UNAVAILABLE,
+                               "required progression mutation hooks are unavailable");
     }
-#undef REQUIRE_HOOK
     if (svc_save->observe_saves(mod_ctx, &save_new, &save_loaded, &save_written,
                                 this, &saveObserver_) != MOD_OK) {
         shutdown_hooks();

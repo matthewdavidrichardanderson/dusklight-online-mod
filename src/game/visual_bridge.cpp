@@ -1425,13 +1425,10 @@ ModResult install_visual_hooks(ModError* error) {
         mods::hook::add_post<HostUiEventHook>(&host_ui_event_post) != MOD_OK ||
         mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
         mods::hook::add_post<HostImGuiPostDrawHook>(&host_imgui_post_draw_post) != MOD_OK ||
-        mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK) {
+        mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK ||
+        mods::hook::add_post<FieldMapIconsDrawHook>(&field_map_icons_draw_post) != MOD_OK) {
         uninstall_visual_hooks();
         return mods::set_error(error, MOD_UNAVAILABLE, "Online visual draw hooks are unavailable");
-    }
-    if (mods::hook::add_post<FieldMapIconsDrawHook>(&field_map_icons_draw_post) != MOD_OK) {
-        uninstall_visual_hooks();
-        return mods::set_error(error, MOD_UNAVAILABLE, "Big map icon draw hook is unavailable");
     }
     return MOD_OK;
 }
