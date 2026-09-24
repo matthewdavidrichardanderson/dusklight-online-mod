@@ -325,7 +325,7 @@ struct Transport::Impl {
             status.semanticVisualsReady, status.snapshotDeltasReady,
             status.settings, status.clientId,
         };
-        if (event.kind == EventKind::UdpMessage) {
+        if (event.kind == EventKind::UdpMessage || event.kind == EventKind::UdpVoice) {
             // Preserve short receive bursts for timed pose playback. Replacing
             // every pending pose with the newest one discards valid samples
             // whenever two datagrams arrive between game updates.
@@ -943,7 +943,8 @@ struct Transport::Impl {
                 std::memcpy(&ack, datagram.bytes.data() + 58, sizeof(ack));
                 return connections.mesh_send(udp::acked_sender_id(ack), datagram.bytes);
             }
-            if (info && info->type == udp::PacketType::RemoteObject) {
+            if (info && (info->type == udp::PacketType::RemoteObject ||
+                         info->type == udp::PacketType::VoiceOpus)) {
                 std::vector<std::string> recipients;
                 for (const auto& [id, name] : peerNames) recipients.push_back(id);
                 return connections.mesh_send_many(recipients, datagram.bytes);
@@ -1117,6 +1118,21 @@ struct Transport::Impl {
         return sentAny || directPeers.empty();
     }
 
+    bool send_voice_to_direct_peers(std::span<const uint8_t> opus,
+                                   uint32_t sequence, const udp::VoicePosition& position,
+                                   std::string_view senderId,
+                                   std::string_view excluded = {}) {
+        const auto datagram = udp::encode_voice(senderId, sequence, position, opus);
+        if (datagram.bytes.empty()) return false;
+        bool sentAny = false;
+        for (auto& [id, peer] : directPeers) {
+            if (id == excluded || !peer.welcomed || peer.kickPending ||
+                !peer.udpAddressKnown) continue;
+            sentAny = send_udp_datagram(peer.udpAddress, datagram) || sentAny;
+        }
+        return sentAny || directPeers.empty();
+    }
+
     void send_relay_udp_registration() {
         if (status.mode != Mode::Relay || !status.welcomed || !udpRemoteAddressKnown ||
             status.clientId.empty() || status.udpToken.empty()) {
@@ -1201,6 +1217,19 @@ struct Transport::Impl {
                                                         decoded.type, decoded.sequence,
                                                         decoded.stressFlags));
             }
+        } else if (decoded.kind == udp::DecodeKind::Voice) {
+            Event event;
+            event.kind = EventKind::UdpVoice;
+            event.peerId = decoded.senderId.empty() ? "direct" : decoded.senderId;
+            event.udpType = decoded.type;
+            event.udpSequence = decoded.sequence;
+            event.voice = decoded.voice;
+            event.voicePosition = decoded.voicePosition;
+            if (!push_event(std::move(event))) return;
+            if (status.mode == Mode::DirectHost)
+                send_voice_to_direct_peers(decoded.voice, decoded.sequence,
+                                           decoded.voicePosition,
+                                           decoded.senderId, decoded.senderId);
         } else if (decoded.kind == udp::DecodeKind::RemoteObject) {
             if (!status.settings.syncWorld || decoded.remoteObject.objectKind == 0) return;
             Event event;
@@ -2485,6 +2514,19 @@ bool Transport::send_remote_object(const udp::RemoteObjectPacket& object) {
            impl_->send_udp_datagram(
                impl_->udpRemoteAddress,
                udp::encode_remote_object(impl_->local_udp_sender_id(), object));
+}
+
+bool Transport::send_voice(uint32_t sequence, const udp::VoicePosition& position,
+                           std::span<const uint8_t> opus) {
+    if (!impl_->status.enabled || !impl_->status.welcomed || opus.empty() ||
+        opus.size() > 400) return false;
+    const std::string senderId = impl_->local_udp_sender_id();
+    if (impl_->status.mode == Mode::DirectHost)
+        return impl_->send_voice_to_direct_peers(opus, sequence, position, senderId);
+    if (!impl_->meshEnabled && !impl_->udpRemoteAddressKnown) return false;
+    const auto datagram = udp::encode_voice(senderId, sequence, position, opus);
+    return !datagram.bytes.empty() &&
+        impl_->send_udp_datagram(impl_->udpRemoteAddress, datagram);
 }
 
 void Transport::disconnect() {

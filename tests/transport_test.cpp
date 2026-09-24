@@ -11,6 +11,7 @@
 #endif
 
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -366,6 +367,45 @@ int main() {
     pump(host, alice, bob, 60);
     if (!drain_udp_object(bob, 9001)) {
         fail("direct UDP remote object was not routed through the host");
+    }
+
+    // Voice is produced in 20 ms frames while the game processes network
+    // events at about 30 Hz. Exercise that burst pattern through the host.
+    dusklight_online::net::udp::VoicePosition voicePosition;
+    std::memcpy(voicePosition.stageName, "F_SP103", 7);
+    const std::vector<uint8_t> voiceFrame{0x78, 0x12, 0x34};
+    uint32_t voiceSequence = 0;
+    uint32_t hostVoiceCount = 0;
+    uint32_t bobVoiceCount = 0;
+    for (int tick = 0; tick < 36; ++tick) {
+        for (int frame = 0; frame < (tick % 3 == 0 ? 1 : 2); ++frame) {
+            if (!alice.send_voice(++voiceSequence, voicePosition, voiceFrame))
+                fail("direct voice packet send failed");
+        }
+        host.tick();
+        alice.tick();
+        bob.tick();
+        for (auto [receiver, count] : {std::pair{&host, &hostVoiceCount},
+                                       std::pair{&bob, &bobVoiceCount}}) {
+            while (receiver->has_events()) {
+                auto event = receiver->pop_event();
+                if (event.kind != EventKind::UdpVoice) continue;
+                if (event.udpSequence != ++*count || event.voice != voiceFrame)
+                    fail("direct voice frame was lost or reordered");
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+    pump(host, alice, bob, 30);
+    for (auto [receiver, count] : {std::pair{&host, &hostVoiceCount},
+                                   std::pair{&bob, &bobVoiceCount}}) {
+        while (receiver->has_events()) {
+            auto event = receiver->pop_event();
+            if (event.kind != EventKind::UdpVoice) continue;
+            if (event.udpSequence != ++*count || event.voice != voiceFrame)
+                fail("direct voice frame was lost or reordered");
+        }
+        if (*count != voiceSequence) fail("direct voice stream did not reach every listener");
     }
 
     const nlohmann::json eventBit = {

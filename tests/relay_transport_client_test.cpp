@@ -3,6 +3,7 @@
 #include "cave_map_packet.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -362,6 +363,26 @@ int main(int argc, char** argv) {
             return receivedObject;
         })) {
         fail("relay did not route the mod client's UDP remote object");
+    }
+
+    dusklight_online::net::udp::VoicePosition voicePosition;
+    std::memcpy(voicePosition.stageName, "F_SP103", 7);
+    voicePosition.x = 14.0f;
+    voicePosition.room = 2;
+    const std::vector<uint8_t> voiceFrame{0x78, 0x12, 0x34};
+    if (!owner.send_voice(1, voicePosition, voiceFrame))
+        fail("relay UDP voice send failed");
+    bool receivedVoice = false;
+    if (!wait_until(owner, joiner, [&] {
+            if (std::getenv("DUSKLIGHT_TEST_WAN")) owner.send_voice(1, voicePosition, voiceFrame);
+            while (joiner.has_events()) {
+                auto event = joiner.pop_event();
+                receivedVoice |= event.kind == dusklight_online::net::EventKind::UdpVoice &&
+                                 event.voice == voiceFrame && event.voicePosition.x == 14.0f;
+            }
+            return receivedVoice;
+        })) {
+        fail("relay did not route the mod client's UDP voice packet");
     }
 
     // This optional MFB/randomizer lane must remain wire-compatible even when

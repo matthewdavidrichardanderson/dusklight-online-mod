@@ -86,6 +86,7 @@ constexpr uint8_t kUdpPacketTypeMidnaMsgpack = 4;
 constexpr uint8_t kUdpPacketTypePoseAck = 5;
 constexpr uint8_t kUdpPacketTypeRelayRegister = 6;
 constexpr uint8_t kUdpPacketTypeSemanticPoseMsgpack = 7;
+constexpr uint8_t kUdpPacketTypeVoiceOpus = 8;
 constexpr size_t kMaxUdpBytesPerClientSecond = 4 * 1024 * 1024;
 
 #pragma pack(push, 1)
@@ -1085,10 +1086,16 @@ private:
                  header.type != kUdpPacketTypeRemoteObject &&
                  header.type != kUdpPacketTypeMidnaMsgpack &&
                  header.type != kUdpPacketTypePoseAck &&
-                 header.type != kUdpPacketTypeSemanticPoseMsgpack))
+                 header.type != kUdpPacketTypeSemanticPoseMsgpack &&
+                 header.type != kUdpPacketTypeVoiceOpus))
             {
                 continue;
             }
+            if (header.type == kUdpPacketTypeVoiceOpus &&
+                (header.sequence == 0 || header.chunkIndex != 0 || header.chunkCount != 1 ||
+                 header.payloadSize <= 21 || header.payloadSize > 421 ||
+                 header.compressedSize != header.payloadSize ||
+                 header.uncompressedSize != header.payloadSize)) continue;
 
             const auto now = SteadyClock::now();
             if (now - sender.udpRateWindowStarted >= std::chrono::seconds(1)) {
@@ -1192,7 +1199,14 @@ private:
                 payload.size() != sizeof(header) + header.payloadSize || udp_sender_id(header) != senderId) return;
             const bool pose = header.type == kUdpPacketTypePoseJson || header.type == kUdpPacketTypePoseMsgpack ||
                 header.type == kUdpPacketTypeSemanticPoseMsgpack;
-            if (!pose && header.type != kUdpPacketTypeRemoteObject && header.type != kUdpPacketTypePoseAck) return;
+            if (!pose && header.type != kUdpPacketTypeRemoteObject &&
+                header.type != kUdpPacketTypePoseAck &&
+                header.type != kUdpPacketTypeVoiceOpus) return;
+            if (header.type == kUdpPacketTypeVoiceOpus &&
+                (header.sequence == 0 || header.chunkIndex != 0 || header.chunkCount != 1 ||
+                 header.payloadSize <= 21 || header.payloadSize > 421 ||
+                 header.compressedSize != header.payloadSize ||
+                 header.uncompressedSize != header.payloadSize)) return;
             if (pose && (!target.wantsPuppet ||
                 (!sender.stage.empty() && !target.stage.empty() && sender.stage != target.stage))) return;
             if (header.type == kUdpPacketTypeSemanticPoseMsgpack && !target.supportsSemanticVisuals) return;

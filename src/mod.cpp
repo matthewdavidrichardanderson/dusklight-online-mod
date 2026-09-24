@@ -5,6 +5,7 @@
 #include "mods/service.hpp"
 #include "mods/svc/hook.h"
 #include "mods/svc/hook.hpp"
+#include "mods/svc/host.h"
 #include "mods/svc/item.h"
 #include "mods/svc/log.h"
 #include "mods/svc/resource.h"
@@ -21,6 +22,7 @@
 DEFINE_MOD();
 
 IMPORT_SERVICE(LogService, svc_log);
+IMPORT_SERVICE_VERSION(HostService, svc_host, 0);
 IMPORT_SERVICE(ResourceService, svc_resource);
 IMPORT_SERVICE(SaveService, svc_save);
 IMPORT_SERVICE(HookService, svc_hook);

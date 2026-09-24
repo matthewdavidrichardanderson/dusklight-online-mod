@@ -9,6 +9,7 @@ installation at runtime. It does not persist saves or gameplay state.
 
 Relay 0.1.0 adds libjuice signaling and recipient-specific UDP fallback, with
 STUN discovery sharing the existing UDP port.
+Relay 0.1.2 adds optional Opus voice packets on the peer and relay UDP paths.
 Update the relay and every client together. Clients must implement the settings
 transition protocol. Older UDP clients are not supported on this release, even
 if their initial lobby connection succeeds.
@@ -123,7 +124,7 @@ This is the maintainer/agent workflow. The Dockge operator does not build the
 relay, edit server files or change Compose YAML for an ordinary relay update.
 
 1. Change `DUSKLIGHT_ONLINE_RELAY_VERSION` in `version.cmake`. Use the next
-   version, such as `0.1.1`; never move or reuse an existing release tag.
+   version, such as `0.1.2`; never move or reuse an existing release tag.
 2. Make and verify the relay/client changes together when their protocol or
    capabilities changed. Do not launch the game as part of the release process.
 3. Commit the release changes and push the commit to `main`.
@@ -131,15 +132,15 @@ relay, edit server files or change Compose YAML for an ordinary relay update.
    tag:
 
    ```sh
-   git tag v0.1.1
-   git push origin v0.1.1
+   git tag v0.1.2
+   git push origin v0.1.2
    ```
 
 5. Confirm the tagged **Build** workflow succeeds. It creates the GitHub
    Release and publishes both container tags:
 
    ```text
-   ghcr.io/matthewdavidrichardanderson/dusklight-online-relay:v0.1.1
+   ghcr.io/matthewdavidrichardanderson/dusklight-online-relay:v0.1.2
    ghcr.io/matthewdavidrichardanderson/dusklight-online-relay:latest
    ```
 
@@ -156,7 +157,8 @@ never request, commit, log or publish it.
 ## Verification
 
 The relay-only test suite checks invite codes, three-client lobby behavior,
-framing, validation, authenticated reliable/realtime UDP routing, owner transfer, settings,
+framing, validation, authenticated reliable/realtime UDP and voice routing,
+owner transfer, settings,
 reliable acknowledgements, supported gameplay messages, and version reporting.
 
 Per-packet tracing is disabled by default because pose traffic is extremely

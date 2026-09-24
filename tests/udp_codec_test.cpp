@@ -107,6 +107,30 @@ int main() {
         fail("remote object round trip failed");
     }
 
+    udp::VoicePosition voicePosition;
+    std::memcpy(voicePosition.stageName, "F_SP103", 7);
+    voicePosition.x = 12.5f;
+    voicePosition.y = -4.0f;
+    voicePosition.z = 99.0f;
+    voicePosition.room = 3;
+    const std::vector<uint8_t> opusFrame{0x78, 0x12, 0x34, 0x56};
+    const auto voiceDatagram = udp::encode_voice("speaker", 42, voicePosition, opusFrame);
+    decoded = decoder.accept(voiceDatagram.bytes);
+    if (decoded.kind != udp::DecodeKind::Voice || decoded.senderId != "speaker" ||
+        decoded.sequence != 42 || decoded.voice != opusFrame ||
+        decoded.voicePosition.x != 12.5f || decoded.voicePosition.room != 3 ||
+        std::strcmp(decoded.voicePosition.stageName, "F_SP103") != 0) {
+        fail("voice packet round trip failed");
+    }
+    auto badVoice = voiceDatagram.bytes;
+    badVoice.pop_back();
+    if (decoder.accept(badVoice).kind != udp::DecodeKind::None ||
+        !udp::encode_voice("speaker", 0, voicePosition, opusFrame).bytes.empty() ||
+        !udp::encode_voice("speaker", 43, voicePosition,
+                           std::vector<uint8_t>(401, 0)).bytes.empty()) {
+        fail("malformed voice packet was accepted");
+    }
+
     const auto registration = udp::encode_relay_registration("relay-client", "secret-token");
     decoded = decoder.accept(registration.bytes);
     if (decoded.kind != udp::DecodeKind::RelayRegistration ||

@@ -189,6 +189,11 @@ visuals and skips known cross-stage recipients. Pose acknowledgements are
 targeted back to the original sender. Unregistered or sender-spoofed datagrams
 are discarded, and authenticated UDP input is rate limited.
 
+UDP packet type 8 carries positional Opus voice: a 21-byte position followed by
+1 to 400 encoded bytes. The relay forwards it only to other members of the same
+room, including through UDP fallback. Clients choose whether to send or play
+voice; proximity attenuation is applied by the receiving client.
+
 ## Connection sequence
 
 Clients explicitly create or join rooms. A successful connection is:

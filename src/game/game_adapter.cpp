@@ -48,6 +48,8 @@
 #include "d/actor/d_a_obj_mirror_chain.h"
 #include "d/actor/d_a_player.h"
 #include "Z2AudioLib/Z2SeMgr.h"
+#include "Z2AudioLib/Z2AudioMgr.h"
+#include "Z2AudioLib/Z2Audience.h"
 #include "f_op/f_op_overlap_mng.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
@@ -4375,6 +4377,60 @@ std::optional<uint32_t> GameAdapter::peer_latency_ms(std::string_view peerId) co
     const auto display = displayedLatencies_.find(std::string(peerId));
     return display == displayedLatencies_.end() ? std::nullopt :
         std::optional<uint32_t>(display->second);
+}
+
+std::optional<net::udp::VoicePosition> GameAdapter::voice_position() const {
+    if (!stage_ready()) return std::nullopt;
+    const auto* local = dComIfGp_getPlayer(0);
+    const char* stage = dComIfGp_getStartStageName();
+    if (local == nullptr || stage == nullptr || std::strlen(stage) >= 8) return std::nullopt;
+    net::udp::VoicePosition position;
+    std::memcpy(position.stageName, stage, std::strlen(stage));
+    position.x = local->current.pos.x;
+    position.y = local->current.pos.y;
+    position.z = local->current.pos.z;
+    position.room = static_cast<int8_t>(dComIfGp_roomControl_getStayNo());
+    return position;
+}
+
+float GameAdapter::voice_gain(const net::udp::VoicePosition& position) const {
+    if (!stage_ready()) return 0.0f;
+    const auto* local = dComIfGp_getPlayer(0);
+    const char* stage = dComIfGp_getStartStageName();
+    if (local == nullptr || stage == nullptr ||
+        std::strncmp(position.stageName, stage, 8) != 0 ||
+        !std::isfinite(position.x) || !std::isfinite(position.y) ||
+        !std::isfinite(position.z) ||
+        !std::isfinite(local->current.pos.x) ||
+        !std::isfinite(local->current.pos.y) ||
+        !std::isfinite(local->current.pos.z)) return 0.0f;
+    const float dx = position.x - local->current.pos.x;
+    const float dy = position.y - local->current.pos.y;
+    const float dz = position.z - local->current.pos.z;
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    // Voice loses the same perceived loudness every ~667 units and reaches
+    // silence at twice the previous range. Taper its quiet end to zero.
+    constexpr float fadeDistance = 4000.0f;
+    constexpr float tailDistance = 500.0f;
+    if (distance >= fadeDistance) return 0.0f;
+    const float attenuation = std::exp2(-6.0f * distance / fadeDistance);
+    const float tail = std::min(1.0f, (fadeDistance - distance) / tailDistance);
+    return attenuation * tail;
+}
+
+float GameAdapter::voice_pan(const net::udp::VoicePosition& position) const {
+    if (!stage_ready()) return 0.5f;
+    const char* stage = dComIfGp_getStartStageName();
+    Z2AudioMgr* audio = Z2GetAudioMgr();
+    if (stage == nullptr || audio == nullptr ||
+        std::strncmp(position.stageName, stage, 8) != 0 ||
+        !std::isfinite(position.x) || !std::isfinite(position.y) ||
+        !std::isfinite(position.z)) return 0.5f;
+    Vec absolute{position.x, position.y, position.z};
+    Vec relative{};
+    Z2Audience& audience = audio->mAudience;
+    (void)audience.convertAbsToRel(absolute, &relative, 0);
+    return std::clamp(audience.calcRelPosPan(relative, 0), 0.0f, 1.0f);
 }
 
 void GameAdapter::consume_welcome_membership(const nlohmann::json& message) {

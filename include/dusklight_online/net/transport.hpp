@@ -127,6 +127,7 @@ enum class EventKind : uint8_t {
     Message,
     UdpMessage,
     UdpRemoteObject,
+    UdpVoice,
     UdpAck,
     Error,
     RouteChanged,
@@ -152,6 +153,8 @@ struct Event {
     uint32_t udpSequence = 0;
     uint8_t udpStressFlags = 0;
     udp::RemoteObjectPacket remoteObject;
+    std::vector<uint8_t> voice;
+    udp::VoicePosition voicePosition;
     EventContext ingress;
 };
 
@@ -225,6 +228,8 @@ public:
     bool send_visual(const nlohmann::json& message,
                      udp::PacketType type = udp::PacketType::PoseMsgpack);
     bool send_remote_object(const udp::RemoteObjectPacket& object);
+    bool send_voice(uint32_t sequence, const udp::VoicePosition& position,
+                    std::span<const uint8_t> opus);
     void disconnect();
 
     [[nodiscard]] Status status() const;

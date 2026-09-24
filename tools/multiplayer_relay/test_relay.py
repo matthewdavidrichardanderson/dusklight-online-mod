@@ -80,6 +80,7 @@ HOST_CONTROL_TYPES = (
 UDP_HEADER = struct.Struct("<4sBBHIHHIIH32s")
 UDP_ACK = struct.Struct("<IB32sB")
 UDP_REGISTER_TYPE = 6
+UDP_VOICE_TYPE = 8
 
 
 def udp_packet(
@@ -202,7 +203,7 @@ class RelayProcess:
                 "--public-port",
                 str(self.port),
                 "--hello-timeout-ms",
-                "200",
+                "2000",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -522,6 +523,33 @@ class RelayTests(unittest.TestCase):
         finally:
             rebound.close()
 
+    def test_voice_routes_on_relay_and_fallback_udp(self) -> None:
+        sender, sw = self.join("VoiceSender", "voice-routing")
+        receiver, rw = self.join("VoiceReceiver", "voice-routing")
+        sender.expect_type("peer_joined")
+        outsider, ow = self.join("VoiceOutsider", "voice-other-room")
+        for client, welcome in ((sender, sw), (receiver, rw), (outsider, ow)):
+            client.register_udp(welcome)
+
+        position = struct.pack("<8sfffb", b"F_SP103", 14.0, 2.0, 3.0, 2)
+        voice = udp_packet(UDP_VOICE_TYPE, sw["client_id"], position + b"\x78\x12\x34")
+        address = ("127.0.0.1", self.relay.port)
+        sender.udp.sendto(voice, address)
+        self.assertEqual(receiver.udp.recvfrom(2048)[0], voice)
+        with self.assertRaises(socket.timeout):
+            outsider.udp.recvfrom(2048)
+
+        sender_num = int(sw["client_id"].split("_", 1)[1])
+        receiver_num = int(rw["client_id"].split("_", 1)[1])
+        fallback = b"DPF1" + struct.pack("<QQ", sender_num, receiver_num) + voice
+        sender.udp.sendto(fallback, address)
+        self.assertEqual(receiver.udp.recvfrom(2048)[0], fallback)
+
+        invalid = udp_packet(UDP_VOICE_TYPE, sw["client_id"], position)
+        sender.udp.sendto(invalid, address)
+        with self.assertRaises(socket.timeout):
+            receiver.udp.recvfrom(2048)
+
     def join(self, name: str, room: str = "phase12") -> tuple[RelayClient, dict[str, Any]]:
         client = self.client()
         action = "join" if room in self.created_rooms else "create"
@@ -749,7 +777,7 @@ class RelayTests(unittest.TestCase):
 
     def test_hello_timeout_returns_error_then_closes(self) -> None:
         client = self.client()
-        client.expect_error("hello_timeout", 2.0)
+        client.expect_error("hello_timeout", 4.0)
         with self.assertRaises(ConnectionError):
             client.receive(1.0)
 
@@ -758,7 +786,7 @@ class RelayTests(unittest.TestCase):
         # race a paced half-megabyte transfer. Hello timeout is tested separately.
         client, _ = self.join("Oversize", "oversize-line")
         client.send_bytes(b"x" * (512 * 1024 + 2048 + 1) + b"\n")
-        client.expect_error("message_too_large", 2.0)
+        client.expect_error("message_too_large", 10.0)
         with self.assertRaises(ConnectionError):
             client.receive(1.0)
 

@@ -25,6 +25,7 @@ enum class PacketType : uint8_t {
     PoseAck = 5,
     RelayRegister = 6,
     SemanticPoseMsgpack = 7,
+    VoiceOpus = 8,
 };
 
 enum AckStressFlags : uint8_t {
@@ -61,10 +62,18 @@ struct AckPacket {
     char ackedSenderId[kSenderIdBytes]{};
     uint8_t stressFlags = 0;
 };
+struct VoicePosition {
+    char stageName[8]{};
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    int8_t room = -1;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(RemoteObjectPacket) == 36);
 static_assert(sizeof(AckPacket) == 38);
+static_assert(sizeof(VoicePosition) == 21);
 
 struct MessageCommitToken {
     std::string senderId;
@@ -88,6 +97,7 @@ enum class DecodeKind : uint8_t {
     Message,
     Ack,
     RemoteObject,
+    Voice,
     RelayRegistration,
 };
 
@@ -100,6 +110,8 @@ struct DecodeResult {
     nlohmann::json message;
     AckPacket ack;
     RemoteObjectPacket remoteObject;
+    std::vector<uint8_t> voice;
+    VoicePosition voicePosition;
     std::string relayToken;
     MessageCommitToken messageToken;
 };
@@ -121,6 +133,8 @@ Datagram encode_ack(std::string_view senderId, std::string_view ackedSenderId,
                     PacketType ackedType, uint32_t sequence, uint8_t stressFlags = 0);
 Datagram encode_remote_object(std::string_view senderId,
                               const RemoteObjectPacket& object);
+Datagram encode_voice(std::string_view senderId, uint32_t sequence,
+                      const VoicePosition& position, std::span<const uint8_t> opus);
 Datagram encode_relay_registration(std::string_view clientId, std::string_view token);
 
 class Decoder {

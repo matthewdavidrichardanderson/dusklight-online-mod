@@ -3,8 +3,11 @@
 #include "dusklight_online/net/transport.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +21,7 @@ namespace dusklight_online {
 namespace game {
 class GameAdapter;
 class ProtocolRouter;
+class VoiceChat;
 }
 
 class OnlineApp {
@@ -56,14 +60,31 @@ private:
         ConfigVarHandle remoteCollision = 0;
         ConfigVarHandle pvp = 0;
         ConfigVarHandle playerList = 0;
+        ConfigVarHandle voiceEnabled = 0;
+        ConfigVarHandle voiceMicMuted = 0;
+        ConfigVarHandle voiceInput = 0;
+        ConfigVarHandle micVolume = 0;
+        ConfigVarHandle playerVolume = 0;
     } config_;
 
     net::Transport transport_;
     std::unique_ptr<game::GameAdapter> game_;
     std::unique_ptr<game::ProtocolRouter> router_;
+    std::unique_ptr<game::VoiceChat> voice_;
+    std::filesystem::path hostConfigPath_;
+    std::optional<std::filesystem::file_time_type> lastHostConfigWrite_;
+    std::chrono::steady_clock::time_point lastMasterVolumePoll_{};
+    float masterVolumeGain_ = 1.0f;
+    std::string lastVoiceError_;
+    std::chrono::steady_clock::time_point voiceStatsStarted_{};
+    uint32_t voiceCaptured_ = 0;
+    uint32_t voiceSent_ = 0;
+    uint32_t voiceRejected_ = 0;
+    uint32_t voiceNoPosition_ = 0;
     UiWindowHandle window_ = 0;
     UiWindowHandle settingsWindow_ = 0;
     UiWindowHandle playerOptionsWindow_ = 0;
+    UiWindowHandle voiceWindow_ = 0;
     UiWindowHandle syncWindow_ = 0;
     UiWindowHandle lobbyWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
@@ -103,6 +124,8 @@ private:
     std::string connectedLobbyName_;
     std::vector<std::string> manualPeerIds_;
     std::vector<std::string> manualPeerLabels_;
+    std::vector<std::string> voiceInputLabels_;
+    std::vector<const char*> voiceInputOptions_;
     std::vector<UiElementHandle> manualPeerButtonElements_;
     struct ManualPeerButtonContext {
         OnlineApp* app = nullptr;
@@ -125,6 +148,7 @@ private:
     std::array<InlineKickRow, 7> inlineKickRows_{};
 
     ModResult register_config(ModError* error);
+    void refresh_master_volume_gain();
     ModResult register_ui(ModError* error);
     std::string string_value(ConfigVarHandle handle) const;
     bool bool_value(ConfigVarHandle handle, bool fallback = false) const;
@@ -136,6 +160,7 @@ private:
     void open_window();
     void open_settings_window();
     void open_player_options_window();
+    void open_voice_window();
     void open_sync_window();
     void open_lobby_window(ConnectionRole role);
     void host_direct();
@@ -160,8 +185,14 @@ public:
                                        UiElementHandle, void*, ModError*);
     static ModResult build_player_options_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                               UiElementHandle, void*, ModError*);
+    static ModResult build_voice_tab(ModContext*, UiWindowHandle, UiElementHandle,
+                                    UiElementHandle, void*, ModError*);
     static void player_options_window_closed(ModContext*, UiWindowHandle, void*);
+    static void voice_window_closed(ModContext*, UiWindowHandle, void*);
     static void player_options_pressed(ModContext*, void*);
+    static void voice_pressed(ModContext*, void*);
+    static void voice_input_get(ModContext*, void*, UiControlValue*);
+    static void voice_input_set(ModContext*, void*, const UiControlValue*);
     static ModResult build_settings_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                         UiElementHandle, void*, ModError*);
     static ModResult build_sync_tab(ModContext*, UiWindowHandle, UiElementHandle,

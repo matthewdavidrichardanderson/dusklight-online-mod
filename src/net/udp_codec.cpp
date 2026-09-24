@@ -35,7 +35,7 @@ bool is_message_type(PacketType type) {
 
 bool is_known_type(uint8_t type) {
     return type >= static_cast<uint8_t>(PacketType::PoseJson) &&
-           type <= static_cast<uint8_t>(PacketType::SemanticPoseMsgpack);
+           type <= static_cast<uint8_t>(PacketType::VoiceOpus);
 }
 
 void copy_id(char (&destination)[kSenderIdBytes], std::string_view source) {
@@ -210,6 +210,17 @@ Datagram encode_relay_registration(std::string_view clientId, std::string_view t
     return make_datagram(header, token.data(), token.size());
 }
 
+Datagram encode_voice(std::string_view senderId, uint32_t sequence,
+                      const VoicePosition& position, std::span<const uint8_t> opus) {
+    if (sequence == 0 || opus.empty() || opus.size() > 400) return {};
+    const auto size = static_cast<uint16_t>(sizeof(position) + opus.size());
+    const Header header = make_header(PacketType::VoiceOpus, senderId, sequence,
+                                      0, 1, size, size, size);
+    Datagram packet = make_datagram(header, &position, sizeof(position));
+    packet.bytes.insert(packet.bytes.end(), opus.begin(), opus.end());
+    return packet;
+}
+
 DecodeResult Decoder::accept(std::span<const uint8_t> datagram) {
     DecodeResult result;
     const std::optional<Header> inspected = inspect_header(datagram);
@@ -261,6 +272,19 @@ DecodeResult Decoder::accept(std::span<const uint8_t> datagram) {
         }
         std::memcpy(&result.remoteObject, payload, sizeof(RemoteObjectPacket));
         result.kind = DecodeKind::RemoteObject;
+        return result;
+    }
+
+    if (type == PacketType::VoiceOpus) {
+        if (header.sequence == 0 || header.chunkIndex != 0 || header.chunkCount != 1 ||
+            header.payloadSize <= sizeof(VoicePosition) ||
+            header.payloadSize > sizeof(VoicePosition) + 400 ||
+            header.uncompressedSize != header.payloadSize ||
+            header.compressedSize != header.payloadSize) return {};
+        std::memcpy(&result.voicePosition, payload, sizeof(VoicePosition));
+        if (std::memchr(result.voicePosition.stageName, '\0', 8) == nullptr) return {};
+        result.kind = DecodeKind::Voice;
+        result.voice.assign(payload + sizeof(VoicePosition), payload + header.payloadSize);
         return result;
     }
 

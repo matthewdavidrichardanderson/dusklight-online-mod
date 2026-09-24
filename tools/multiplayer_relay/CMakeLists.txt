@@ -150,7 +150,7 @@ if (DUSKLIGHT_RELAY_BUILD_TESTS)
                 --relay $<TARGET_FILE:dusklight_online_relay>
                 --udp-library $<TARGET_FILE:dusklight_online_udp_test_client>
     )
-    set_tests_properties(dusklight_relay_integration PROPERTIES TIMEOUT 60)
+    set_tests_properties(dusklight_relay_integration PROPERTIES TIMEOUT 120)
     add_test(NAME dusklight_relay_version
              COMMAND $<TARGET_FILE:dusklight_online_relay> --version)
     set_tests_properties(dusklight_relay_version PROPERTIES

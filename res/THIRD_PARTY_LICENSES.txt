@@ -1,6 +1,12 @@
 Third-party software notices
 ============================
 
+Opus v1.5.2
+-----------
+Copyright (c) Xiph.Org Foundation and contributors.
+BSD 3-Clause license; full text in OPUS_LICENSE.txt.
+Source: https://github.com/xiph/opus/tree/v1.5.2
+
 libjuice v1.6.2
 --------------
 Copyright (c) Paul-Louis Ageneau and contributors.

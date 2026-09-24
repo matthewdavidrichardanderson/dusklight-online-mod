@@ -7,17 +7,22 @@
 #include "dusklight_online/game/local_pose.hpp"
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
+#include "dusklight_online/game/voice_chat.hpp"
 #include "dusklight_online/net/sdk_room_channel.hpp"
 
 #include <mods/service.hpp>
 #include <mods/svc/config.h>
+#include <mods/svc/host.h>
 #include <mods/svc/ui.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <fstream>
 #include <map>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -31,8 +36,19 @@ namespace dusklight_online {
 namespace {
 
 constexpr uint32_t kManualSyncCooldownTicks = 5 * 30;
+#if defined(DUSKLIGHT_ONLINE_VOICE)
+constexpr bool kVoiceRuntimeAvailable = true;
+#else
+// A saved setting from another platform must not enable voice on this build.
+constexpr bool kVoiceRuntimeAvailable = false;
+#endif
 constexpr const char* kCloudRoomServiceUrl =
     "https://dusklight-online-rooms.matthewdavidrichardanderson.workers.dev";
+
+float master_volume_to_linear(float percent) {
+    return percent <= 0.0f ? 0.0f :
+        std::pow(10.0f, (percent / 100.0f - 1.0f) * 2.0f);
+}
 
 const char* connection_label(const net::Status& status) {
     if (status.mode == net::Mode::CloudRoom) return "NAT (Cloudflare room)";
@@ -582,6 +598,13 @@ OnlineApp::OnlineApp() = default;
 OnlineApp::~OnlineApp() = default;
 
 ModResult OnlineApp::initialize(ModError* error) {
+    const char* dataDir = nullptr;
+    if (svc_host->header.minor_version >= 2 &&
+        svc_host->data_dir(mod_ctx, &dataDir) == MOD_OK && dataDir != nullptr) {
+        hostConfigPath_ = std::filesystem::u8path(dataDir).parent_path().parent_path() /
+                          "config.json";
+        masterVolumeGain_ = master_volume_to_linear(60.0f);
+    }
     if (register_config(error) != MOD_OK) {
         return MOD_ERROR;
     }
@@ -594,7 +617,35 @@ ModResult OnlineApp::initialize(ModError* error) {
         return MOD_ERROR;
     }
     router_ = std::make_unique<game::ProtocolRouter>(*game_);
+    voice_ = std::make_unique<game::VoiceChat>();
     return MOD_OK;
+}
+
+void OnlineApp::refresh_master_volume_gain() {
+    if (hostConfigPath_.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (lastMasterVolumePoll_ != std::chrono::steady_clock::time_point{} &&
+        now - lastMasterVolumePoll_ < std::chrono::milliseconds(250)) return;
+    lastMasterVolumePoll_ = now;
+
+    std::error_code error;
+    const auto written = std::filesystem::last_write_time(hostConfigPath_, error);
+    if (error || (lastHostConfigWrite_ && *lastHostConfigWrite_ == written)) return;
+
+    std::ifstream file(hostConfigPath_);
+    if (!file) return;
+    const auto config = nlohmann::json::parse(file, nullptr, false);
+    if (!config.is_object()) return;
+    float percent = 60.0f;  // Dusklight's default when the key is absent.
+    const auto value = config.find("audio.masterVolume");
+    if (value != config.end()) {
+        if (!value->is_number()) return;
+        percent = static_cast<float>(value->get<double>());
+    }
+    percent = std::clamp(percent, 0.0f, 100.0f);
+    // Match Dusklight's MasterVolumeToLinear curve for the separate voice stream.
+    masterVolumeGain_ = master_volume_to_linear(percent);
+    lastHostConfigWrite_ = written;
 }
 
 void OnlineApp::consume_progression_prompt_input() {
@@ -677,6 +728,22 @@ void OnlineApp::update() {
     }
     transport_.tick();
     const net::Status captureStatus = transport_.status();
+    if (voice_ != nullptr) {
+        const bool voiceEnabled = kVoiceRuntimeAvailable && captureStatus.welcomed &&
+                                  bool_value(config_.voiceEnabled);
+        if (voiceEnabled) refresh_master_volume_gain();
+        voice_->configure(voiceEnabled, bool_value(config_.voiceMicMuted),
+                          string_value(config_.voiceInput),
+                          static_cast<int>(int_value(config_.micVolume, 100)),
+                          static_cast<int>(int_value(config_.playerVolume, 100)),
+                          captureStatus.mode == net::Mode::DirectHost ||
+                              captureStatus.mode == net::Mode::DirectJoin,
+                          masterVolumeGain_);
+        const std::string& voiceError = voice_->error();
+        if (voiceEnabled && !voiceError.empty() && voiceError != lastVoiceError_)
+            game::push_online_notification(voiceError, 4.0f, true);
+        lastVoiceError_ = voiceEnabled ? voiceError : std::string();
+    }
     const bool captureSyncFlags = captureStatus.enabled ? captureStatus.settings.syncFlags :
                                                           bool_value(config_.syncFlags, true);
     if (game_ != nullptr) {
@@ -696,6 +763,7 @@ void OnlineApp::update() {
         } else if (event.kind == net::EventKind::PeerLeft) {
             // Peer IDs are session-local; bound the diagnostic history on churn.
             timing.sequences.clear();
+            if (voice_ != nullptr) voice_->peer_left(event.peerId);
         }
         if (event.kind == net::EventKind::Message &&
             event.message.value("type", std::string()) == "owner_changed" &&
@@ -710,6 +778,13 @@ void OnlineApp::update() {
             wasRelayOwner_ = isOwner;
         }
         switch (event.kind) {
+        case net::EventKind::UdpVoice:
+            if (kVoiceRuntimeAvailable && voice_ != nullptr && game_ != nullptr &&
+                bool_value(config_.voiceEnabled))
+                voice_->receive(event.peerId, event.udpSequence, event.voice,
+                                game_->voice_gain(event.voicePosition),
+                                game_->voice_pan(event.voicePosition));
+            break;
         case net::EventKind::Diagnostic:
             log_info("MP_CLOUD_DIAG peer=" + (event.peerId.empty() ? "-" : event.peerId) +
                      " " + event.detail);
@@ -737,6 +812,7 @@ void OnlineApp::update() {
             break;
         }
         case net::EventKind::Disconnected:
+            if (voice_ != nullptr) voice_->stop();
             if (event.ingress.mode == net::Mode::CloudRoom)
                 log_info("MP_CLOUD_DISCONNECT reason=" + event.detail);
             if (transport_.status().reconnecting) {
@@ -817,6 +893,31 @@ void OnlineApp::update() {
         }
         if (protocolFatal) break;
     }
+    if (kVoiceRuntimeAvailable && voice_ != nullptr && transport_.status().welcomed &&
+        bool_value(config_.voiceEnabled)) {
+        const auto now = std::chrono::steady_clock::now();
+        if (voiceStatsStarted_ == std::chrono::steady_clock::time_point{})
+            voiceStatsStarted_ = now;
+        const auto position = game_ != nullptr ? game_->voice_position() : std::nullopt;
+        for (const auto& frame : voice_->capture()) {
+            ++voiceCaptured_;
+            if (!position) { ++voiceNoPosition_; continue; }
+            if (transport_.send_voice(frame.sequence, *position, frame.bytes)) ++voiceSent_;
+            else ++voiceRejected_;
+        }
+        if (now - voiceStatsStarted_ >= std::chrono::seconds(1)) {
+            log_info("VOICE_TX mode=" + std::to_string(static_cast<int>(transport_.status().mode)) +
+                " captured=" + std::to_string(voiceCaptured_) +
+                " sent=" + std::to_string(voiceSent_) +
+                " rejected=" + std::to_string(voiceRejected_) +
+                " no_position=" + std::to_string(voiceNoPosition_));
+            voiceStatsStarted_ = now;
+            voiceCaptured_ = voiceSent_ = voiceRejected_ = voiceNoPosition_ = 0;
+        }
+    } else {
+        voiceStatsStarted_ = {};
+        voiceCaptured_ = voiceSent_ = voiceRejected_ = voiceNoPosition_ = 0;
+    }
     const net::Status currentStatus = transport_.status();
     // A direct host owns a lobby before any guests arrive. Joiners must
     // receive welcome; a connected socket alone is not lobby membership.
@@ -872,6 +973,7 @@ void OnlineApp::update() {
 }
 
 void OnlineApp::shutdown() {
+    if (voice_ != nullptr) voice_->stop();
     transport_.disconnect();
     game::appearance::set_lobby_active(false);
     if (router_ != nullptr) {
@@ -884,6 +986,10 @@ void OnlineApp::shutdown() {
     if (playerOptionsWindow_ != 0) {
         svc_ui->window_close(mod_ctx, playerOptionsWindow_);
         playerOptionsWindow_ = 0;
+    }
+    if (voiceWindow_ != 0) {
+        svc_ui->window_close(mod_ctx, voiceWindow_);
+        voiceWindow_ = 0;
     }
     if (settingsWindow_ != 0) {
         svc_ui->window_close(mod_ctx, settingsWindow_);
@@ -915,6 +1021,7 @@ void OnlineApp::shutdown() {
     for (auto& slot : inlineKickRows_) slot = {};
     router_.reset();
     game_.reset();
+    voice_.reset();
     livePublishInitialized_ = false;
     manualSyncWasWaiting_ = false;
     manualSyncCooldownTicks_ = 0;
@@ -940,6 +1047,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         StringVar{"relay-code", "", &config_.relayCode},
         StringVar{"relay-room", "Lobby", &config_.relayRoom},
         StringVar{"relay-password", "", &config_.relayPassword},
+        StringVar{"voice-input", "", &config_.voiceInput},
     };
     for (const auto& variable : strings) {
         if (add_config(variable.name, CONFIG_VAR_STRING, variable.value, 0, false,
@@ -967,6 +1075,10 @@ ModResult OnlineApp::register_config(ModError* error) {
     if (add_config("port", CONFIG_VAR_INT, nullptr, 34197, false, config_.port, error) != MOD_OK) {
         return MOD_ERROR;
     }
+    if (add_config("voice-mic-volume", CONFIG_VAR_INT, nullptr, 100, false,
+                   config_.micVolume, error) != MOD_OK ||
+        add_config("voice-player-volume", CONFIG_VAR_INT, nullptr, 100, false,
+                   config_.playerVolume, error) != MOD_OK) return MOD_ERROR;
     struct BoolVar { const char* name; bool value; ConfigVarHandle* handle; };
     const std::array booleans = {
         BoolVar{"match-outfit-color", true, &config_.matchOutfitColor},
@@ -979,6 +1091,8 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"remote-collision", true, &config_.remoteCollision},
         BoolVar{"pvp", true, &config_.pvp},
         BoolVar{"player-list-overlay", false, &config_.playerList},
+        BoolVar{"voice-enabled", false, &config_.voiceEnabled},
+        BoolVar{"voice-mic-muted", false, &config_.voiceMicMuted},
     };
     for (const auto& variable : booleans) {
         if (add_config(variable.name, CONFIG_VAR_BOOL, nullptr, 0, variable.value,
@@ -1186,6 +1300,28 @@ void OnlineApp::open_player_options_window() {
     desc.on_closed = &OnlineApp::player_options_window_closed;
     desc.user_data = this;
     svc_ui->window_push(mod_ctx, &desc, &playerOptionsWindow_);
+}
+
+void OnlineApp::open_voice_window() {
+    if (voiceWindow_ != 0) return;
+    voiceInputLabels_ = {"Default microphone"};
+    if (voice_ != nullptr) {
+        for (auto& name : voice_->input_devices()) voiceInputLabels_.push_back(std::move(name));
+    }
+    voiceInputOptions_.clear();
+    for (const auto& label : voiceInputLabels_) voiceInputOptions_.push_back(label.c_str());
+    static UiTabDesc tab;
+    tab = UI_TAB_DESC_INIT;
+    tab.title = "Proximity chat";
+    tab.build = &OnlineApp::build_voice_tab;
+    tab.user_data = this;
+    UiWindowDesc desc = UI_WINDOW_DESC_INIT;
+    desc.tabs = &tab;
+    desc.tab_count = 1;
+    desc.rcss = kOnlineWindowRcss;
+    desc.on_closed = &OnlineApp::voice_window_closed;
+    desc.user_data = this;
+    svc_ui->window_push(mod_ctx, &desc, &voiceWindow_);
 }
 
 void OnlineApp::open_sync_window() {
@@ -1656,6 +1792,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     add_button(left, "Join lobby", &OnlineApp::join_lobby_pressed, &app);
 
     svc_ui->pane_add_section(mod_ctx, left, "Session");
+    add_button(left, "Proximity chat", &OnlineApp::voice_pressed, &app);
     add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
     add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
     add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
@@ -1742,6 +1879,46 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     match.help_rml = "Use your outfit colour for your player colour.";
     svc_ui->pane_add_control(mod_ctx, left, &match, nullptr);
     add_button(left, "Reset to defaults", &OnlineApp::reset_player_options, &app);
+    return MOD_OK;
+}
+
+ModResult OnlineApp::build_voice_tab(ModContext*, UiWindowHandle, UiElementHandle left,
+                                    UiElementHandle right, void* data, ModError*) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Proximity chat");
+#if defined(DUSKLIGHT_ONLINE_VOICE)
+    add_bound_control(left, UI_CONTROL_TOGGLE, "Proximity chat", app.config_.voiceEnabled);
+    add_bound_control(left, UI_CONTROL_TOGGLE, "Mute microphone", app.config_.voiceMicMuted,
+                      0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
+                      "<p>Stop sending your voice while continuing to hear other players.</p>");
+    UiControlDesc input = UI_CONTROL_DESC_INIT;
+    input.kind = UI_CONTROL_DROPDOWN;
+    input.label = "Microphone input";
+    input.options = app.voiceInputOptions_.data();
+    input.option_count = app.voiceInputOptions_.size();
+    input.get = &OnlineApp::voice_input_get;
+    input.set = &OnlineApp::voice_input_set;
+    input.user_data = &app;
+    svc_ui->pane_add_control(mod_ctx, left, &input, nullptr);
+    UiControlDesc volume = UI_CONTROL_DESC_INIT;
+    volume.kind = UI_CONTROL_NUMBER;
+    volume.binding = UI_BINDING_CONFIG_VAR;
+    volume.min = 0;
+    volume.max = 200;
+    volume.step = 5;
+    volume.suffix = "%";
+    volume.label = "Your mic volume";
+    volume.config_var = app.config_.micVolume;
+    svc_ui->pane_add_control(mod_ctx, left, &volume, nullptr);
+    volume.label = "Other player volume";
+    volume.config_var = app.config_.playerVolume;
+    svc_ui->pane_add_control(mod_ctx, left, &volume, nullptr);
+#else
+    svc_ui->pane_add_text(mod_ctx, left, "Voice chat is unavailable on this platform.", nullptr);
+#endif
+    svc_ui->pane_add_section(mod_ctx, right, "Proximity chat");
+    svc_ui->pane_add_text(mod_ctx, right, "Voice gets quieter as players move away.", nullptr);
     return MOD_OK;
 }
 
@@ -1978,6 +2155,32 @@ ModResult OnlineApp::build_join_relay_settings(ModContext*, UiElementHandle pane
 void OnlineApp::player_options_window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.playerOptionsWindow_ = 0;
+}
+
+void OnlineApp::voice_window_closed(ModContext*, UiWindowHandle, void* data) {
+    static_cast<OnlineApp*>(data)->voiceWindow_ = 0;
+}
+
+void OnlineApp::voice_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->open_voice_window();
+}
+
+void OnlineApp::voice_input_get(ModContext*, void* data, UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const auto selected = app.string_value(app.config_.voiceInput);
+    value->int_value = 0;
+    for (size_t index = 1; index < app.voiceInputLabels_.size(); ++index) {
+        if (app.voiceInputLabels_[index] == selected) value->int_value = index;
+    }
+}
+
+void OnlineApp::voice_input_set(ModContext*, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (value->int_value < 0 ||
+        static_cast<size_t>(value->int_value) >= app.voiceInputLabels_.size()) return;
+    const char* name = value->int_value == 0 ? "" :
+        app.voiceInputLabels_[static_cast<size_t>(value->int_value)].c_str();
+    svc_config->set_string(mod_ctx, app.config_.voiceInput, name);
 }
 
 void OnlineApp::player_options_pressed(ModContext*, void* data) {

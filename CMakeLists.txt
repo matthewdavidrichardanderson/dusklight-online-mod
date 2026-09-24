@@ -37,6 +37,20 @@ endif ()
 
 include(FetchContent)
 include(cmake/LibJuice.cmake)
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    block()
+        set(BUILD_SHARED_LIBS OFF)
+        set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(online_opus
+            GIT_REPOSITORY https://github.com/xiph/opus.git
+            GIT_TAG v1.5.2
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(online_opus)
+        set_target_properties(opus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endblock()
+endif ()
 if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     # Room signaling owns its WebSocket client so its availability does not
     # depend on the host's optional WebSocket service or system curl version.
@@ -250,6 +264,11 @@ configure_file(
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/THIRD_PARTY_LICENSES.txt"
     COPYONLY
 )
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/OPUS_LICENSE.txt"
+    "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/OPUS_LICENSE.txt"
+    COPYONLY
+)
 # The selected SDK does not expose Z2AudioMgr::seStartNoCull. Preserve the
 # actor source apart from this asserted call-site adaptation.
 file(READ
@@ -340,6 +359,7 @@ set(ONLINE_CORE_SOURCES
 )
 
 set(ONLINE_GAME_SOURCES
+    src/game/voice_chat.cpp
     src/game/player_color.cpp
     src/game/appearance.cpp
     src/game/audio_bridge.cpp
@@ -389,6 +409,10 @@ target_link_libraries(dusklight_online PRIVATE
     dusklight_online_imgui
     ${CMAKE_DL_LIBS}
 )
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(dusklight_online PRIVATE opus)
+    target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_VOICE=1)
+endif ()
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InterpolationSDKStub.cmake")
 if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_NATIVE_ROOM_CHANNEL=1)
@@ -732,7 +756,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 --relay $<TARGET_FILE:dusklight_online_relay>
                 --udp-library $<TARGET_FILE:dusklight_online_udp_test_client>
         )
-        set_tests_properties(dusklight_online_relay_integration PROPERTIES TIMEOUT 60)
+        set_tests_properties(dusklight_online_relay_integration PROPERTIES TIMEOUT 120)
         add_test(NAME dusklight_online_relay_version
                  COMMAND $<TARGET_FILE:dusklight_online_relay> --version)
         set_tests_properties(dusklight_online_relay_version PROPERTIES

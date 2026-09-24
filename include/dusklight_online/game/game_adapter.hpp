@@ -80,6 +80,9 @@ public:
     void set_player_color(uint32_t color, uint32_t outfit);
     void publish_player_color();
     [[nodiscard]] std::optional<uint32_t> peer_latency_ms(std::string_view peerId) const;
+    [[nodiscard]] std::optional<net::udp::VoicePosition> voice_position() const;
+    [[nodiscard]] float voice_gain(const net::udp::VoicePosition& position) const;
+    [[nodiscard]] float voice_pan(const net::udp::VoicePosition& position) const;
     void reset_session();
     [[nodiscard]] const std::string& last_error() const;
     [[nodiscard]] std::string manual_sync_status_text() const;
