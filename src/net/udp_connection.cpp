@@ -18,6 +18,7 @@ using NativeSocket = int;
 #include "dusklight_online/net/stun_binding.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -80,7 +81,8 @@ struct UdpConnection::Impl : DatagramTransport {
     mutable std::mutex mutex;
     std::condition_variable activity;
     uint64_t activityGeneration = 0;
-    std::jthread worker;
+    std::thread worker;
+    std::atomic<bool> workerStop{false};
     NativeSocket socket = badSocket;
     bool stack = false, server = false;
     bool stun = false;
@@ -283,7 +285,8 @@ UdpConnection::UdpConnection() : impl_(std::make_unique<Impl>()) {}
 UdpConnection::~UdpConnection() { close(); }
 void UdpConnection::close() {
     // Join before taking the protocol lock: the worker may be inside poll().
-    if (impl_->worker.joinable()) { impl_->worker.request_stop(); impl_->worker.join(); }
+    impl_->workerStop.store(true);
+    if (impl_->worker.joinable()) impl_->worker.join();
     std::lock_guard lock(impl_->mutex); impl_->close();
     ++impl_->activityGeneration;
     impl_->activity.notify_all();
@@ -320,8 +323,9 @@ bool UdpConnection::open(std::string_view host, uint16_t port, size_t capacity, 
     // kernel ACK processing did. All access to protocol state is serialized;
     // no game callbacks execute on this worker.
     const NativeSocket nativeSocket = impl_->socket;
-    impl_->worker = std::jthread([this, nativeSocket](std::stop_token stop) {
-        while (!stop.stop_requested()) {
+    impl_->workerStop.store(false);
+    impl_->worker = std::thread([this, nativeSocket] {
+        while (!impl_->workerStop.load()) {
             poll();
             // Wake immediately for ingress. The timeout still services KCP,
             // pacing and shutdown when no datagrams arrive. close() joins this

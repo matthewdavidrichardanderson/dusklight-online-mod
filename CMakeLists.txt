@@ -77,6 +77,11 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "D
             set(CURL_BROTLI OFF)
             set(CURL_ZSTD OFF)
             FetchContent_MakeAvailable(online_curl)
+            # This static archive is linked into the mod's shared module.
+            # curl only enables PIC for its shared-library target by default.
+            if (NOT WIN32)
+                set_target_properties(libcurl_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+            endif ()
         endblock()
     endif ()
 endif ()
