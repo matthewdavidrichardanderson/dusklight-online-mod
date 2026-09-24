@@ -42,6 +42,7 @@
 #include "d/d_stage.h"
 #include "d/d_vibration.h"
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_door_shutter.h"
 #include "d/actor/d_a_obj_mirror_table.h"
 #include "d/actor/d_a_obj_mirror_chain.h"
@@ -114,6 +115,7 @@ DEFINE_HOOK(&daObjMirrorTable_c::execute, MirrorTableExecuteHook);
 DEFINE_HOOK_SYMBOL("daObjMirrorChain_Draw", int(daObjMirrorChain_c*), MirrorChainDrawHook);
 DEFINE_HOOK(&dSv_info_c::onSwitch, InfoSwitchOnHook);
 DEFINE_HOOK(&daAlink_c::getDamageVec, PvpDamageVectorHook);
+DEFINE_HOOK(&daArrow_c::atHitCallBack, BombArrowPvpHitHook);
 DEFINE_HOOK(&daAlink_c::checkEnemyGroup, RemoteEnemyGroupHook);
 DEFINE_HOOK(&daAlink_c::searchWolfLockEnemy, RemoteWolfLockHook);
 DEFINE_HOOK(&daAlink_c::setAtnList, RemoteAttentionMarkHook);
@@ -436,6 +438,15 @@ void remote_link_pvp_target_hit(fopAc_ac_c* remoteLinkActor, fopAc_ac_c* attackA
     if (sActiveAdapter != nullptr) {
         sActiveAdapter->report_pvp_target_hit(remoteLinkActor, attackActor, attackInfo);
     }
+}
+
+void bomb_arrow_pvp_hit_post(ModContext*, void* args, void*, void*) {
+    auto* arrow = mods::arg<daArrow_c*>(args, 0);
+    if (arrow == nullptr || !arrow->checkBombArrow()) return;
+    // Bomb arrows suppress the target hit callback; their own hit callback
+    // still runs, so forward remote-player impacts through the usual PvP path.
+    remote_link_pvp_target_hit(mods::arg<fopAc_ac_c*>(args, 2), arrow,
+                               mods::arg<dCcD_GObjInf*>(args, 1));
 }
 
 bool apply_pvp_player_damage(int attackClass, bool ironBallLaunch, int damage,
@@ -2377,6 +2388,7 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_pre<OoccooWarpActorHook>(&ooccoo_warp_actor_pre) != MOD_OK ||
         mods::hook::add_post<OoccooWarpOutHook>(&ooccoo_warp_out_post) != MOD_OK ||
         mods::hook::add_pre<PvpDamageVectorHook>(&pvp_damage_vector_pre) != MOD_OK ||
+        mods::hook::add_post<BombArrowPvpHitHook>(&bomb_arrow_pvp_hit_post) != MOD_OK ||
         mods::hook::add_pre<RemoteEnemyGroupHook>(&remote_enemy_group_pre) != MOD_OK ||
         mods::hook::add_pre<RemoteWolfLockHook>(&remote_wolf_lock_pre) != MOD_OK ||
         mods::hook::add_post<RemoteAttentionMarkHook>(&remote_attention_mark_post) != MOD_OK ||
@@ -2511,6 +2523,7 @@ void GameAdapter::shutdown_hooks() {
     destroy_remote_actor_processes_for_unload();
 
     mods::hook::uninstall<PvpDamageVectorHook>();
+    mods::hook::uninstall<BombArrowPvpHitHook>();
     mods::hook::uninstall<RemoteAttentionMarkHook>();
     mods::hook::uninstall<RemoteWolfLockHook>();
     mods::hook::uninstall<RemoteEnemyGroupHook>();
@@ -2618,9 +2631,8 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
     if (!status.welcomed || !net::effective_pvp(status.settings) ||
         !stage_ready() || manualTransitionActive_) return;
 
-    fopAc_ac_c* hitActor = attackInfo->GetAtHitAc();
     std::string targetPeerId;
-    if (!dusk::multiplayer::get_remote_link_dummy_peer_id_for_actor(hitActor,
+    if (!dusk::multiplayer::get_remote_link_dummy_peer_id_for_actor(remoteLinkActor,
                                                                     &targetPeerId) ||
         targetPeerId.empty()) return;
     const std::string localPeerId = status.mode == net::Mode::DirectHost ?
