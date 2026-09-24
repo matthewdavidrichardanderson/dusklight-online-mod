@@ -6,6 +6,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -229,6 +230,7 @@ public:
     [[nodiscard]] Status status() const;
     [[nodiscard]] VisualSendStats last_visual_send_stats() const;
     [[nodiscard]] const std::map<std::string, std::string>& peers() const;
+    [[nodiscard]] std::optional<uint32_t> direct_peer_rtt_ms(std::string_view peerId) const;
     [[nodiscard]] bool has_events() const;
     Event pop_event();
 

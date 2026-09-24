@@ -36,6 +36,7 @@ void update_visual_overlays(
     const std::map<std::string, dusk::multiplayer::PeerPoseSnapshot>& poses,
     const std::map<std::string, std::string>& names,
     const std::map<std::string, PlayerLocationView>& locations,
+    const std::map<std::string, uint32_t>& latencies,
     const ProgressionPromptView& progressionPrompt);
 void push_online_notification(std::string text, float durationSeconds = 5.0f,
                               bool warning = false);

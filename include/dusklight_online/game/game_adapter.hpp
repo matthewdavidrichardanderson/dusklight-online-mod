@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace dusklight_online::game {
@@ -78,6 +79,7 @@ public:
 
     void set_player_color(uint32_t color, uint32_t outfit);
     void publish_player_color();
+    [[nodiscard]] std::optional<uint32_t> peer_latency_ms(std::string_view peerId) const;
     void reset_session();
     [[nodiscard]] const std::string& last_error() const;
     [[nodiscard]] std::string manual_sync_status_text() const;
@@ -86,9 +88,27 @@ public:
     [[nodiscard]] bool manual_sync_timed_out() const;
 
 private:
+    void observe_latency_presence(const RoutedMessage& message);
+    [[nodiscard]] std::optional<uint32_t> current_peer_latency_ms(
+        std::string_view peerId, std::chrono::steady_clock::time_point now) const;
     net::Transport& transport_;
     std::map<std::string, std::string> peerNames_;
     std::map<std::string, nlohmann::json> peerPresence_;
+    struct LatencyProbe {
+        uint64_t nonce = 0;
+        std::chrono::steady_clock::time_point receivedAt{};
+    };
+    struct LatencySample {
+        uint64_t nonce = 0;
+        uint32_t milliseconds = 0;
+        std::chrono::steady_clock::time_point receivedAt{};
+    };
+    std::map<std::string, LatencyProbe> latencyEchoes_;
+    std::map<std::string, LatencySample> latencySamples_;
+    std::deque<std::pair<uint64_t, std::chrono::steady_clock::time_point>> latencySent_;
+    uint64_t nextLatencyNonce_ = 0;
+    mutable std::map<std::string, uint32_t> displayedLatencies_;
+    mutable std::chrono::steady_clock::time_point displayedLatenciesAt_{};
     std::map<std::string, nlohmann::json> peerProgressionStates_;
     std::map<std::string, uint32_t> peerProgressionAges_;
     std::deque<RoutedMessage> deferredFaronInbound_;

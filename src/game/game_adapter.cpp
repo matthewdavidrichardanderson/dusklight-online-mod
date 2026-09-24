@@ -3431,12 +3431,21 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         (status.mode == net::Mode::DirectHost ?
             (status.state == net::State::Listening || status.state == net::State::Connected) :
             status.welcomed);
+    std::map<std::string, uint32_t> playerLatencies;
+    if (playerListEnabled) {
+        for (const auto& [peerId, name] : transport_.peers()) {
+            (void)name;
+            if (auto latency = peer_latency_ms(peerId))
+                playerLatencies.emplace(peerId, *latency);
+        }
+    }
     update_visual_overlays(status.enabled, chatAvailable, remoteGameplayReady, nameLabelsEnabled,
                            remoteModelEnabled, playerListEnabled, status.room,
                            (status.mode == net::Mode::DirectHost || status.isOwner) ?
                                "hosting" : "connected",
                            status.name,
-                           peerPoses_, transport_.peers(), playerLocations, promptView);
+                           peerPoses_, transport_.peers(), playerLocations, playerLatencies,
+                           promptView);
     dusk::multiplayer::set_remote_actor_options(
                                                 dusk::multiplayer::kRemoteMidnaStreamingEnabled &&
                                                     displayMidnaEnabled,
@@ -3819,6 +3828,7 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
             return ApplyResult::Applied;
         case MessageDomain::Presence:
             if (type == "presence") {
+                observe_latency_presence(message);
                 const auto field = message.payload.find("player_color");
                 if (field != message.payload.end()) {
                     if (!field->is_string()) return reject("invalid player colour");
@@ -4186,16 +4196,92 @@ void GameAdapter::set_player_color(uint32_t color, uint32_t outfit) {
 
 void GameAdapter::publish_player_color() {
     if (!transport_.status().enabled) return;
+    const auto now = std::chrono::steady_clock::now();
     nlohmann::json message = {{"type", "presence"},
                              {"player_color", appearance::color_string(appearance::local_color())},
-                             {"outfit_color", appearance::color_string(appearance::local_outfit_color())}};
+                             {"outfit_color", appearance::color_string(appearance::local_outfit_color())},
+                             {"latency_probe", ++nextLatencyNonce_}};
+    nlohmann::json echoes = nlohmann::json::object();
+    for (const auto& [peerId, probe] : latencyEchoes_) {
+        const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - probe.receivedAt).count();
+        if (wait >= 0 && wait <= 10000 && peerNames_.contains(peerId)) {
+            echoes[peerId] = {{"nonce", probe.nonce}, {"wait_ms", wait}};
+        }
+    }
+    if (!echoes.empty()) message["latency_echoes"] = std::move(echoes);
     const char* stage = dComIfGp_getStartStageName();
     if (stage && stage[0]) {
         message["stage"] = stage;
         message["room"] = static_cast<int>(dComIfGp_roomControl_getStayNo());
         message["layer"] = static_cast<int>(dComIfGp_getStartStageLayer());
     }
-    transport_.send(message);
+    if (transport_.send(message)) {
+        latencySent_.emplace_back(nextLatencyNonce_, now);
+        if (latencySent_.size() > 16) latencySent_.pop_front();
+    }
+}
+
+void GameAdapter::observe_latency_presence(const RoutedMessage& message) {
+    if (!peerNames_.contains(message.peerId)) return;
+    const auto now = std::chrono::steady_clock::now();
+    const auto probe = message.payload.find("latency_probe");
+    if (probe != message.payload.end() && probe->is_number_unsigned()) {
+        const uint64_t nonce = probe->get<uint64_t>();
+        if (nonce != 0) latencyEchoes_[message.peerId] = {nonce, now};
+    }
+
+    const auto echoes = message.payload.find("latency_echoes");
+    if (echoes == message.payload.end() || !echoes->is_object()) return;
+    const net::Status status = transport_.status();
+    const std::string localPeerId = status.mode == net::Mode::DirectHost ?
+        "direct" : status.clientId;
+    const auto echo = echoes->find(localPeerId);
+    if (echo == echoes->end() || !echo->is_object()) return;
+    const auto nonceField = echo->find("nonce");
+    const auto waitField = echo->find("wait_ms");
+    if (nonceField == echo->end() || !nonceField->is_number_unsigned() ||
+        waitField == echo->end() || !waitField->is_number_integer()) return;
+    const uint64_t nonce = nonceField->get<uint64_t>();
+    const int64_t wait = waitField->get<int64_t>();
+    if (wait < 0 || wait > 10000) return;
+    const auto previous = latencySamples_.find(message.peerId);
+    if (previous != latencySamples_.end() && nonce <= previous->second.nonce) return;
+    const auto sent = std::find_if(latencySent_.begin(), latencySent_.end(),
+        [nonce](const auto& value) { return value.first == nonce; });
+    if (sent == latencySent_.end()) return;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - sent->second).count();
+    if (elapsed < wait || elapsed - wait > 10000) return;
+    latencySamples_[message.peerId] = {
+        nonce, static_cast<uint32_t>(elapsed - wait), now};
+}
+
+std::optional<uint32_t> GameAdapter::current_peer_latency_ms(
+    std::string_view peerId, std::chrono::steady_clock::time_point now) const {
+    if (auto direct = transport_.direct_peer_rtt_ms(peerId)) return direct;
+    if (transport_.status().mode == net::Mode::CloudRoom) return std::nullopt;
+    const auto sample = latencySamples_.find(std::string(peerId));
+    if (sample == latencySamples_.end() ||
+        now - sample->second.receivedAt > std::chrono::seconds(5)) return std::nullopt;
+    return sample->second.milliseconds;
+}
+
+std::optional<uint32_t> GameAdapter::peer_latency_ms(std::string_view peerId) const {
+    const auto now = std::chrono::steady_clock::now();
+    if (displayedLatenciesAt_ == std::chrono::steady_clock::time_point{} ||
+        now - displayedLatenciesAt_ >= std::chrono::seconds(1)) {
+        displayedLatenciesAt_ = now;
+        displayedLatencies_.clear();
+        for (const auto& [id, name] : transport_.peers()) {
+            (void)name;
+            if (auto latency = current_peer_latency_ms(id, now))
+                displayedLatencies_.emplace(id, *latency);
+        }
+    }
+    const auto display = displayedLatencies_.find(std::string(peerId));
+    return display == displayedLatencies_.end() ? std::nullopt :
+        std::optional<uint32_t>(display->second);
 }
 
 void GameAdapter::consume_welcome_membership(const nlohmann::json& message) {
@@ -4232,6 +4318,9 @@ void GameAdapter::peer_left(std::string_view peerId) {
     peerNames_.erase(key);
     appearance::forget_peer(key);
     peerPresence_.erase(key);
+    latencyEchoes_.erase(key);
+    latencySamples_.erase(key);
+    displayedLatencies_.erase(key);
     peerProgressionStates_.erase(key);
     peerProgressionAges_.erase(key);
     peerPoses_.erase(key);
@@ -4305,6 +4394,12 @@ void GameAdapter::reset_session() {
     peerNames_.clear();
     appearance::reset_peers();
     peerPresence_.clear();
+    latencyEchoes_.clear();
+    latencySamples_.clear();
+    latencySent_.clear();
+    nextLatencyNonce_ = 0;
+    displayedLatencies_.clear();
+    displayedLatenciesAt_ = {};
     peerProgressionStates_.clear();
     peerProgressionAges_.clear();
     peerPoses_.clear();

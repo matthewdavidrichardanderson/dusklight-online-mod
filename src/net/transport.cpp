@@ -2513,6 +2513,11 @@ const std::map<std::string, std::string>& Transport::peers() const {
     return impl_->peerNames;
 }
 
+std::optional<uint32_t> Transport::direct_peer_rtt_ms(std::string_view peerId) const {
+    if (!impl_->meshEnabled) return std::nullopt;
+    return impl_->connections.mesh_direct_rtt_ms(peerId);
+}
+
 bool Transport::has_events() const {
     return !impl_->events.empty();
 }

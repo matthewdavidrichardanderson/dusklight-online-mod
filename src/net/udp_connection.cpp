@@ -659,6 +659,14 @@ bool UdpConnection::mesh_direct(std::string_view peerId) const {
     const Id id = impl_->logical_peer(peer_number(peerId));
     return id != invalid && impl_->direct(impl_->peers.at(id), clock_ms());
 }
+std::optional<uint32_t> UdpConnection::mesh_direct_rtt_ms(std::string_view peerId) const {
+    std::lock_guard lock(impl_->mutex);
+    const Id id = impl_->logical_peer(peer_number(peerId));
+    if (id == invalid) return std::nullopt;
+    const auto& peer = impl_->peers.at(id);
+    if (!impl_->direct(peer, clock_ms())) return std::nullopt;
+    return peer.probeRtt;
+}
 std::string UdpConnection::mesh_diagnostics(std::string_view peerId) const {
     std::lock_guard lock(impl_->mutex);
     const Id id = impl_->logical_peer(peer_number(peerId));

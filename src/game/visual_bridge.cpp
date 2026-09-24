@@ -140,6 +140,7 @@ std::string sLocalName;
 std::map<std::string, PeerPoseSnapshot> sPoses;
 std::map<std::string, std::string> sNames;
 std::map<std::string, PlayerLocationView> sLocations;
+std::map<std::string, uint32_t> sLatencies;
 std::unique_ptr<NameLabelFontAtlas> sFontAtlas;
 ProgressionPromptView sProgressionPrompt;
 std::vector<Notification> sNotifications;
@@ -566,6 +567,7 @@ void draw_imgui_player_list() {
         std::string name;
         std::string status;
         std::string area;
+        std::string ping;
         bool local = false;
     };
     std::vector<Row> rows;
@@ -575,14 +577,17 @@ void draw_imgui_player_list() {
                     localStage != nullptr && localStage[0] != '\0' ?
                         player_location_name(localStage,
                             int(dComIfGp_roomControl_getStayNo())) : "Unknown",
+                    "",
                     true});
     for (const auto& [peerId, peerName] : sNames) {
         const auto location = sLocations.find(peerId);
+        const auto latency = sLatencies.find(peerId);
         rows.push_back({
             peerName.empty() ? peerId : peerName,
             "connected",
             location != sLocations.end() ?
                 player_location_name(location->second.stage, location->second.room) : "Unknown",
+            latency != sLatencies.end() ? std::to_string(latency->second) + " ms" : "--",
             false});
     }
     if (rows.empty()) return;
@@ -610,13 +615,14 @@ void draw_imgui_player_list() {
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - titleSize.x) * 0.5f);
         ImGui::TextUnformatted(title.c_str());
         ImGui::Separator();
-        if (ImGui::BeginTable("OnlinePlayers", 3,
+        if (ImGui::BeginTable("OnlinePlayers", 4,
                               ImGuiTableFlags_SizingStretchProp |
                                   ImGuiTableFlags_NoSavedSettings,
                               ImVec2(-1.0f, 0.0f))) {
-            ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 0.38f);
-            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 0.22f);
-            ImGui::TableSetupColumn("Area", ImGuiTableColumnFlags_WidthStretch, 0.40f);
+            ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 0.34f);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 0.18f);
+            ImGui::TableSetupColumn("Area", ImGuiTableColumnFlags_WidthStretch, 0.34f);
+            ImGui::TableSetupColumn("Ping", ImGuiTableColumnFlags_WidthStretch, 0.14f);
             ImGui::TableHeadersRow();
             for (const Row& row : rows) {
                 ImGui::TableNextRow();
@@ -632,6 +638,8 @@ void draw_imgui_player_list() {
                 ImGui::TextUnformatted(row.status.c_str());
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(row.area.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(row.ping.c_str());
             }
             ImGui::EndTable();
         }
@@ -1248,6 +1256,7 @@ void update_visual_overlays(
     const std::map<std::string, PeerPoseSnapshot>& poses,
     const std::map<std::string, std::string>& names,
     const std::map<std::string, PlayerLocationView>& locations,
+    const std::map<std::string, uint32_t>& latencies,
     const ProgressionPromptView& progressionPrompt) {
     sConnected = connected;
     sChatAvailable = chatAvailable;
@@ -1262,6 +1271,7 @@ void update_visual_overlays(
     sPoses = poses;
     sNames = names;
     sLocations = locations;
+    sLatencies = latencies;
     sProgressionPrompt = progressionPrompt;
 }
 
@@ -1311,6 +1321,7 @@ void reset_visual_overlays() {
     sPoses.clear();
     sNames.clear();
     sLocations.clear();
+    sLatencies.clear();
     sRoom.clear();
     sLocalStatus.clear();
     sLocalName.clear();

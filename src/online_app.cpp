@@ -18,6 +18,7 @@
 #include <cctype>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -365,6 +366,15 @@ window content pane.online-lobby-choice-pane > select-button.group-button {
     flex: 1 1 auto;
     min-width: 0;
     font-size: 20dp;
+}
+.online-player-ping {
+    display: block;
+    flex: 0 0 92dp;
+    width: 92dp;
+    margin-left: 10dp;
+    text-align: right;
+    font-family: "Fira Sans Condensed";
+    color: rgba(224, 219, 200, 72%);
 }
 .online-player-empty {
     display: block;
@@ -1263,9 +1273,14 @@ void OnlineApp::refresh_inline_player_rows() {
                 slot.kickPending = false;
             }
             slot.peerName = peerName;
+            const auto latency = game_ != nullptr ?
+                game_->peer_latency_ms(peer->first) : std::nullopt;
+            const std::string ping = latency ?
+                std::to_string(*latency) + " ms" : "--";
             const std::string identity =
                 "<span class=\"online-player-indicator\"></span>"
-                "<span class=\"online-player-name\">" + rml_escape(peerName) + "</span>";
+                "<span class=\"online-player-name\">" + rml_escape(peerName) + "</span>"
+                "<span class=\"online-player-ping\">" + ping + "</span>";
             if (slot.identity != 0 && identity != slot.renderedIdentity) {
                 if (svc_ui->elem_set_rml(mod_ctx, slot.identity, identity.c_str()) != MOD_OK) {
                     slot.identity = 0;

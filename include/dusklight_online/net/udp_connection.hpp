@@ -3,6 +3,7 @@
 #include "dusklight_online/net/ice_agent.hpp"
 #include <string_view>
 #include <string>
+#include <optional>
 
 namespace dusklight_online::net {
 // Native carrier/session adapter. Game transport depends on this connection
@@ -46,6 +47,7 @@ public:
         uint32_t* queuedDatagrams = nullptr, uint64_t* queuedBytes = nullptr);
     int mesh_receive(std::string& peerId, std::span<uint8_t> bytes);
     bool mesh_direct(std::string_view peerId) const;
+    std::optional<uint32_t> mesh_direct_rtt_ms(std::string_view peerId) const;
     // Redacted ICE state/counters for diagnostics; never includes SDP or IPs.
     std::string mesh_diagnostics(std::string_view peerId) const;
     // Explicit ICE retry retains the logical session and reliable queues.
