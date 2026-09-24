@@ -370,6 +370,7 @@ window content pane.online-lobby-choice-pane > select-button.group-button {
 }
 .online-player-indicator {
     display: block;
+    flex: 0 0 8dp;
     width: 8dp;
     height: 8dp;
     margin-right: 11dp;
@@ -379,18 +380,23 @@ window content pane.online-lobby-choice-pane > select-button.group-button {
 }
 .online-player-name {
     display: block;
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
     font-size: 20dp;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .online-player-ping {
     display: block;
-    flex: 0 0 92dp;
-    width: 92dp;
-    margin-left: 10dp;
+    flex: 0 0 76dp;
+    width: 76dp;
+    margin-left: 6dp;
     text-align: right;
     font-family: "Fira Sans Condensed";
+    font-size: 18dp;
     color: rgba(224, 219, 200, 72%);
+    white-space: nowrap;
 }
 .online-player-empty {
     display: block;
