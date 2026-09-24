@@ -102,6 +102,7 @@ private:
     std::map<std::string, std::string> peerNames_;
     std::map<std::string, nlohmann::json> peerPresence_;
     std::optional<PlayerLocationView::FieldMapMarker> liveFieldMapMarker_;
+    mutable std::optional<net::udp::VoicePosition> lastVoicePosition_;
     struct LatencyProbe {
         uint64_t nonce = 0;
         std::chrono::steady_clock::time_point receivedAt{};

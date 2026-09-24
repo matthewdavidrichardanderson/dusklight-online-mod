@@ -4466,34 +4466,49 @@ std::optional<uint32_t> GameAdapter::peer_latency_ms(std::string_view peerId) co
 }
 
 std::optional<net::udp::VoicePosition> GameAdapter::voice_position() const {
-    if (!stage_ready()) return std::nullopt;
-    const auto* local = dComIfGp_getPlayer(0);
-    const char* stage = dComIfGp_getStartStageName();
-    if (local == nullptr || stage == nullptr || std::strlen(stage) >= 8) return std::nullopt;
-    net::udp::VoicePosition position;
-    std::memcpy(position.stageName, stage, std::strlen(stage));
-    position.x = local->current.pos.x;
-    position.y = local->current.pos.y;
-    position.z = local->current.pos.z;
-    position.room = static_cast<int8_t>(dComIfGp_roomControl_getStayNo());
-    return position;
+    if (opening_or_title_active()) {
+        lastVoicePosition_.reset();
+        return std::nullopt;
+    }
+    // Gameplay sync waits for events to finish, but Link can still be present
+    // and moving during doors, cutscenes, and the Game Over sequence.
+    if (dComIfGp_getStageStagInfo() != nullptr &&
+        !dComIfGp_isEnableNextStage() &&
+        !fopOvlpM_IsPeek() && !fopOvlpM_IsDoingReq()) {
+        const auto* local = dComIfGp_getPlayer(0);
+        const char* stage = dComIfGp_getStartStageName();
+        if (local != nullptr && stage != nullptr && stage[0] != '\0' &&
+            std::strlen(stage) < 8 &&
+            std::isfinite(local->current.pos.x) &&
+            std::isfinite(local->current.pos.y) &&
+            std::isfinite(local->current.pos.z)) {
+            net::udp::VoicePosition position;
+            std::memcpy(position.stageName, stage, std::strlen(stage));
+            position.x = local->current.pos.x;
+            position.y = local->current.pos.y;
+            position.z = local->current.pos.z;
+            position.room = static_cast<int8_t>(dComIfGp_roomControl_getStayNo());
+            lastVoicePosition_ = position;
+            return position;
+        }
+    }
+    // During a room load the actor may disappear briefly. Keep the last safe
+    // position until Link returns, the title loads, or the lobby is left.
+    return lastVoicePosition_;
 }
 
 float GameAdapter::voice_gain(const net::udp::VoicePosition& position,
                               int rangePercent) const {
-    if (!stage_ready()) return 0.0f;
-    const auto* local = dComIfGp_getPlayer(0);
-    const char* stage = dComIfGp_getStartStageName();
-    if (local == nullptr || stage == nullptr ||
-        std::strncmp(position.stageName, stage, 8) != 0 ||
+    const auto local = voice_position();
+    if (!local ||
+        std::strncmp(position.stageName, local->stageName, 8) != 0 ||
         !std::isfinite(position.x) || !std::isfinite(position.y) ||
         !std::isfinite(position.z) ||
-        !std::isfinite(local->current.pos.x) ||
-        !std::isfinite(local->current.pos.y) ||
-        !std::isfinite(local->current.pos.z)) return 0.0f;
-    const float dx = position.x - local->current.pos.x;
-    const float dy = position.y - local->current.pos.y;
-    const float dz = position.z - local->current.pos.z;
+        !std::isfinite(local->x) || !std::isfinite(local->y) ||
+        !std::isfinite(local->z)) return 0.0f;
+    const float dx = position.x - local->x;
+    const float dy = position.y - local->y;
+    const float dz = position.z - local->z;
     const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
     // Scale the entire fade so 50% preserves the original 4000-unit reach.
     const float rangeScale = std::clamp(rangePercent, 0, 200) / 50.0f;
@@ -4507,7 +4522,9 @@ float GameAdapter::voice_gain(const net::udp::VoicePosition& position,
 }
 
 float GameAdapter::voice_pan(const net::udp::VoicePosition& position) const {
-    if (!stage_ready()) return 0.5f;
+    if (dComIfGp_getStageStagInfo() == nullptr ||
+        dComIfGp_isEnableNextStage() ||
+        fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq()) return 0.5f;
     const char* stage = dComIfGp_getStartStageName();
     Z2AudioMgr* audio = Z2GetAudioMgr();
     if (stage == nullptr || audio == nullptr ||
@@ -4625,6 +4642,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
 
 void GameAdapter::reset_session() {
     liveFieldMapMarker_.reset();
+    lastVoicePosition_.reset();
     reset_floor_switch_state(true);
     sVisualWireTrace = {};
     reset_local_pose_state();
