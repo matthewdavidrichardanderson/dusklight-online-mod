@@ -357,8 +357,15 @@ int safe_line_method_call(create_tag_class* createTag, method_filter* filter) {
     if (createTag == nullptr || filter == nullptr || !cTg_IsUse(createTag)) return 0;
     auto* process = static_cast<base_process_class*>(createTag->mpTagData);
     const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(process);
-    if (address < 0x10000 ||
-        (sizeof(std::uintptr_t) == 8 && address > 0x00007FFFFFFFFFFFULL) ||
+#if defined(__ANDROID__) && defined(__aarch64__)
+    // Android tags the top byte of heap pointers. Check the address bits, but
+    // keep the original tagged pointer when accessing the process.
+    const std::uintptr_t addressToCheck = address & 0x00FFFFFFFFFFFFFFULL;
+#else
+    const std::uintptr_t addressToCheck = address;
+#endif
+    if (addressToCheck < 0x10000 ||
+        (sizeof(std::uintptr_t) == 8 && addressToCheck > 0x00007FFFFFFFFFFFULL) ||
         process->state.init_state == 3 || process->layer_tag.layer == nullptr) {
         return 0;
     }
