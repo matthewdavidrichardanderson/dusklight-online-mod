@@ -114,6 +114,7 @@ DEFINE_HOOK(&daDoor20_c::chkStopOpen, Door20StopOpenHook);
 DEFINE_HOOK(&daObjMirrorTable_c::execute, MirrorTableExecuteHook);
 DEFINE_HOOK_SYMBOL("daObjMirrorChain_Draw", int(daObjMirrorChain_c*), MirrorChainDrawHook);
 DEFINE_HOOK(&dSv_info_c::onSwitch, InfoSwitchOnHook);
+DEFINE_HOOK(&dSv_info_c::offSwitch, InfoSwitchOffHook);
 DEFINE_HOOK(&daAlink_c::getDamageVec, PvpDamageVectorHook);
 DEFINE_HOOK(&daArrow_c::atHitCallBack, BombArrowPvpHitHook);
 DEFINE_HOOK(&daAlink_c::checkEnemyGroup, RemoteEnemyGroupHook);
@@ -276,6 +277,7 @@ std::vector<int> sRemoteMoveboxPushPullKeepStack;
 std::unordered_map<void*, int> sDoor20ExecuteModes;
 uint32_t sDoor20StopOpenDepth = 0;
 std::vector<bool> sInfoSwitchWasSetStack;
+std::vector<bool> sInfoSwitchWasSetOffStack;
 std::vector<bool> sMemorySwitchWasSetStack;
 std::vector<bool> sMemorySwitchWasSetOffStack;
 std::vector<bool> sItemFirstWasOwnedStack;
@@ -723,6 +725,10 @@ bool is_web_switch_actor(int actorName) {
     return actorName == fpcNm_OBJ_WEB0_e || actorName == fpcNm_OBJ_WEB1_e;
 }
 
+bool is_live_torch_switch_actor(int actorName) {
+    return actorName == fpcNm_Obj_Lv1Cdl00_e;
+}
+
 bool is_permanent_room_actor(int actorName) {
     switch (actorName) {
     case fpcNm_BkyRock_e:
@@ -800,10 +806,12 @@ void* exact_local_switch_actor_context(bool set) {
             !(actor == fpcNm_DOOR20_e && sDoor20StopOpenDepth != 0)) {
             return process;
         }
-        if (is_web_switch_actor(actor) || is_room_action_actor(actor)) return process;
+        if (is_web_switch_actor(actor) || is_room_action_actor(actor) ||
+            is_live_torch_switch_actor(actor)) return process;
     } else {
         if (actor == fpcNm_Obj_Timer_e || actor == fpcNm_Obj_Movebox_e ||
-            actor == fpcNm_Obj_RotStair_e || actor == fpcNm_Obj_IceBlock_e) return process;
+            actor == fpcNm_Obj_RotStair_e || actor == fpcNm_Obj_IceBlock_e ||
+            is_live_torch_switch_actor(actor)) return process;
     }
     return nullptr;
 }
@@ -2055,9 +2063,14 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
     const int actorName = fpcM_GetName(process);
     const bool webSwitch = is_web_switch_actor(actorName);
     const bool permanentActor = is_permanent_room_actor(actorName);
+    const bool liveTorch = is_live_torch_switch_actor(actorName) &&
+                           flag >= dSv_info_c::MEMORY_SWITCH + dSv_info_c::DAN_SWITCH &&
+                           (fpcM_GetParam(process) & 0xFF) == static_cast<uint32_t>(flag);
     if (flag < 0 || flag >= 0xFF || room < 0 || room >= 64 ||
-        (!is_small_key_door_switch_actor(actorName) && !webSwitch && !permanentActor) ||
-        (!webSwitch && !permanentActor && flag < dSv_info_c::MEMORY_SWITCH) ||
+        (!is_small_key_door_switch_actor(actorName) && !webSwitch && !permanentActor &&
+         !liveTorch) ||
+        (!webSwitch && !permanentActor && !liveTorch &&
+         flag < dSv_info_c::MEMORY_SWITCH) ||
         (permanentActor &&
          permanent_room_actor_switch_flag(actorName, fopAcM_GetParam(process)) != flag)) return;
     const int stage = current_stage_table();
@@ -2073,8 +2086,41 @@ void info_switch_on_post(ModContext*, void* args, void*, void*) {
         {"type", "room_switch_bit"}, {"stage", stage}, {"flag", flag}, {"room", room},
         {"source_actor", actorName}, {"source_room", room},
         {"source_params", fpcM_GetParam(process)},
-        {"source_action", 0},
+        {"source_action", 0}, {"set", true},
         {"source_stage", stageName != nullptr ? stageName : ""},
+    });
+}
+
+HookAction info_switch_off_pre(ModContext*, void* args, void*, void*) {
+    auto* info = mods::arg<dSv_info_c*>(args, 0);
+    const int flag = mods::arg<int>(args, 1);
+    const int room = mods::arg<int>(args, 2);
+    const bool valid = info != nullptr && flag >= 0 && flag < 0xFF &&
+                       room >= 0 && room < 64;
+    sInfoSwitchWasSetOffStack.push_back(valid && info->isSwitch(flag, room));
+    return HOOK_CONTINUE;
+}
+
+void info_switch_off_post(ModContext*, void* args, void*, void*) {
+    const bool wasSet = !sInfoSwitchWasSetOffStack.empty() &&
+                        sInfoSwitchWasSetOffStack.back();
+    if (!sInfoSwitchWasSetOffStack.empty()) sInfoSwitchWasSetOffStack.pop_back();
+    if (!wasSet || sActiveAdapter == nullptr || sActiveAdapter->applying_remote()) return;
+    const int flag = mods::arg<int>(args, 1);
+    const int room = mods::arg<int>(args, 2);
+    void* process = exact_local_switch_actor_context(false);
+    if (process == nullptr || !is_live_torch_switch_actor(fpcM_GetName(process)) ||
+        flag < dSv_info_c::MEMORY_SWITCH + dSv_info_c::DAN_SWITCH ||
+        flag >= 0xFF || room < 0 || room >= 64 ||
+        (fpcM_GetParam(process) & 0xFF) != static_cast<uint32_t>(flag)) return;
+    const int stage = current_stage_table();
+    const char* stageName = dComIfGp_getStartStageName();
+    if (!valid_stage(stage) || stageName == nullptr) return;
+    sActiveAdapter->publish_local({
+        {"type", "room_switch_bit"}, {"stage", stage}, {"flag", flag}, {"room", room},
+        {"source_actor", fpcM_GetName(process)}, {"source_room", room},
+        {"source_params", fpcM_GetParam(process)}, {"source_stage", stageName},
+        {"set", false},
     });
 }
 
@@ -2446,7 +2492,9 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_pre<MirrorTableExecuteHook>(&mirror_table_execute_pre) != MOD_OK ||
         mods::hook::add_pre<MirrorChainDrawHook>(&mirror_chain_draw_pre) != MOD_OK ||
         mods::hook::add_pre<InfoSwitchOnHook>(&info_switch_on_pre) != MOD_OK ||
-        mods::hook::add_post<InfoSwitchOnHook>(&info_switch_on_post) != MOD_OK) {
+        mods::hook::add_post<InfoSwitchOnHook>(&info_switch_on_post) != MOD_OK ||
+        mods::hook::add_pre<InfoSwitchOffHook>(&info_switch_off_pre) != MOD_OK ||
+        mods::hook::add_post<InfoSwitchOffHook>(&info_switch_off_post) != MOD_OK) {
         shutdown_hooks();
         return mods::set_error(error, MOD_UNAVAILABLE,
                                "required progression mutation hooks are unavailable");
@@ -2482,6 +2530,7 @@ void GameAdapter::shutdown_hooks() {
         saveObserver_ = 0;
     }
     mods::hook::uninstall<InfoSwitchOnHook>();
+    mods::hook::uninstall<InfoSwitchOffHook>();
     mods::hook::uninstall<MirrorTableExecuteHook>();
     mods::hook::uninstall<MirrorChainDrawHook>();
     mods::hook::uninstall<Door20StopOpenHook>();
@@ -2543,6 +2592,7 @@ void GameAdapter::shutdown_hooks() {
     sDoor20ExecuteModes.clear();
     sDoor20StopOpenDepth = 0;
     sInfoSwitchWasSetStack.clear();
+    sInfoSwitchWasSetOffStack.clear();
     sMemorySwitchWasSetStack.clear();
     sMemorySwitchWasSetOffStack.clear();
     sItemFirstWasOwnedStack.clear();
@@ -5088,20 +5138,25 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         }
         const bool webSwitch = is_web_switch_actor(sourceActor);
         const bool permanentActor = is_permanent_room_actor(sourceActor);
-        if (!is_small_key_door_switch_actor(sourceActor) && !webSwitch && !permanentActor) {
+        const bool liveTorch = is_live_torch_switch_actor(sourceActor);
+        if (!is_small_key_door_switch_actor(sourceActor) && !webSwitch && !permanentActor &&
+            !liveTorch) {
             return ApplyResult::IgnoredByPolicy;
         }
-        if (!webSwitch && !permanentActor && flag < dSv_info_c::MEMORY_SWITCH) {
+        if (!webSwitch && !permanentActor && !liveTorch &&
+            flag < dSv_info_c::MEMORY_SWITCH) {
             return reject("invalid key-door room_switch_bit flag");
         }
         if (stage != current_stage_table()) return ApplyResult::IgnoredByPolicy;
-        if (webSwitch || permanentActor) {
+        if (webSwitch || permanentActor || liveTorch) {
             const char* currentStage = dComIfGp_getStartStageName();
             const std::string sourceStage = message.value("source_stage", std::string());
             const uint32_t sourceParams = message.value("source_params", 0xFFFFFFFFU);
             const int sourceRoom = message.value("source_room", -1);
             if (currentStage == nullptr || sourceStage != currentStage || sourceRoom != room ||
                 (webSwitch && static_cast<int>((sourceParams >> 24) & 0xFF) != flag) ||
+                (liveTorch && (flag < dSv_info_c::MEMORY_SWITCH + dSv_info_c::DAN_SWITCH ||
+                               static_cast<int>(sourceParams & 0xFF) != flag)) ||
                 (permanentActor &&
                  permanent_room_actor_switch_flag(sourceActor, sourceParams) != flag) ||
                 dComIfGp_roomControl_getStayNo() != room) {
@@ -5122,7 +5177,11 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
                        ? ApplyResult::Applied
                        : ApplyResult::IgnoredByPolicy;
         }
-        dComIfGs_onSwitch(flag, room);
+        if (liveTorch && !message.value("set", true)) {
+            dComIfGs_offSwitch(flag, room);
+        } else {
+            dComIfGs_onSwitch(flag, room);
+        }
         if (webSwitch) {
             repair_remote_web_actor(sourceActor, room, flag,
                                     message.value("source_params", 0xFFFFFFFFU));
