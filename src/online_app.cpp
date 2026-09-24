@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include <SDL3/SDL_scancode.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -668,6 +670,13 @@ void OnlineApp::match_player_colour() {
 }
 
 void OnlineApp::update() {
+    if (const auto binding = game::take_voice_mute_hotkey_binding()) {
+        svc_config->set_int(mod_ctx, config_.voiceMuteHotkey, *binding);
+    }
+    if (game::take_voice_mute_hotkey_toggle() && bool_value(config_.voiceEnabled)) {
+        svc_config->set_bool(mod_ctx, config_.voiceMicMuted,
+                             !bool_value(config_.voiceMicMuted));
+    }
     using TimingClock = std::chrono::steady_clock;
     struct PoseTiming {
         TimingClock::time_point start = TimingClock::now(), previous = start;
@@ -939,11 +948,16 @@ void OnlineApp::update() {
     const net::Status currentStatus = transport_.status();
     // A direct host owns a lobby before any guests arrive. Joiners must
     // receive welcome; a connected socket alone is not lobby membership.
-    game::appearance::set_lobby_active(currentStatus.enabled &&
+    const bool lobbyActive = currentStatus.enabled &&
         (currentStatus.mode == net::Mode::DirectHost
             ? (currentStatus.state == net::State::Listening ||
                currentStatus.state == net::State::Connected)
-            : currentStatus.welcomed));
+            : currentStatus.welcomed);
+    game::appearance::set_lobby_active(lobbyActive);
+    game::set_voice_mute_indicator(lobbyActive && kVoiceRuntimeAvailable &&
+                                   voice_ != nullptr &&
+                                   bool_value(config_.voiceEnabled) &&
+                                   bool_value(config_.voiceMicMuted));
     if (protocolFatal) return;
     const bool syncFlagsEnabled = currentStatus.enabled ? currentStatus.settings.syncFlags :
         bool_value(config_.syncFlags, true);
@@ -987,10 +1001,26 @@ void OnlineApp::update() {
     if (manualSyncCooldownTicks_ > 0 && --manualSyncCooldownTicks_ == 0) {
         set_manual_sync_pending_visual(false);
     }
+    const int muteHotkey = static_cast<int>(std::clamp(
+        int_value(config_.voiceMuteHotkey, SDL_SCANCODE_M),
+        int64_t{SDL_SCANCODE_UNKNOWN}, int64_t{SDL_SCANCODE_COUNT - 1}));
+    game::configure_voice_mute_hotkey(muteHotkey, kVoiceRuntimeAvailable &&
+        voice_ != nullptr && bool_value(config_.voiceEnabled));
+    if (voiceMuteHotkeyText_ != 0) {
+        const std::string text = game::voice_mute_hotkey_capture_active() ?
+            "Press a key to bind (Esc cancels; Backspace clears)." :
+            "Mute hotkey: " + game::voice_mute_hotkey_name(muteHotkey);
+        if (text != renderedVoiceMuteHotkeyText_) {
+            if (svc_ui->elem_set_text(mod_ctx, voiceMuteHotkeyText_, text.c_str()) == MOD_OK)
+                renderedVoiceMuteHotkeyText_ = text;
+            else voiceMuteHotkeyText_ = 0;
+        }
+    }
     publish_live_options();
 }
 
 void OnlineApp::shutdown() {
+    game::cancel_voice_mute_hotkey_capture();
     if (voice_ != nullptr) voice_->stop();
     transport_.disconnect();
     game::appearance::set_lobby_active(false);
@@ -1009,6 +1039,8 @@ void OnlineApp::shutdown() {
         svc_ui->window_close(mod_ctx, voiceWindow_);
         voiceWindow_ = 0;
     }
+    voiceMuteHotkeyText_ = 0;
+    renderedVoiceMuteHotkeyText_.clear();
     if (settingsWindow_ != 0) {
         svc_ui->window_close(mod_ctx, settingsWindow_);
         settingsWindow_ = 0;
@@ -1098,7 +1130,9 @@ ModResult OnlineApp::register_config(ModError* error) {
         add_config("voice-player-volume", CONFIG_VAR_INT, nullptr, 100, false,
                    config_.playerVolume, error) != MOD_OK ||
         add_config("voice-proximity-range", CONFIG_VAR_INT, nullptr, 50, false,
-                   config_.voiceProximityRange, error) != MOD_OK) return MOD_ERROR;
+                   config_.voiceProximityRange, error) != MOD_OK ||
+        add_config("voice-mute-hotkey", CONFIG_VAR_INT, nullptr, SDL_SCANCODE_M, false,
+                   config_.voiceMuteHotkey, error) != MOD_OK) return MOD_ERROR;
     struct BoolVar { const char* name; bool value; ConfigVarHandle* handle; };
     const std::array booleans = {
         BoolVar{"match-outfit-color", true, &config_.matchOutfitColor},
@@ -1926,9 +1960,13 @@ ModResult OnlineApp::build_voice_tab(ModContext*, UiWindowHandle, UiElementHandl
     range.user_data = &app;
     range.help_rml = "<p>Adjust how far away you can hear other players. Their voices get quieter as they move away.</p>";
     svc_ui->pane_add_control(mod_ctx, left, &range, nullptr);
-    add_bound_control(left, UI_CONTROL_TOGGLE, "Mute microphone", app.config_.voiceMicMuted,
-                      0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
-                      "<p>Stop sending your voice while continuing to hear other players.</p>");
+    add_button(left, "Set mute hotkey", &OnlineApp::mute_hotkey_pressed, &app,
+               nullptr, nullptr, nullptr, nullptr,
+               "<p>Choose a key that toggles your microphone while playing.</p>");
+    const std::string hotkeyText = "Mute hotkey: " + game::voice_mute_hotkey_name(
+        static_cast<int>(app.int_value(app.config_.voiceMuteHotkey, SDL_SCANCODE_M)));
+    svc_ui->pane_add_text(mod_ctx, left, hotkeyText.c_str(), &app.voiceMuteHotkeyText_);
+    app.renderedVoiceMuteHotkeyText_ = hotkeyText;
     UiControlDesc input = UI_CONTROL_DESC_INIT;
     input.kind = UI_CONTROL_DROPDOWN;
     input.label = "Microphone input";
@@ -2197,11 +2235,19 @@ void OnlineApp::player_options_window_closed(ModContext*, UiWindowHandle, void* 
 }
 
 void OnlineApp::voice_window_closed(ModContext*, UiWindowHandle, void* data) {
-    static_cast<OnlineApp*>(data)->voiceWindow_ = 0;
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.voiceWindow_ = 0;
+    app.voiceMuteHotkeyText_ = 0;
+    app.renderedVoiceMuteHotkeyText_.clear();
+    game::cancel_voice_mute_hotkey_capture();
 }
 
 void OnlineApp::voice_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->open_voice_window();
+}
+
+void OnlineApp::mute_hotkey_pressed(ModContext*, void*) {
+    game::begin_voice_mute_hotkey_capture();
 }
 
 void OnlineApp::voice_input_get(ModContext*, void* data, UiControlValue* value) {

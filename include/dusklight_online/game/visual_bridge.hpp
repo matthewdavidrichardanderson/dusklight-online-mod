@@ -52,6 +52,14 @@ void push_online_player_notification(std::string playerName, std::string text,
                                      uint32_t color, float durationSeconds = 5.0f);
 void push_chat_message(std::string playerName, std::string text, uint32_t color);
 [[nodiscard]] std::optional<std::string> take_chat_submission();
+void configure_voice_mute_hotkey(int scancode, bool enabled);
+void begin_voice_mute_hotkey_capture();
+void cancel_voice_mute_hotkey_capture();
+[[nodiscard]] bool voice_mute_hotkey_capture_active();
+[[nodiscard]] std::optional<int> take_voice_mute_hotkey_binding();
+[[nodiscard]] bool take_voice_mute_hotkey_toggle();
+[[nodiscard]] std::string voice_mute_hotkey_name(int scancode);
+void set_voice_mute_indicator(bool visible);
 void reset_visual_overlays();
 
 }  // namespace dusklight_online::game

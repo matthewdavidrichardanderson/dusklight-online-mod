@@ -141,6 +141,12 @@ bool sGameplayReady = false;
 bool sNameLabelsEnabled = true;
 bool sRemoteModelEnabled = true;
 bool sPlayerListEnabled = false;
+bool sVoiceMuteIndicator = false;
+bool sVoiceMuteHotkeyEnabled = false;
+bool sVoiceMuteHotkeyCapture = false;
+bool sVoiceMuteHotkeyTogglePending = false;
+int sVoiceMuteHotkeyScancode = SDL_SCANCODE_M;
+std::optional<int> sVoiceMuteHotkeyBindingPending;
 std::string sRoom;
 std::string sLocalStatus;
 std::string sLocalName;
@@ -209,7 +215,42 @@ HookAction host_ui_event_pre(ModContext*, void* args, void*, void*) {
     sHostUiKeyRewritten = false;
     if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
         close_chat_input();
+        sVoiceMuteHotkeyCapture = false;
         return HOOK_CONTINUE;
+    }
+
+    if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+        if (sVoiceMuteHotkeyCapture) {
+            const SDL_Scancode key = event.key.scancode;
+            if (key == SDL_SCANCODE_ESCAPE) {
+                sVoiceMuteHotkeyCapture = false;
+            } else if (key == SDL_SCANCODE_BACKSPACE || key == SDL_SCANCODE_DELETE) {
+                sVoiceMuteHotkeyBindingPending = SDL_SCANCODE_UNKNOWN;
+                sVoiceMuteHotkeyCapture = false;
+            } else if (key > SDL_SCANCODE_UNKNOWN && key < SDL_SCANCODE_COUNT &&
+                       key != SDL_SCANCODE_LCTRL && key != SDL_SCANCODE_RCTRL &&
+                       key != SDL_SCANCODE_LALT && key != SDL_SCANCODE_RALT &&
+                       key != SDL_SCANCODE_LGUI && key != SDL_SCANCODE_RGUI &&
+                       key != SDL_SCANCODE_LSHIFT && key != SDL_SCANCODE_RSHIFT) {
+                sVoiceMuteHotkeyBindingPending = key;
+                sVoiceMuteHotkeyCapture = false;
+            }
+            sHostUiOriginalKey = event.key.key;
+            event.key.key = SDLK_UNKNOWN;
+            sHostUiKeyRewritten = true;
+            return HOOK_CONTINUE;
+        }
+        if (sVoiceMuteHotkeyEnabled && sVoiceMuteHotkeyScancode != SDL_SCANCODE_UNKNOWN &&
+            event.key.scancode == sVoiceMuteHotkeyScancode &&
+            (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) == 0 &&
+            !sChatInputActive && !sHostWantsKeyboard && !sHostDocumentWasVisible &&
+            !another_document_visible()) {
+            sVoiceMuteHotkeyTogglePending = true;
+            sHostUiOriginalKey = event.key.key;
+            event.key.key = SDLK_UNKNOWN;
+            sHostUiKeyRewritten = true;
+            return HOOK_CONTINUE;
+        }
     }
 
     // Only request the window here. It becomes active later, in the draw hook,
@@ -1273,6 +1314,39 @@ void draw_imgui_chat() {
     ImGui::PopStyleVar(9);
 }
 
+void draw_imgui_voice_mute_indicator() {
+    if (!sVoiceMuteIndicator) return;
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    if (viewport == nullptr) return;
+    u32 renderWidth = 0;
+    u32 renderHeight = 0;
+    AuroraGetRenderSize(&renderWidth, &renderHeight);
+    if (renderWidth == 0 || renderHeight == 0 ||
+        viewport->Size.x <= 0.0f || viewport->Size.y <= 0.0f) return;
+    // Aurora centers the rendered game image when its aspect ratio differs
+    // from the native window. Anchor the label to that image, not the window.
+    ImVec2 gamePos = viewport->Pos;
+    ImVec2 gameSize = viewport->Size;
+    const float gameAspect = static_cast<float>(renderWidth) / renderHeight;
+    if (gameSize.x / gameSize.y > gameAspect) {
+        gameSize.x = gameSize.y * gameAspect;
+        gamePos.x += (viewport->Size.x - gameSize.x) * 0.5f;
+    } else {
+        gameSize.y = gameSize.x / gameAspect;
+        gamePos.y += (viewport->Size.y - gameSize.y) * 0.5f;
+    }
+    const float fontSize = ImGui::GetFontSize() * 1.25f;
+    const ImVec2 position(gamePos.x + 12.0f * viewport->DpiScale,
+                          gamePos.y + 12.0f * viewport->DpiScale);
+    const ImVec2 shadowPosition(position.x + 1.0f * viewport->DpiScale,
+                                position.y + 1.0f * viewport->DpiScale);
+    ImDrawList* draw = ImGui::GetForegroundDrawList(viewport);
+    draw->PushClipRect(gamePos, ImVec2(gamePos.x + gameSize.x, gamePos.y + gameSize.y), true);
+    draw->AddText(ImGui::GetFont(), fontSize, shadowPosition, IM_COL32(0, 0, 0, 110), "mic muted");
+    draw->AddText(ImGui::GetFont(), fontSize, position, IM_COL32(255, 85, 85, 255), "mic muted");
+    draw->PopClipRect();
+}
+
 void draw_host_imgui_overlays() {
     // Capture the host's pre-existing keyboard ownership before our chat
     // window contributes to it. The next SDL event uses this to avoid opening
@@ -1283,6 +1357,7 @@ void draw_host_imgui_overlays() {
     // console during that earlier dispatch, so retain the preceding frame's
     // visibility to identify the Enter as belonging to Dusk rather than chat.
     sHostDocumentWasVisible = another_document_visible();
+    draw_imgui_voice_mute_indicator();
     draw_imgui_player_list();
     draw_imgui_progression_prompt();
     draw_imgui_notifications();
@@ -1515,12 +1590,81 @@ std::optional<std::string> take_chat_submission() {
     return std::exchange(sPendingChatSubmission, std::nullopt);
 }
 
+void configure_voice_mute_hotkey(int scancode, bool enabled) {
+    sVoiceMuteHotkeyScancode = scancode > SDL_SCANCODE_UNKNOWN && scancode < SDL_SCANCODE_COUNT ?
+        scancode : SDL_SCANCODE_UNKNOWN;
+    sVoiceMuteHotkeyEnabled = enabled;
+}
+
+void begin_voice_mute_hotkey_capture() {
+    sVoiceMuteHotkeyBindingPending.reset();
+    sVoiceMuteHotkeyCapture = true;
+}
+
+void cancel_voice_mute_hotkey_capture() {
+    sVoiceMuteHotkeyCapture = false;
+}
+
+bool voice_mute_hotkey_capture_active() {
+    return sVoiceMuteHotkeyCapture;
+}
+
+std::optional<int> take_voice_mute_hotkey_binding() {
+    return std::exchange(sVoiceMuteHotkeyBindingPending, std::nullopt);
+}
+
+bool take_voice_mute_hotkey_toggle() {
+    return std::exchange(sVoiceMuteHotkeyTogglePending, false);
+}
+
+std::string voice_mute_hotkey_name(int scancode) {
+    if (scancode <= SDL_SCANCODE_UNKNOWN || scancode >= SDL_SCANCODE_COUNT) return "None";
+    if (scancode >= SDL_SCANCODE_A && scancode <= SDL_SCANCODE_Z)
+        return std::string(1, static_cast<char>('A' + scancode - SDL_SCANCODE_A));
+    if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_9)
+        return std::string(1, static_cast<char>('1' + scancode - SDL_SCANCODE_1));
+    if (scancode == SDL_SCANCODE_0) return "0";
+    if (scancode >= SDL_SCANCODE_F1 && scancode <= SDL_SCANCODE_F12)
+        return "F" + std::to_string(scancode - SDL_SCANCODE_F1 + 1);
+    switch (scancode) {
+    case SDL_SCANCODE_SPACE: return "Space";
+    case SDL_SCANCODE_TAB: return "Tab";
+    case SDL_SCANCODE_RETURN: return "Enter";
+    case SDL_SCANCODE_UP: return "Up";
+    case SDL_SCANCODE_DOWN: return "Down";
+    case SDL_SCANCODE_LEFT: return "Left";
+    case SDL_SCANCODE_RIGHT: return "Right";
+    case SDL_SCANCODE_MINUS: return "-";
+    case SDL_SCANCODE_EQUALS: return "=";
+    case SDL_SCANCODE_LEFTBRACKET: return "[";
+    case SDL_SCANCODE_RIGHTBRACKET: return "]";
+    case SDL_SCANCODE_BACKSLASH: return "\\";
+    case SDL_SCANCODE_SEMICOLON: return ";";
+    case SDL_SCANCODE_APOSTROPHE: return "'";
+    case SDL_SCANCODE_GRAVE: return "`";
+    case SDL_SCANCODE_COMMA: return ",";
+    case SDL_SCANCODE_PERIOD: return ".";
+    case SDL_SCANCODE_SLASH: return "/";
+    default: return "Key " + std::to_string(scancode);
+    }
+}
+
+void set_voice_mute_indicator(bool visible) {
+    sVoiceMuteIndicator = visible;
+}
+
 void reset_visual_overlays() {
     close_chat_input();
     sConnected = false;
     sChatAvailable = false;
     sGameplayReady = false;
     sPlayerListEnabled = false;
+    sVoiceMuteIndicator = false;
+    sVoiceMuteHotkeyEnabled = false;
+    sVoiceMuteHotkeyCapture = false;
+    sVoiceMuteHotkeyTogglePending = false;
+    sVoiceMuteHotkeyScancode = SDL_SCANCODE_M;
+    sVoiceMuteHotkeyBindingPending.reset();
     sPoses.clear();
     sNames.clear();
     sLocations.clear();

@@ -64,6 +64,7 @@ private:
         ConfigVarHandle voiceProximity = 0;
         ConfigVarHandle voiceProximityRange = 0;
         ConfigVarHandle voiceMicMuted = 0;
+        ConfigVarHandle voiceMuteHotkey = 0;
         ConfigVarHandle voiceInput = 0;
         ConfigVarHandle micVolume = 0;
         ConfigVarHandle playerVolume = 0;
@@ -87,6 +88,8 @@ private:
     UiWindowHandle settingsWindow_ = 0;
     UiWindowHandle playerOptionsWindow_ = 0;
     UiWindowHandle voiceWindow_ = 0;
+    UiElementHandle voiceMuteHotkeyText_ = 0;
+    std::string renderedVoiceMuteHotkeyText_;
     UiWindowHandle syncWindow_ = 0;
     UiWindowHandle lobbyWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
@@ -193,6 +196,7 @@ public:
     static void voice_window_closed(ModContext*, UiWindowHandle, void*);
     static void player_options_pressed(ModContext*, void*);
     static void voice_pressed(ModContext*, void*);
+    static void mute_hotkey_pressed(ModContext*, void*);
     static void voice_input_get(ModContext*, void*, UiControlValue*);
     static void voice_input_set(ModContext*, void*, const UiControlValue*);
     static ModResult build_settings_tab(ModContext*, UiWindowHandle, UiElementHandle,
