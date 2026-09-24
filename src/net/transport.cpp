@@ -242,6 +242,8 @@ struct Transport::Impl {
     std::string tx;
     std::map<std::string, Peer> directPeers;
     std::map<std::string, std::string> peerNames;
+    std::set<std::string> cloudDepartedPeers;
+    std::deque<std::string> cloudDepartedOrder;
     bool meshEnabled = false;
     std::map<std::string, bool> meshPuppets;
     std::map<std::string, bool> meshRoutes;
@@ -357,6 +359,10 @@ struct Transport::Impl {
                 }
             }
         }
+        // Diagnostic logging must not consume the last slots needed for
+        // gameplay, membership or disconnect events.
+        if (event.kind == EventKind::Diagnostic &&
+            events.size() >= kMaxMaterializedEvents - 64) return false;
         if (events.size() >= kMaxMaterializedEvents) {
             eventQueueOverflow = true;
             return false;
@@ -587,6 +593,8 @@ struct Transport::Impl {
         tx.clear();
         events.clear();
         peerNames.clear();
+        cloudDepartedPeers.clear();
+        cloudDepartedOrder.clear();
         meshEnabled = false; meshPuppets.clear();
         meshRoutes.clear(); meshLinks.clear(); meshRx.clear();
         cloudLinkStarted.clear();
@@ -1722,6 +1730,11 @@ struct Transport::Impl {
             }
             sessionEstablished = true;
             status.reconnecting = false;
+            if (status.mode == Mode::CloudRoom)
+                emit(EventKind::Diagnostic, {},
+                     "room_membership self=" + status.clientId +
+                     " owner=" + status.ownerClientId +
+                     " peers=" + std::to_string(meshLinks.size()));
             emit(EventKind::Connected, status.clientId, {}, message);
             emit(EventKind::Message, status.clientId, {}, message);
             return;
@@ -1729,19 +1742,36 @@ struct Transport::Impl {
         if (type == "peer_joined") {
             const std::string id = message.value("client_id", "");
             if (!id.empty()) {
+                cloudDepartedPeers.erase(id);
+                const bool alreadyKnown = peerNames.contains(id);
                 peerNames[id] = message.value("name", id);
                 if (meshEnabled) {
                     admit_mesh(id);
                     meshPuppets[id] = message.value("want_puppet", true);
                 }
+                if (!alreadyKnown)
+                    emit(EventKind::PeerJoined, id, peerNames[id], message);
             }
+            if (status.mode == Mode::CloudRoom)
+                emit(EventKind::Diagnostic, id,
+                     "room_peer_joined peers=" + std::to_string(meshLinks.size()));
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
             status.snapshotDeltasReady =
                 message.value("snapshot_deltas_ready", false);
-            emit(EventKind::PeerJoined, id, message.value("name", id), message);
         } else if (type == "peer_left") {
             const std::string id = message.value("client_id", "");
+            if (status.mode == Mode::CloudRoom && !id.empty() &&
+                cloudDepartedPeers.insert(id).second) {
+                cloudDepartedOrder.push_back(id);
+                if (cloudDepartedOrder.size() > 256) {
+                    cloudDepartedPeers.erase(cloudDepartedOrder.front());
+                    cloudDepartedOrder.pop_front();
+                }
+            }
+            if (status.mode == Mode::CloudRoom)
+                emit(EventKind::Diagnostic, id,
+                     "room_peer_left peers_before=" + std::to_string(meshLinks.size()));
             if (meshLinks.contains(id)) drain_peer_gameplay(id,meshLinks.at(id));
             peerNames.erase(id);
             connections.mesh_remove(id);
@@ -1775,13 +1805,28 @@ struct Transport::Impl {
             return;
         } else if (type == "ice_signal") {
             const std::string source = message.value("client_id", "");
+            // Cloud rooms authenticate the sender and target before forwarding
+            // ICE. If the peer-joined notification was missed, the signal is
+            // enough to recover membership and reply without Worker changes.
+            if (status.mode == Mode::CloudRoom && meshEnabled && !source.empty() &&
+                source != status.clientId && !cloudDepartedPeers.contains(source) &&
+                message.value("kind", -1) == IceAgent::Signal::Description &&
+                !meshLinks.contains(source)) {
+                peerNames[source] = source;
+                admit_mesh(source);
+                meshPuppets[source] = true;
+                peerStages[source] = {"", 0};
+                emit(EventKind::Diagnostic, source, "room_peer_recovered_from_ice");
+                emit(EventKind::PeerJoined, source, source,
+                     {{"type", "peer_joined"}, {"client_id", source}, {"name", source}});
+            }
             if (meshEnabled && meshLinks.contains(source)) {
                 const int kind = message.value("kind", -1);
                 if (kind >= 0 && kind <= 2) {
                     const auto generation = message.value("generation", 0U);
                     const bool accepted = connections.mesh_signal(source,
                         {static_cast<IceAgent::Signal::Kind>(kind), message.value("data", ""), generation});
-                    if (kind == IceAgent::Signal::Description || !accepted)
+                    if (kind == IceAgent::Signal::Description || generation > 0 || !accepted)
                         emit(EventKind::Diagnostic, source,
                              "ice_rx kind=" + std::to_string(kind) +
                              " gen=" + std::to_string(generation) +
@@ -1951,6 +1996,8 @@ struct Transport::Impl {
             } else if (event.kind == RoomChannel::EventKind::Closed) {
                 fail(event.text.empty() ? "Cloud room connection closed" : event.text);
                 return;
+            } else if (event.kind == RoomChannel::EventKind::Diagnostic) {
+                emit(EventKind::Diagnostic, {}, event.text);
             }
             if (eventQueueOverflow) { fail("transport event queue limit reached"); return; }
         }
@@ -2041,6 +2088,10 @@ struct Transport::Impl {
                 for (auto& [id, direct] : meshRoutes) {
                     const bool current = delivery_direct(id);
                     if (current != direct) {
+                        if (status.mode == Mode::CloudRoom)
+                            emit(EventKind::Diagnostic, id,
+                                 std::string(current ? "ice_route_restored " : "ice_route_lost ") +
+                                 connections.mesh_diagnostics(id));
                         direct = current;
                         if (!resend_delivery(id,direct)) deliveryFailure = true;
                         emit(EventKind::RouteChanged, id, direct ? "direct" :

@@ -575,6 +575,23 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME dusklight_online_cloud_room_transport
              COMMAND dusklight_online_cloud_room_transport_test)
 
+    # Opt-in live diagnostic: connects real native room channels to a supplied
+    # service URL. It is not part of CI because it requires an external Worker.
+    if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        add_executable(dusklight_online_cloud_room_live_mesh_test EXCLUDE_FROM_ALL
+            tests/cloud_room_live_mesh_test.cpp
+            src/net/native_room_channel.cpp
+            ${ONLINE_CORE_SOURCES}
+        )
+        target_compile_features(dusklight_online_cloud_room_live_mesh_test PRIVATE cxx_std_20)
+        target_include_directories(dusklight_online_cloud_room_live_mesh_test PRIVATE include src)
+        target_link_libraries(dusklight_online_cloud_room_live_mesh_test PRIVATE
+            CURL::libcurl_static nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
+        if (WIN32)
+            target_link_libraries(dusklight_online_cloud_room_live_mesh_test PRIVATE ws2_32)
+        endif ()
+    endif ()
+
     add_executable(dusklight_online_udp_codec_test
         tests/udp_codec_test.cpp
         src/net/udp_codec.cpp

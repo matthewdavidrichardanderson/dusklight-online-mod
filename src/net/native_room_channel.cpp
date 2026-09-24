@@ -22,6 +22,22 @@ constexpr size_t kMaxQueuedMessages = 256;
 constexpr size_t kMaxQueuedBytes = 1024 * 1024;
 constexpr auto kSendTimeout = std::chrono::seconds(5);
 
+// Log only signaling metadata. SDP/candidates can contain network addresses,
+// and room credentials must never enter the game log.
+std::string ice_signal_summary(std::string_view text) {
+    try {
+        const auto message = nlohmann::json::parse(text.begin(), text.end());
+        if (!message.is_object() || message.value("type", std::string{}) != "ice_signal")
+            return {};
+        return "room_socket_tx_ice target=" + message.value("target_client_id", std::string{}) +
+               " kind=" + std::to_string(message.value("kind", -1)) +
+               " gen=" + std::to_string(message.value("generation", 0U)) +
+               " bytes=" + std::to_string(text.size());
+    } catch (const nlohmann::json::exception&) {
+        return {};
+    }
+}
+
 class NativeRoomChannel final : public RoomChannel {
 public:
     ~NativeRoomChannel() override { close(); }
@@ -77,6 +93,13 @@ public:
     }
 
 private:
+    void queue_diagnostic(std::string detail) {
+        std::lock_guard lock(mutex_);
+        // Diagnostics must never close an otherwise healthy room connection.
+        if (!stopping_.load() && events_.size() < kMaxQueuedMessages)
+            events_.push_back({EventKind::Diagnostic, std::move(detail)});
+    }
+
     bool queue_event(Event event) {
         std::lock_guard lock(mutex_);
         if (stopping_.load()) return false;
@@ -167,6 +190,8 @@ private:
             }
             if (!outgoing.empty()) {
                 if (!send_frame(curl, outgoing, failure)) break;
+                if (auto detail = ice_signal_summary(outgoing); !detail.empty())
+                    queue_diagnostic(std::move(detail));
                 worked = true;
             }
 
@@ -200,6 +225,11 @@ private:
                     failure = "Cloud room message exceeds limit";
                     break;
                 }
+                if ((frame->flags & CURLWS_CONT) || frame->bytesleft > 0)
+                    queue_diagnostic("room_socket_rx_fragment flags=" +
+                                     std::to_string(frame->flags) +
+                                     " bytes=" + std::to_string(received) +
+                                     " remaining=" + std::to_string(frame->bytesleft));
                 incoming.append(buffer.data(), received);
                 if (frame->bytesleft == 0 && !(frame->flags & CURLWS_CONT)) {
                     if (!queue_event({EventKind::Message, std::move(incoming)})) {

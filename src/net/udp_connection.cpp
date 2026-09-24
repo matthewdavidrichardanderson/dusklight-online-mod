@@ -67,6 +67,9 @@ struct UdpConnection::Impl : DatagramTransport {
         bool meshReliable = false;
         std::unique_ptr<IceAgent> ice;
         uint32_t lastProbe = 0, lastEcho = 0, probeRtt = 250;
+        uint32_t lastIcePacket = 0, lastPayloadPacket = 0;
+        uint64_t probeSends = 0, probeSendFailures = 0;
+        uint64_t probeRequests = 0, probeReplies = 0, payloadPackets = 0;
         bool hasEcho = false;
         uint32_t iceGeneration = 0, retryAt = 0, retryDelay = 30000;
         uint32_t lastIceChange = 0;
@@ -246,21 +249,31 @@ struct UdpConnection::Impl : DatagramTransport {
             if (peer.ice->connected() && uint32_t(now - peer.lastProbe) >= 250) {
                 std::array<uint8_t, 13> probe{'D','P','I','1',1};
                 write64(probe.data() + 5, now);
-                peer.ice->send(probe); peer.lastProbe = now;
+                if (peer.ice->send(probe)) ++peer.probeSends;
+                else ++peer.probeSendFailures;
+                peer.lastProbe = now;
             }
             std::vector<uint8_t> bytes;
             for (size_t n = 0; n < 512 && peer.ice->pop(bytes); ++n) {
+                peer.lastIcePacket = now;
                 if (bytes.size() == 13 && std::memcmp(bytes.data(), "DPI1", 4) == 0) {
-                    if (bytes[4] == 1) { bytes[4] = 2; peer.ice->send(bytes); }
+                    if (bytes[4] == 1) {
+                        ++peer.probeRequests;
+                        bytes[4] = 2;
+                        peer.ice->send(bytes);
+                    }
                     else if (bytes[4] == 2) {
                         const auto echoed = read64(bytes.data() + 5);
                         if (echoed <= UINT32_MAX && uint32_t(now - static_cast<uint32_t>(echoed)) < 3000) {
+                            ++peer.probeReplies;
                             peer.probeRtt = uint32_t(now - static_cast<uint32_t>(echoed));
                             peer.hasEcho = true; peer.lastEcho = now;
                         }
                     }
                     continue;
                 }
+                peer.lastPayloadPacket = now;
+                ++peer.payloadPackets;
                 mesh_input(id, bytes);
             }
         }
@@ -651,12 +664,24 @@ std::string UdpConnection::mesh_diagnostics(std::string_view peerId) const {
         return std::to_string(values[0]) + "/" + std::to_string(values[1]) + "/" +
             std::to_string(values[2]);
     };
+    const uint32_t now = clock_ms();
+    const auto age = [now](uint32_t timestamp) {
+        return timestamp ? std::to_string(uint32_t(now - timestamp)) : std::string("never");
+    };
     return "state=" + std::string(peer.ice ? peer.ice->state_text() : "invalid") +
         " gen=" + std::to_string(peer.iceGeneration) +
         " tx_desc_cand_done=" + counts(peer.iceSent) +
         " rx_desc_cand_done=" + counts(peer.iceReceived) +
         " rejected_desc_cand_done=" + counts(peer.iceRejected) +
-        " echo=" + (peer.hasEcho ? "yes" : "no");
+        " echo=" + (peer.hasEcho ? "yes" : "no") +
+        " echo_age_ms=" + age(peer.lastEcho) +
+        " ice_rx_age_ms=" + age(peer.lastIcePacket) +
+        " payload_rx_age_ms=" + age(peer.lastPayloadPacket) +
+        " probe_rtt_ms=" + std::to_string(peer.probeRtt) +
+        " probe_tx=" + std::to_string(peer.probeSends) +
+        " probe_tx_fail=" + std::to_string(peer.probeSendFailures) +
+        " probe_rx=" + std::to_string(peer.probeRequests) + "/" + std::to_string(peer.probeReplies) +
+        " payload_rx=" + std::to_string(peer.payloadPackets);
 }
 bool UdpConnection::mesh_retry(std::string_view peerId) {
     std::lock_guard lock(impl_->mutex);

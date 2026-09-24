@@ -109,7 +109,7 @@ struct CloudRoomConfig {
 // for the room server to become a gameplay carrier by accident.
 class RoomChannel {
 public:
-    enum class EventKind { Open, Message, Closed };
+    enum class EventKind { Open, Message, Closed, Diagnostic };
     struct Event { EventKind kind; std::string text; };
     virtual ~RoomChannel() = default;
     virtual bool open(std::string_view url, std::string& error) = 0;
