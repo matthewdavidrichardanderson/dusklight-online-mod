@@ -36,6 +36,7 @@
 #include "d/d_item.h"
 #include "d/d_meter2.h"
 #include "d/d_meter2_info.h"
+#include "d/d_map_path_dmap.h"
 #include "d/d_msg_object.h"
 #include "d/d_save.h"
 #include "d/d_s_room.h"
@@ -2806,6 +2807,7 @@ void GameAdapter::clear_replaced_save_progression_state() {
 }
 
 void GameAdapter::notify_local_save_reset() {
+    liveFieldMapMarker_.reset();
     // No detached Note/owner data may survive a selected-save boundary.
     localWagonEscortStarted_ = false;
     ooccooState_.reset();
@@ -3465,6 +3467,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         }
     }
     const net::Status status = transport_.status();
+    sample_live_field_map_marker();
     if (!opening_or_title_active() && dComIfGp_getStageStagInfo() != nullptr) {
         (void)local_wagon_escort_unfinished();
     }
@@ -3509,8 +3512,36 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
             room == presence->second.end() || !room->is_number_integer()) continue;
         const int64_t roomNumber = room->get<int64_t>();
         if (roomNumber < -128 || roomNumber > 127) continue;
-        playerLocations.emplace(peerId, PlayerLocationView{
-            stage->get<std::string>(), static_cast<int>(roomNumber)});
+        PlayerLocationView location{stage->get<std::string>(), static_cast<int>(roomNumber)};
+        const auto fieldMap = presence->second.find("field_map");
+        if (fieldMap != presence->second.end() && fieldMap->is_object()) {
+            const auto mapStage = fieldMap->find("stage");
+            const auto region = fieldMap->find("region");
+            const auto x = fieldMap->find("x");
+            const auto z = fieldMap->find("z");
+            const auto angle = fieldMap->find("angle_y");
+            if (mapStage != fieldMap->end() && mapStage->is_string() &&
+                region != fieldMap->end() && region->is_number_integer() &&
+                x != fieldMap->end() && x->is_number() &&
+                z != fieldMap->end() && z->is_number() &&
+                angle != fieldMap->end() && angle->is_number_integer()) {
+                const std::string mapStageName = mapStage->get<std::string>();
+                const int64_t mapRegion = region->get<int64_t>();
+                const float mapX = x->get<float>();
+                const float mapZ = z->get<float>();
+                const int64_t mapAngle = angle->get<int64_t>();
+                if (!mapStageName.empty() && mapStageName.size() < 8 &&
+                    mapRegion >= 1 && mapRegion <= 8 &&
+                    std::isfinite(mapX) && std::isfinite(mapZ) &&
+                    std::fabs(mapX) < 10000000.0f && std::fabs(mapZ) < 10000000.0f &&
+                    mapAngle >= -32768 && mapAngle <= 32767) {
+                    location.fieldMapMarker = PlayerLocationView::FieldMapMarker{
+                        mapStageName, static_cast<int>(mapRegion), mapX, mapZ,
+                        static_cast<int>(mapAngle)};
+                }
+            }
+        }
+        playerLocations.emplace(peerId, std::move(location));
     }
     const bool chatAvailable = status.enabled &&
         (status.mode == net::Mode::DirectHost ?
@@ -4289,6 +4320,49 @@ void GameAdapter::set_player_color(uint32_t color, uint32_t outfit) {
     publish_player_color();
 }
 
+void GameAdapter::sample_live_field_map_marker() {
+    // The pause menu moves Link's actor into menu space. Keep the last sampled
+    // gameplay map position until normal play resumes.
+    if (dComIfGp_isPauseFlag() || dMeter2Info_getPauseStatus() != 0 ||
+        opening_or_title_active() ||
+        dComIfGp_getStageStagInfo() == nullptr || dComIfGp_isEnableNextStage() ||
+        !dComIfGs_isPlayerFieldLastStayFieldDataExistFlag()) return;
+
+    const char* stage = dComIfGp_getStartStageName();
+    const int region = dComIfGp_getNowLevel();
+    fopAc_ac_c* player = daPy_getPlayerActorClass();
+    if (stage == nullptr || stage[0] == '\0' || std::strlen(stage) >= 8 ||
+        region < 1 || region > 8 || player == nullptr) return;
+
+    const Vec pos = dMapInfo_n::getMapPlayerPos();
+    if (!std::isfinite(pos.x) || !std::isfinite(pos.z)) return;
+    liveFieldMapMarker_ = PlayerLocationView::FieldMapMarker{
+        stage, region, pos.x, pos.z, static_cast<s16>(player->shape_angle.y)};
+}
+
+std::optional<PlayerLocationView::FieldMapMarker> GameAdapter::local_field_map_marker() const {
+    if (opening_or_title_active()) return std::nullopt;
+    if (dComIfGs_isPlayerFieldLastStayFieldDataExistFlag()) {
+        const char* stage = dComIfGp_getStartStageName();
+        const int region = dComIfGp_getNowLevel();
+        if (liveFieldMapMarker_ && stage != nullptr &&
+            liveFieldMapMarker_->stage == stage && liveFieldMapMarker_->region == region) {
+            return liveFieldMapMarker_;
+        }
+        return std::nullopt;
+    }
+
+    const char* stage = dComIfGs_getPlayerFieldLastStayName();
+    const int region = dComIfGs_getPlayerFieldLastStayRegionNo();
+    const cXyz pos = dComIfGs_getPlayerFieldLastStayPos();
+    if (stage == nullptr || stage[0] == '\0' || std::strlen(stage) >= 8 ||
+        region < 1 || region > 8 || !std::isfinite(pos.x) || !std::isfinite(pos.z)) {
+        return std::nullopt;
+    }
+    return PlayerLocationView::FieldMapMarker{
+        stage, region, pos.x, pos.z, dComIfGs_getPlayerFieldLastStayAngleY()};
+}
+
 void GameAdapter::publish_player_color() {
     if (!transport_.status().enabled) return;
     const auto now = std::chrono::steady_clock::now();
@@ -4310,6 +4384,11 @@ void GameAdapter::publish_player_color() {
         message["stage"] = stage;
         message["room"] = static_cast<int>(dComIfGp_roomControl_getStayNo());
         message["layer"] = static_cast<int>(dComIfGp_getStartStageLayer());
+    }
+    if (const auto marker = local_field_map_marker()) {
+        message["field_map"] = {{"stage", marker->stage}, {"region", marker->region},
+                                {"x", marker->x}, {"z", marker->z},
+                                {"angle_y", marker->angleY}};
     }
     if (transport_.send(message)) {
         latencySent_.emplace_back(nextLatencyNonce_, now);
@@ -4536,6 +4615,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
 }
 
 void GameAdapter::reset_session() {
+    liveFieldMapMarker_.reset();
     reset_floor_switch_state(true);
     sVisualWireTrace = {};
     reset_local_pose_state();
@@ -6116,10 +6196,17 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     if (flagsOnly) {
         dSv_player_c& localPlayer = g_dComIfG_gameInfo.info.getPlayer();
         const dSv_player_return_place_c localReturnPlace = localPlayer.getPlayerReturnPlace();
-        const dSv_player_field_last_stay_info_c localLastStay =
+        dSv_player_field_last_stay_info_c localLastStay =
             localPlayer.getPlayerFieldLastStayInfo();
         const dSv_player_config_c localConfig = localPlayer.getConfig();
         dSv_save_c syncedSave = peerInfo.getSavedata();
+        // The field map's discovered-region bits live in the last-stay record.
+        // Keep this player's location and discovered regions while adding the
+        // donor's regions, as the normal snapshot and live region sync do.
+        const auto& donorLastStay = syncedSave.getPlayer().getPlayerFieldLastStayInfo();
+        for (int region = 0; region < 8; ++region) {
+            if (donorLastStay.isRegionBit(region)) localLastStay.onRegionBit(region);
+        }
         syncedSave.getPlayer().getPlayerReturnPlace() = localReturnPlace;
         syncedSave.getPlayer().getPlayerFieldLastStayInfo() = localLastStay;
         syncedSave.getPlayer().getConfig() = localConfig;

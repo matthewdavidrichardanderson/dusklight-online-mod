@@ -26,6 +26,9 @@
 #undef private
 
 #include "d/dolzel.h"
+#include "d/d_menu_fmap.h"
+#include "d/d_menu_fmap2D.h"
+#include "JSystem/J2DGraph/J2DPicture.h"
 
 #include "JSystem/J3DGraphBase/J3DShape.h"
 #include "SSystem/SComponent/c_math.h"
@@ -34,6 +37,7 @@
 #include "d/d_s_play.h"
 #include "dusk/map_loader_definitions.h"
 #include "dusk/multiplayer/remote_link_dummy.hpp"
+#include "dusk/settings.h"
 #include "f_op/f_op_camera_mng.h"
 #include "m_Do/m_Do_graphic.h"
 #include "m_Do/m_Do_lib.h"
@@ -52,6 +56,7 @@ namespace dusklight_online::game {
 
 DEFINE_HOOK(&dDlst_list_c::drawOpaDrawList, OpaqueDrawListHook);
 DEFINE_HOOK_SYMBOL("dMeterMap_c::draw", void(dMeterMap_c*), MeterMapDrawHook);
+DEFINE_HOOK(&dMenuMapCommon_c::drawIcon, FieldMapIconsDrawHook);
 DEFINE_HOOK_SYMBOL("dusk::ImGuiConsole::PostDraw", void(void*),
                    HostImGuiPostDrawHook);
 // The const qualification of a reference is not part of the calling ABI. The
@@ -65,6 +70,8 @@ namespace {
 
 using GetHostContextFn = ImGuiContext* (*)();
 GetHostContextFn sGetHostContext = nullptr;
+using GetHostSettingsFn = dusk::UserSettings& (*)();
+GetHostSettingsFn sGetHostSettings = nullptr;
 
 std::string escape_toast_rml(std::string_view text) {
     std::string escaped;
@@ -401,6 +408,187 @@ void draw_minimap_markers(dMeterMap_c* meter) {
                            map->getPlayerCursorSize(),
                            host_projection_is_mirrored() ? -scaleX : scaleX, scaleY);
     }
+}
+
+const char* field_map_stage_name(dMenu_Fmap_c* menu, dMenu_Fmap2DBack_c* map,
+                                 std::string_view stage, int region) {
+    if (map->mpStages == nullptr || region < 0 || region >= 8) return nullptr;
+    const auto stageInRegion = [map, region](std::string_view name) -> const char* {
+        for (int i = 0; i < map->mStageDataNum; ++i) {
+            const auto& entry = map->mpStages->mData[i];
+            if (entry.mRegionNo == region + 1 && name == entry.mName) return entry.mName;
+        }
+        return nullptr;
+    };
+    if (const char* mapped = stageInRegion(stage)) return mapped;
+
+    // Field.dat aliases a few in-game stages to a virtual field stage.
+    if (menu->mpFieldDat == nullptr) return nullptr;
+    const auto* aliases = reinterpret_cast<const dMenu_Fmap_virtual_stage_data_c*>(
+        reinterpret_cast<const u8*>(menu->mpFieldDat) + menu->mpFieldDat->mVirtualStageOffset);
+    for (int i = 0; i < aliases->mCount; ++i) {
+        if (stage == aliases->mData[i].mStageName) {
+            return stageInRegion(aliases->mData[i].mVirtualStageName);
+        }
+    }
+    return nullptr;
+}
+
+// A direct Dusklight warp into a dungeon does not pass through its field
+// entrance, so the save's last-field position can still refer to a different
+// part of Hyrule. Locate the game's dungeon-entrance icon in the field data.
+const char* dungeon_entrance_stage(std::string_view stage) {
+    struct Entrance { std::string_view dungeon; const char* field; };
+    constexpr Entrance entrances[] = {
+        {"D_MN05", "F_SP108"},  // Forest Temple
+        {"D_MN04", "F_SP110"},  // Goron Mines
+        {"D_MN01", "F_SP115"},  // Lakebed Temple
+        {"D_MN10", "F_SP124"},  // Arbiter's Grounds
+        {"D_MN11", "F_SP114"},  // Snowpeak Ruins
+        {"D_MN06", "F_SP117"},  // Temple of Time
+    };
+    for (const auto& entrance : entrances) {
+        if (stage == entrance.dungeon ||
+            (stage.size() == entrance.dungeon.size() + 1 &&
+             stage.substr(0, entrance.dungeon.size()) == entrance.dungeon)) {
+            return entrance.field;
+        }
+    }
+    return nullptr;
+}
+
+bool dungeon_entrance_world_pos(dMenu_Fmap_c* menu, int region,
+                                std::string_view fieldStage, f32& worldX, f32& worldZ) {
+    if (region < 0 || region >= 8) return false;
+    // The menu releases area icon data while zooming into another region.
+    // Keep positions already resolved from this menu's field data so peers do
+    // not blink out for a few frames during that transition.
+    static std::map<std::pair<int, std::string>, std::pair<f32, f32>> cachedEntrances;
+    const auto key = std::make_pair(region, std::string(fieldStage));
+    if (const auto cached = cachedEntrances.find(key); cached != cachedEntrances.end()) {
+        worldX = cached->second.first;
+        worldZ = cached->second.second;
+        return true;
+    }
+    if (menu->mpRegionData[region] == nullptr || menu->mpStageData[region] == nullptr) return false;
+    dMenuFmapIconDisp_c icon;
+    if (!icon.init(menu->mpRegionData[region], menu->mpStageData[region], 1,
+                   menu->mStayStageNo, dComIfGp_roomControl_getStayNo())) return false;
+    while (!icon.getValidData()) {
+        if (icon.mpStageData != nullptr &&
+            fieldStage == icon.mpStageData->getStageName()) {
+            icon.getPosition(nullptr, nullptr, &worldX, &worldZ, nullptr);
+            if (!std::isfinite(worldX) || !std::isfinite(worldZ)) return false;
+            cachedEntrances.emplace(key, std::make_pair(worldX, worldZ));
+            return true;
+        }
+        if (icon.nextData()) break;
+    }
+    return false;
+}
+
+void draw_field_map_markers(dMenuMapCommon_c* iconList) {
+    dMenu_Fmap_c* menu = dMenu_Fmap_c::MyClass;
+    if (!sConnected || menu == nullptr || menu->mpDraw2DBack == nullptr ||
+        iconList != static_cast<dMenuMapCommon_c*>(menu->mpDraw2DBack)) return;
+    dMenu_Fmap2DBack_c* map = menu->mpDraw2DBack;
+    if (map->mpStages == nullptr || map->mRegionCursor >= 8 ||
+        map->mZoom <= 0.0f || map->mAlphaRate <= 0.0f) return;
+
+    const f32 centerX = map->getMapScissorAreaCenterPosX();
+    const f32 centerY = map->getMapScissorAreaCenterPosY();
+    f32 centerWorldX = 0.0f, centerWorldZ = 0.0f;
+    f32 shiftedCenterX = 0.0f, shiftedCenterY = 0.0f;
+    map->calcAllMapPosWorld(centerX, centerY, &centerWorldX, &centerWorldZ);
+    map->calcAllMapPos2D(centerWorldX + map->mStageTransX,
+                         centerWorldZ + map->mStageTransZ,
+                         &shiftedCenterX, &shiftedCenterY);
+    // Match the pan offset used by regionTextureDraw, including spot-map zoom.
+    const f32 panX = centerX - shiftedCenterX;
+    const f32 panY = centerY - shiftedCenterY;
+    // The 3D camera projection is unreliable while the pause map animates.
+    // Read the same mirror setting that the field map uses for its own icons.
+    const bool mirrored = sGetHostSettings != nullptr &&
+                          sGetHostSettings().game.enableMirrorMode.getValue();
+    J2DPicture* linkIcon = map->mPictures[ICON_LINK_e];
+    if (linkIcon == nullptr) return;
+    const f32 iconWidth = map->getIconSizeX(ICON_LINK_e);
+    const f32 iconHeight = map->getIconSizeY(ICON_LINK_e);
+    if (iconWidth <= 0.0f || iconHeight <= 0.0f) return;
+    const JUtility::TColor originalBlack = linkIcon->getBlack();
+    const JUtility::TColor originalWhite = linkIcon->getWhite();
+    const u8 originalAlpha = linkIcon->getAlpha();
+    const f32 originalRotation = linkIcon->getRotateZ();
+    const f32 originalRotOffsetX = linkIcon->getRotOffsetX();
+    const f32 originalRotOffsetY = linkIcon->getRotOffsetY();
+    // The native icon is yellow. J2DPicture's black/white ramp interpolates
+    // each texture channel independently, which turns dark red into brown and
+    // cannot shade blue at all. Use the icon's red channel as a shared shading
+    // value while retaining both of its original textures and their alpha.
+    GXSetTevSwapModeTable(GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_ALPHA);
+    GXSetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1);
+    GXSetTevSwapMode(GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP1);
+    for (const auto& [peerId, location] : sLocations) {
+        int region = -1;
+        f32 worldX = 0.0f, worldZ = 0.0f;
+        s16 angle = 0;
+        bool positioned = false;
+        const char* entranceStage = dungeon_entrance_stage(location.stage);
+        if (entranceStage != nullptr) {
+            for (int candidate = 0; candidate < 8 && !positioned; ++candidate) {
+                if (map->mpAreaTex[candidate] == nullptr ||
+                    field_map_stage_name(menu, map, entranceStage, candidate) == nullptr) continue;
+                if (dungeon_entrance_world_pos(menu, candidate, entranceStage, worldX, worldZ)) {
+                    region = candidate;
+                    positioned = true;
+                }
+            }
+        }
+        if (!positioned && location.fieldMapMarker) {
+            const auto& marker = *location.fieldMapMarker;
+            region = marker.region - 1;
+            if (region < 0 || region >= 8 || map->mpAreaTex[region] == nullptr) continue;
+            const char* stage = field_map_stage_name(menu, map, marker.stage, region);
+            if (stage == nullptr ||
+                (entranceStage != nullptr && std::string_view(stage) != entranceStage)) continue;
+            f32 offsetX = 0.0f, offsetZ = 0.0f;
+            map->calcOffset(region, stage, &offsetX, &offsetZ);
+            worldX = marker.x + offsetX;
+            worldZ = marker.z + offsetZ;
+            angle = static_cast<s16>(marker.angleY);
+            positioned = true;
+        }
+        if (!positioned) continue;
+        const auto& bounds = map->mRegionTexData[region];
+        const f32 width = bounds.mMaxX - bounds.mMinX;
+        const f32 height = bounds.mMaxZ - bounds.mMinZ;
+        if (width <= 0.0f || height <= 0.0f ||
+            worldX < bounds.mMinX || worldX > bounds.mMaxX ||
+            worldZ < bounds.mMinZ || worldZ > bounds.mMaxZ) continue;
+
+        f32 x = map->mTransX + panX + map->mRegionMinMapX[region] +
+                map->field_0xf0c[region] +
+                (worldX - bounds.mMinX) / width * map->mRegionMapSizeX[region] * map->mZoom;
+        const f32 y = map->mTransZ + panY + map->mRegionMinMapY[region] +
+                      map->field_0xf2c[region] +
+                      (worldZ - bounds.mMinZ) / height * map->mRegionMapSizeY[region] * map->mZoom;
+        f32 drawX = x - iconWidth * 0.5f;
+        if (mirrored) drawX = map->getMirrorCenterPosX(drawX, iconWidth * 0.5f);
+        const PlayerColor color = display_color(appearance::peer_color(peerId));
+        const JUtility::TColor dark(color.r / 4, color.g / 4, color.b / 4, 0);
+        const JUtility::TColor light(color.r, color.g, color.b, 255);
+        linkIcon->setBlackWhite(dark, light);
+        linkIcon->setAlpha(255);
+        linkIcon->rotate(iconWidth * 0.5f, iconHeight * 0.5f, ROTATE_Z,
+                         cM_sht2d(mirrored ? static_cast<s16>(-angle) : angle));
+        linkIcon->draw(drawX, y - iconHeight * 0.5f, iconWidth, iconHeight,
+                       false, false, false);
+    }
+    linkIcon->setBlackWhite(originalBlack, originalWhite);
+    linkIcon->setAlpha(originalAlpha);
+    linkIcon->rotate(originalRotOffsetX, originalRotOffsetY, ROTATE_Z, originalRotation);
+    GXSetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0);
+    GXSetTevSwapMode(GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP0);
 }
 
 NameLabelFontAtlas* get_font_atlas() {
@@ -1197,6 +1385,10 @@ void meter_map_draw_post(ModContext*, void* args, void*, void*) {
     draw_minimap_markers(mods::arg<dMeterMap_c*>(args, 0));
 }
 
+void field_map_icons_draw_post(ModContext*, void* args, void*, void*) {
+    draw_field_map_markers(mods::arg<dMenuMapCommon_c*>(args, 0));
+}
+
 void host_imgui_post_draw_post(ModContext*, void*, void*, void*) {
     const auto getHostContext = sGetHostContext;
     if (getHostContext == nullptr) return;
@@ -1224,11 +1416,17 @@ ModResult install_visual_hooks(ModError* error) {
         return mods::set_error(error, MOD_UNAVAILABLE, "Host ImGui context accessor is unavailable");
     }
     sGetHostContext = reinterpret_cast<GetHostContextFn>(contextAddress);
+    void* settingsAddress = nullptr;
+    if (svc_hook->resolve(mod_ctx, "dusk::getSettings", &settingsAddress, nullptr) == MOD_OK &&
+        settingsAddress != nullptr) {
+        sGetHostSettings = reinterpret_cast<GetHostSettingsFn>(settingsAddress);
+    }
     if (mods::hook::add_pre<HostUiEventHook>(&host_ui_event_pre) != MOD_OK ||
         mods::hook::add_post<HostUiEventHook>(&host_ui_event_post) != MOD_OK ||
         mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
         mods::hook::add_post<HostImGuiPostDrawHook>(&host_imgui_post_draw_post) != MOD_OK ||
-        mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK) {
+        mods::hook::add_post<MeterMapDrawHook>(&meter_map_draw_post) != MOD_OK ||
+        mods::hook::add_post<FieldMapIconsDrawHook>(&field_map_icons_draw_post) != MOD_OK) {
         uninstall_visual_hooks();
         return mods::set_error(error, MOD_UNAVAILABLE, "Online visual draw hooks are unavailable");
     }
@@ -1238,9 +1436,11 @@ ModResult install_visual_hooks(ModError* error) {
 void uninstall_visual_hooks() {
     mods::hook::uninstall<HostUiEventHook>();
     mods::hook::uninstall<MeterMapDrawHook>();
+    mods::hook::uninstall<FieldMapIconsDrawHook>();
     mods::hook::uninstall<HostImGuiPostDrawHook>();
     mods::hook::uninstall<OpaqueDrawListHook>();
     sGetHostContext = nullptr;
+    sGetHostSettings = nullptr;
     reset_visual_overlays();
     if (sFontAtlas != nullptr) {
         svc_resource->free(mod_ctx, &sFontAtlas->fontBuffer);

@@ -25,6 +25,14 @@ struct ProgressionPromptView {
 struct PlayerLocationView {
     std::string stage;
     int room = -1;
+    struct FieldMapMarker {
+        std::string stage;
+        int region = -1;  // Field-map region numbers are one-based.
+        float x = 0.0f;
+        float z = 0.0f;
+        int angleY = 0;
+    };
+    std::optional<FieldMapMarker> fieldMapMarker;
 };
 
 ModResult install_visual_hooks(ModError* error);

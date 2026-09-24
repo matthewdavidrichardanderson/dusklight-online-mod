@@ -3,6 +3,7 @@
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/pose_playback.hpp"
 #include "dusklight_online/game/ooccoo_sync.hpp"
+#include "dusklight_online/game/visual_bridge.hpp"
 #include "dusk/multiplayer/multiplayer.hpp"
 
 #include <mods/api.h>
@@ -91,12 +92,15 @@ public:
     [[nodiscard]] bool manual_sync_timed_out() const;
 
 private:
+    void sample_live_field_map_marker();
+    [[nodiscard]] std::optional<PlayerLocationView::FieldMapMarker> local_field_map_marker() const;
     void observe_latency_presence(const RoutedMessage& message);
     [[nodiscard]] std::optional<uint32_t> current_peer_latency_ms(
         std::string_view peerId, std::chrono::steady_clock::time_point now) const;
     net::Transport& transport_;
     std::map<std::string, std::string> peerNames_;
     std::map<std::string, nlohmann::json> peerPresence_;
+    std::optional<PlayerLocationView::FieldMapMarker> liveFieldMapMarker_;
     struct LatencyProbe {
         uint64_t nonce = 0;
         std::chrono::steady_clock::time_point receivedAt{};
