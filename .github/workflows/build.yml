@@ -49,21 +49,22 @@ jobs:
           - platform: macos-x86_64
             runner: macos-15-intel
             cmake_args: -DCMAKE_OSX_ARCHITECTURES=x86_64
-          - platform: ios-arm64
-            runner: macos-latest
-            cmake_args: >-
-              -DCMAKE_SYSTEM_NAME=iOS
-              -DCMAKE_OSX_ARCHITECTURES=arm64
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+          # Mobile builds are paused; uncomment these entries to restore them.
+          # - platform: ios-arm64
+          #   runner: macos-latest
+          #   cmake_args: >-
+          #     -DCMAKE_SYSTEM_NAME=iOS
+          #     -DCMAKE_OSX_ARCHITECTURES=arm64
+          #     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
           - platform: windows-amd64
             runner: windows-latest
             msvc_arch: amd64
           - platform: windows-arm64
             runner: windows-latest
             msvc_arch: amd64_arm64
-          - platform: android-aarch64
-            runner: ubuntu-latest
-            android_ndk: "29.0.14206865"
+          # - platform: android-aarch64
+          #   runner: ubuntu-latest
+          #   android_ndk: "29.0.14206865"
 
     steps:
       - uses: actions/checkout@v7
