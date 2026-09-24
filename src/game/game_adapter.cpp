@@ -257,11 +257,13 @@ bool local_state_ready_for_cue(std::string_view cueKey) {
 constexpr int kPvpAttackLight = 1;
 constexpr int kPvpAttackHeavy = 2;
 constexpr int kPvpLightDamage = 2;
+constexpr int kPvpSlingshotDamage = kPvpLightDamage / 2;
 constexpr int kPvpClawshotDamage = 1;
 constexpr int kPvpHeavyDamage = 4;
 constexpr int kPvpIronBallDamage = 12;
 constexpr int kPvpSpecialTechniqueDamage = 12;
 constexpr std::string_view kPvpReactionClawshot = "clawshot";
+constexpr std::string_view kPvpReactionSlingshot = "slingshot";
 constexpr std::string_view kPvpReactionIronBallLaunch = "iron_ball_launch";
 constexpr std::string_view kPvpReactionMortalDraw = "mortal_draw";
 constexpr std::string_view kPvpReactionGreatSpin = "great_spin";
@@ -2656,6 +2658,8 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
         attackClass = kPvpAttackHeavy;
     }
     const bool clawshot = attackInfo->ChkAtType(AT_TYPE_HOOKSHOT);
+    const bool slingshot = attackActorName == fpcNm_ARROW_e &&
+                           attackInfo->ChkAtType(AT_TYPE_SLINGSHOT);
     const bool ironBallLaunch = attackInfo->ChkAtType(AT_TYPE_IRON_BALL);
     const bool shieldBash = attackInfo->ChkAtType(AT_TYPE_SHIELD_ATTACK);
     const int cutType = allowSwordReaction ? static_cast<int>(link->getCutType()) :
@@ -2665,6 +2669,8 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
         reaction = kPvpReactionIronBallLaunch;
     } else if (clawshot) {
         reaction = kPvpReactionClawshot;
+    } else if (slingshot) {
+        reaction = kPvpReactionSlingshot;
     } else if (shieldBash) {
         reaction = kPvpReactionShieldBash;
     } else if (cutType == daPy_py_c::CUT_TYPE_MORTAL_DRAW_A ||
@@ -4047,10 +4053,13 @@ ApplyResult GameAdapter::consume_pvp_hit(const RoutedMessage& message) {
         (reaction == kPvpReactionMortalDraw || reaction == kPvpReactionGreatSpin);
     const bool clawshot = attackClass == kPvpAttackLight &&
                           reaction == kPvpReactionClawshot;
+    const bool slingshot = attackClass == kPvpAttackLight &&
+                           reaction == kPvpReactionSlingshot;
     const bool shieldBash = reaction == kPvpReactionShieldBash;
     int damage = attackClass == kPvpAttackHeavy ? kPvpHeavyDamage : kPvpLightDamage;
     if (ironBallLaunch) damage = kPvpIronBallDamage;
     else if (clawshot) damage = kPvpClawshotDamage;
+    else if (slingshot) damage = kPvpSlingshotDamage;
     else if (shieldBash) damage = 0;
     else if (specialTechnique) damage = kPvpSpecialTechniqueDamage;
     const bool blocked = !ironBallLaunch && !shieldBash && state.value("blocked", false);
