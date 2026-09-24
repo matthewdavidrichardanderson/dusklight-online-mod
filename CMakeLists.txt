@@ -92,10 +92,10 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "D
                     set(USE_APPLE_SECTRUST ON)
                 endif ()
             endif ()
-            set(CURL_USE_LIBPSL OFF)
-            set(CURL_ZLIB OFF)
-            set(CURL_BROTLI OFF)
-            set(CURL_ZSTD OFF)
+            set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
+            set(CURL_ZLIB OFF CACHE STRING "" FORCE)
+            set(CURL_BROTLI OFF CACHE STRING "" FORCE)
+            set(CURL_ZSTD OFF CACHE STRING "" FORCE)
             FetchContent_MakeAvailable(online_curl)
             # This static archive is linked into the mod's shared module.
             # curl only enables PIC for its shared-library target by default.
