@@ -2120,7 +2120,7 @@ struct Transport::Impl {
                                 emit(EventKind::Diagnostic, id,
                                      "ice_timeout elapsed_s=" + std::to_string(elapsedSeconds) +
                                      " " + connections.mesh_diagnostics(id));
-                                fail("Direct peer connection timed out after 15 seconds; use Manual host with a relay code", false);
+                                fail("Direct peer connection timed out after 15 seconds.", false);
                                 return;
                             }
                         }

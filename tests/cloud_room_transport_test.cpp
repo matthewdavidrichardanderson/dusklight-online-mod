@@ -367,7 +367,7 @@ int main() {
                 if (event.kind == EventKind::Diagnostic && event.detail.starts_with("ice_timeout"))
                     sawTimeoutDiagnostic = true;
             }
-            timedOut |= side->status().error.find("Direct peer connection timed out after 15 seconds") !=
+            timedOut |= side->status().error.find("Direct peer connection timed out after 15 seconds.") !=
                 std::string::npos;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
