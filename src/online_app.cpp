@@ -779,11 +779,19 @@ void OnlineApp::update() {
         }
         switch (event.kind) {
         case net::EventKind::UdpVoice:
-            if (kVoiceRuntimeAvailable && voice_ != nullptr && game_ != nullptr &&
-                bool_value(config_.voiceEnabled))
+            if (kVoiceRuntimeAvailable && voice_ != nullptr &&
+                bool_value(config_.voiceEnabled)) {
+                const bool proximity = bool_value(config_.voiceProximity, true);
+                const int rangePercent = static_cast<int>(std::clamp(
+                    int_value(config_.voiceProximityRange, 50), int64_t{0}, int64_t{200}));
+                const float gain = proximity && game_ != nullptr ?
+                    game_->voice_gain(event.voicePosition, rangePercent) :
+                    (proximity ? 0.0f : 1.0f);
+                const float pan = proximity && game_ != nullptr ?
+                    game_->voice_pan(event.voicePosition) : 0.5f;
                 voice_->receive(event.peerId, event.udpSequence, event.voice,
-                                game_->voice_gain(event.voicePosition),
-                                game_->voice_pan(event.voicePosition));
+                                gain, pan);
+            }
             break;
         case net::EventKind::Diagnostic:
             log_info("MP_CLOUD_DIAG peer=" + (event.peerId.empty() ? "-" : event.peerId) +
@@ -899,10 +907,14 @@ void OnlineApp::update() {
         if (voiceStatsStarted_ == std::chrono::steady_clock::time_point{})
             voiceStatsStarted_ = now;
         const auto position = game_ != nullptr ? game_->voice_position() : std::nullopt;
+        const bool proximity = bool_value(config_.voiceProximity, true);
+        const net::udp::VoicePosition voicePosition =
+            position.value_or(net::udp::VoicePosition{});
         for (const auto& frame : voice_->capture()) {
             ++voiceCaptured_;
-            if (!position) { ++voiceNoPosition_; continue; }
-            if (transport_.send_voice(frame.sequence, *position, frame.bytes)) ++voiceSent_;
+            if (!position && proximity) { ++voiceNoPosition_; continue; }
+            // Global voice can transmit from menus, where Link has no position.
+            if (transport_.send_voice(frame.sequence, voicePosition, frame.bytes)) ++voiceSent_;
             else ++voiceRejected_;
         }
         if (now - voiceStatsStarted_ >= std::chrono::seconds(1)) {
@@ -1078,7 +1090,9 @@ ModResult OnlineApp::register_config(ModError* error) {
     if (add_config("voice-mic-volume", CONFIG_VAR_INT, nullptr, 100, false,
                    config_.micVolume, error) != MOD_OK ||
         add_config("voice-player-volume", CONFIG_VAR_INT, nullptr, 100, false,
-                   config_.playerVolume, error) != MOD_OK) return MOD_ERROR;
+                   config_.playerVolume, error) != MOD_OK ||
+        add_config("voice-proximity-range", CONFIG_VAR_INT, nullptr, 50, false,
+                   config_.voiceProximityRange, error) != MOD_OK) return MOD_ERROR;
     struct BoolVar { const char* name; bool value; ConfigVarHandle* handle; };
     const std::array booleans = {
         BoolVar{"match-outfit-color", true, &config_.matchOutfitColor},
@@ -1092,6 +1106,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"pvp", true, &config_.pvp},
         BoolVar{"player-list-overlay", false, &config_.playerList},
         BoolVar{"voice-enabled", false, &config_.voiceEnabled},
+        BoolVar{"voice-proximity", true, &config_.voiceProximity},
         BoolVar{"voice-mic-muted", false, &config_.voiceMicMuted},
     };
     for (const auto& variable : booleans) {
@@ -1312,7 +1327,7 @@ void OnlineApp::open_voice_window() {
     for (const auto& label : voiceInputLabels_) voiceInputOptions_.push_back(label.c_str());
     static UiTabDesc tab;
     tab = UI_TAB_DESC_INIT;
-    tab.title = "Proximity chat";
+    tab.title = "Voice chat";
     tab.build = &OnlineApp::build_voice_tab;
     tab.user_data = this;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
@@ -1792,7 +1807,7 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     add_button(left, "Join lobby", &OnlineApp::join_lobby_pressed, &app);
 
     svc_ui->pane_add_section(mod_ctx, left, "Session");
-    add_button(left, "Proximity chat", &OnlineApp::voice_pressed, &app);
+    add_button(left, "Voice chat", &OnlineApp::voice_pressed, &app);
     add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
     add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
     add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
@@ -1886,9 +1901,25 @@ ModResult OnlineApp::build_voice_tab(ModContext*, UiWindowHandle, UiElementHandl
                                     UiElementHandle right, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
-    svc_ui->pane_add_section(mod_ctx, left, "Proximity chat");
+    svc_ui->pane_add_section(mod_ctx, left, "Voice chat");
 #if defined(DUSKLIGHT_ONLINE_VOICE)
-    add_bound_control(left, UI_CONTROL_TOGGLE, "Proximity chat", app.config_.voiceEnabled);
+    add_bound_control(left, UI_CONTROL_TOGGLE, "Voice chat", app.config_.voiceEnabled);
+    add_bound_control(left, UI_CONTROL_TOGGLE, "Proximity mode", app.config_.voiceProximity,
+                      0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
+                      "<p>Make voices follow Links and fade with distance.</p>");
+    UiControlDesc range = UI_CONTROL_DESC_INIT;
+    range.kind = UI_CONTROL_NUMBER;
+    range.binding = UI_BINDING_CONFIG_VAR;
+    range.label = "Proximity range";
+    range.config_var = app.config_.voiceProximityRange;
+    range.min = 0;
+    range.max = 200;
+    range.step = 5;
+    range.suffix = "%";
+    range.is_disabled = &OnlineApp::voice_proximity_range_locked;
+    range.user_data = &app;
+    range.help_rml = "<p>Adjust how far away you can hear other players. Their voices get quieter as they move away.</p>";
+    svc_ui->pane_add_control(mod_ctx, left, &range, nullptr);
     add_bound_control(left, UI_CONTROL_TOGGLE, "Mute microphone", app.config_.voiceMicMuted,
                       0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
                       "<p>Stop sending your voice while continuing to hear other players.</p>");
@@ -1917,8 +1948,10 @@ ModResult OnlineApp::build_voice_tab(ModContext*, UiWindowHandle, UiElementHandl
 #else
     svc_ui->pane_add_text(mod_ctx, left, "Voice chat is unavailable on this platform.", nullptr);
 #endif
-    svc_ui->pane_add_section(mod_ctx, right, "Proximity chat");
-    svc_ui->pane_add_text(mod_ctx, right, "Voice gets quieter as players move away.", nullptr);
+    svc_ui->pane_add_section(mod_ctx, right, "Voice chat");
+    svc_ui->pane_add_text(mod_ctx, right,
+                          "Turn off Proximity mode to hear everyone at the set volume, centered.",
+                          nullptr);
     return MOD_OK;
 }
 
@@ -2260,6 +2293,11 @@ void OnlineApp::lobby_window_closed(ModContext*, UiWindowHandle, void* data) {
 bool OnlineApp::player_colour_locked(ModContext*, void* data) {
     return static_cast<OnlineApp*>(data)->bool_value(
         static_cast<OnlineApp*>(data)->config_.matchOutfitColor, true);
+}
+
+bool OnlineApp::voice_proximity_range_locked(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    return !app.bool_value(app.config_.voiceProximity, true);
 }
 
 void OnlineApp::reset_player_options(ModContext*, void* data) {

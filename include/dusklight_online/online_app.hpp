@@ -61,6 +61,8 @@ private:
         ConfigVarHandle pvp = 0;
         ConfigVarHandle playerList = 0;
         ConfigVarHandle voiceEnabled = 0;
+        ConfigVarHandle voiceProximity = 0;
+        ConfigVarHandle voiceProximityRange = 0;
         ConfigVarHandle voiceMicMuted = 0;
         ConfigVarHandle voiceInput = 0;
         ConfigVarHandle micVolume = 0;
@@ -211,6 +213,7 @@ public:
     static void lobby_window_closed(ModContext*, UiWindowHandle, void*);
     static void reset_player_options(ModContext*, void*);
     static bool player_colour_locked(ModContext*, void*);
+    static bool voice_proximity_range_locked(ModContext*, void*);
     void match_player_colour();
     static void open_pressed(ModContext*, void*);
     static void settings_pressed(ModContext*, void*);

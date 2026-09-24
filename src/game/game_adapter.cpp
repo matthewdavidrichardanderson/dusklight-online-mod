@@ -4479,7 +4479,8 @@ std::optional<net::udp::VoicePosition> GameAdapter::voice_position() const {
     return position;
 }
 
-float GameAdapter::voice_gain(const net::udp::VoicePosition& position) const {
+float GameAdapter::voice_gain(const net::udp::VoicePosition& position,
+                              int rangePercent) const {
     if (!stage_ready()) return 0.0f;
     const auto* local = dComIfGp_getPlayer(0);
     const char* stage = dComIfGp_getStartStageName();
@@ -4494,10 +4495,11 @@ float GameAdapter::voice_gain(const net::udp::VoicePosition& position) const {
     const float dy = position.y - local->current.pos.y;
     const float dz = position.z - local->current.pos.z;
     const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-    // Voice loses the same perceived loudness every ~667 units and reaches
-    // silence at twice the previous range. Taper its quiet end to zero.
-    constexpr float fadeDistance = 4000.0f;
-    constexpr float tailDistance = 500.0f;
+    // Scale the entire fade so 50% preserves the original 4000-unit reach.
+    const float rangeScale = std::clamp(rangePercent, 0, 200) / 50.0f;
+    if (rangeScale <= 0.0f) return 0.0f;
+    const float fadeDistance = 4000.0f * rangeScale;
+    const float tailDistance = 500.0f * rangeScale;
     if (distance >= fadeDistance) return 0.0f;
     const float attenuation = std::exp2(-6.0f * distance / fadeDistance);
     const float tail = std::min(1.0f, (fadeDistance - distance) / tailDistance);
