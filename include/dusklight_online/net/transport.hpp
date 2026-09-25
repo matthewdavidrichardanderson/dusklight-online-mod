@@ -107,9 +107,9 @@ struct CloudRoomConfig {
     bool supportsSnapshotDeltas = true;
 };
 
-// The native WebSocket service lives in the mod, not in the standalone
-// transport tests. Keeping this interface narrow also makes it impossible
-// for the room server to become a gameplay carrier by accident.
+// The mod adapts Dusklight's WebSocket service here; standalone transport
+// tests supply their own room channel. This interface keeps room signaling
+// separate from peer gameplay traffic.
 class RoomChannel {
 public:
     enum class EventKind { Open, Message, Closed, Diagnostic };

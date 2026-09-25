@@ -51,60 +51,6 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set_target_properties(opus PROPERTIES POSITION_INDEPENDENT_CODE ON)
     endblock()
 endif ()
-if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    # Room signaling owns its WebSocket client so its availability does not
-    # depend on the host's optional WebSocket service or system curl version.
-    if (NOT TARGET CURL::libcurl_static)
-        FetchContent_Declare(
-            online_curl
-            GIT_REPOSITORY https://github.com/curl/curl.git
-            GIT_TAG curl-8_22_0
-            GIT_SHALLOW TRUE
-        )
-        block()
-            set(BUILD_SHARED_LIBS OFF)
-            set(BUILD_STATIC_LIBS ON)
-            set(BUILD_CURL_EXE OFF)
-            set(BUILD_EXAMPLES OFF)
-            set(BUILD_TESTING OFF)
-            set(CURL_DISABLE_INSTALL ON)
-            set(CURL_DISABLE_LDAP ON)
-            # This curl copy only opens secure WebSockets. Optional protocols
-            # can silently pull Homebrew dylibs into the packaged macOS mod.
-            set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
-            set(CURL_USE_LIBSSH OFF CACHE BOOL "" FORCE)
-            set(USE_NGHTTP2 OFF CACHE BOOL "" FORCE)
-            set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
-            if (WIN32)
-                set(CURL_USE_SCHANNEL ON)
-                set(CURL_USE_OPENSSL OFF)
-            else ()
-                set(CURL_USE_OPENSSL ON)
-                if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-                    # Keep TLS self-contained and validate certificates with
-                    # the macOS trust store. No Homebrew dylibs are shipped.
-                    set(OPENSSL_USE_STATIC_LIBS TRUE)
-                    find_package(OpenSSL REQUIRED)
-                    if (NOT OPENSSL_SSL_LIBRARY MATCHES "\\.a$" OR
-                        NOT OPENSSL_CRYPTO_LIBRARY MATCHES "\\.a$")
-                        message(FATAL_ERROR "macOS room signaling requires static OpenSSL libraries")
-                    endif ()
-                    set(USE_APPLE_SECTRUST ON)
-                endif ()
-            endif ()
-            set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
-            set(CURL_ZLIB OFF CACHE STRING "" FORCE)
-            set(CURL_BROTLI OFF CACHE STRING "" FORCE)
-            set(CURL_ZSTD OFF CACHE STRING "" FORCE)
-            FetchContent_MakeAvailable(online_curl)
-            # This static archive is linked into the mod's shared module.
-            # curl only enables PIC for its shared-library target by default.
-            if (NOT WIN32)
-                set_target_properties(libcurl_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-            endif ()
-        endblock()
-    endif ()
-endif ()
 if (NOT TARGET nlohmann_json::nlohmann_json)
     FetchContent_Declare(
         nlohmann_json
@@ -419,26 +365,6 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(dusklight_online PRIVATE opus)
     target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_VOICE=1)
 endif ()
-if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_NATIVE_ROOM_CHANNEL=1)
-    target_sources(dusklight_online PRIVATE src/net/native_room_channel.cpp)
-    target_link_libraries(dusklight_online PRIVATE CURL::libcurl_static)
-    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        # The host may also load libcurl. Keep this private static copy from
-        # being resolved against (or interposing on) the host's curl symbols.
-        target_link_options(dusklight_online PRIVATE "-Wl,--exclude-libs,libcurl.a")
-    endif ()
-    if (PROJECT_IS_TOP_LEVEL)
-        add_executable(dusklight_online_room_channel_live_test EXCLUDE_FROM_ALL
-            tests/native_room_channel_live_test.cpp
-            src/net/native_room_channel.cpp
-        )
-        target_compile_features(dusklight_online_room_channel_live_test PRIVATE cxx_std_20)
-        target_include_directories(dusklight_online_room_channel_live_test PRIVATE include)
-        target_link_libraries(dusklight_online_room_channel_live_test PRIVATE
-            CURL::libcurl_static nlohmann_json::nlohmann_json)
-    endif ()
-endif ()
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
     # MSVC otherwise records the absolute build-machine PDB path in mod.dll's
@@ -605,23 +531,6 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     endif ()
     add_test(NAME dusklight_online_cloud_room_transport
              COMMAND dusklight_online_cloud_room_transport_test)
-
-    # Opt-in live diagnostic: connects real native room channels to a supplied
-    # service URL. It is not part of CI because it requires an external Worker.
-    if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-        add_executable(dusklight_online_cloud_room_live_mesh_test EXCLUDE_FROM_ALL
-            tests/cloud_room_live_mesh_test.cpp
-            src/net/native_room_channel.cpp
-            ${ONLINE_CORE_SOURCES}
-        )
-        target_compile_features(dusklight_online_cloud_room_live_mesh_test PRIVATE cxx_std_20)
-        target_include_directories(dusklight_online_cloud_room_live_mesh_test PRIVATE include src)
-        target_link_libraries(dusklight_online_cloud_room_live_mesh_test PRIVATE
-            CURL::libcurl_static nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
-        if (WIN32)
-            target_link_libraries(dusklight_online_cloud_room_live_mesh_test PRIVATE ws2_32)
-        endif ()
-    endif ()
 
     add_executable(dusklight_online_udp_codec_test
         tests/udp_codec_test.cpp

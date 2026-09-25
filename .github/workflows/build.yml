@@ -8,32 +8,11 @@ on:
 
 env:
   SYMGEN_VERSION: v1.2.4
+  DUSKLIGHT_VERSION: v2.0.2
 
 jobs:
-  dusklight-sdk:
-    name: Resolve Dusklight release tag
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.resolve.outputs.tag }}
-    steps:
-      - name: Resolve latest published release
-        id: resolve
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(curl --fail --silent --show-error --location --retry 3 \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            https://api.github.com/repos/TwilitRealm/dusklight/releases/latest | jq -er '.tag_name')
-          [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
-          git ls-remote --exit-code --tags https://github.com/TwilitRealm/dusklight.git "refs/tags/$tag" > /dev/null
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Building against Dusklight release $tag"
-
   build:
     name: Build ${{matrix.platform}}
-    needs: dusklight-sdk
     runs-on: ${{matrix.runner}}
     strategy:
       fail-fast: false
@@ -73,7 +52,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: dusklight
-          key: dusklight-${{runner.os}}-${{needs.dusklight-sdk.outputs.tag}}
+          key: dusklight-${{runner.os}}-${{env.DUSKLIGHT_VERSION}}
 
       - name: Enable Visual Studio environment
         if: matrix.msvc_arch
@@ -91,22 +70,12 @@ jobs:
         with:
           packages: ndk;${{matrix.android_ndk}}
 
-      - name: Install Linux room TLS build dependency
-        if: matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev
-
-      - name: Install macOS room TLS build dependency
-        if: matrix.platform == 'macos-arm64' || matrix.platform == 'macos-x86_64'
-        run: brew install openssl@3
-
       - name: Download official macOS game executable for SDK linking
         # Published macOS SDK stubs lack LC_UUID; ModSDK supports DUSK_GAME_EXE.
         if: matrix.platform == 'macos-arm64' || matrix.platform == 'macos-x86_64'
         shell: bash
         env:
-          DUSKLIGHT_TAG: ${{needs.dusklight-sdk.outputs.tag}}
+          DUSKLIGHT_TAG: ${{env.DUSKLIGHT_VERSION}}
           PLATFORM: ${{matrix.platform}}
         run: |
           arch="${PLATFORM#macos-}"
@@ -125,11 +94,10 @@ jobs:
         shell: bash
         run: |
           args=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-                -DDUSKLIGHT_VERSION=${{needs.dusklight-sdk.outputs.tag}}
+                -DDUSKLIGHT_VERSION=${{env.DUSKLIGHT_VERSION}}
                 ${{matrix.cmake_args}})
           if [[ "${{matrix.platform}}" == macos-* ]]; then
-            args+=(-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
-                   -DDUSK_GAME_EXE="$DUSK_GAME_EXE")
+            args+=(-DDUSK_GAME_EXE="$DUSK_GAME_EXE")
           fi
           if [[ -n "${{matrix.android_ndk}}" ]]; then
             args+=(-DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/${{matrix.android_ndk}}/build/cmake/android.toolchain.cmake"

@@ -1,7 +1,5 @@
 #include "dusklight_online/net/sdk_room_channel.hpp"
 
-#ifndef DUSKLIGHT_ONLINE_NATIVE_ROOM_CHANNEL
-
 #include <mods/svc/websocket.hpp>
 
 namespace dusklight_online::net {
@@ -12,7 +10,7 @@ public:
     bool open(std::string_view url, std::string& error) override {
         close();
         if (svc_websocket == nullptr) {
-            error = "WebSocket service unavailable; use Manual host";
+            error = "Dusklight WebSocket service unavailable";
             return false;
         }
         mods::ws::Options options;
@@ -78,5 +76,3 @@ std::unique_ptr<RoomChannel> make_sdk_room_channel() {
 }
 
 }  // namespace dusklight_online::net
-
-#endif
