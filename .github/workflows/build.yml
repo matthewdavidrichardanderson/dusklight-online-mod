@@ -101,6 +101,26 @@ jobs:
         if: matrix.platform == 'macos-arm64' || matrix.platform == 'macos-x86_64'
         run: brew install openssl@3
 
+      - name: Download official macOS game executable for SDK linking
+        # Published macOS SDK stubs lack LC_UUID; ModSDK supports DUSK_GAME_EXE.
+        if: matrix.platform == 'macos-arm64' || matrix.platform == 'macos-x86_64'
+        shell: bash
+        env:
+          DUSKLIGHT_TAG: ${{needs.dusklight-sdk.outputs.tag}}
+          PLATFORM: ${{matrix.platform}}
+        run: |
+          arch="${PLATFORM#macos-}"
+          archive="$RUNNER_TEMP/Dusklight-${DUSKLIGHT_TAG}-macos-${arch}.zip"
+          game_exe="$RUNNER_TEMP/Dusklight-${arch}"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/TwilitRealm/dusklight/releases/download/${DUSKLIGHT_TAG}/Dusklight-${DUSKLIGHT_TAG}-macos-${arch}.zip"
+          unzip -p "$archive" Dusklight.app/Contents/MacOS/Dusklight > "$game_exe"
+          test -s "$game_exe"
+          test "$(lipo -archs "$game_exe")" = "$arch"
+          otool -l "$game_exe" | awk '/cmd LC_UUID/ { found=1 } END { exit !found }'
+          echo "DUSK_GAME_EXE=$game_exe" >> "$GITHUB_ENV"
+
       - name: Configure CMake
         shell: bash
         run: |
@@ -108,7 +128,8 @@ jobs:
                 -DDUSKLIGHT_VERSION=${{needs.dusklight-sdk.outputs.tag}}
                 ${{matrix.cmake_args}})
           if [[ "${{matrix.platform}}" == macos-* ]]; then
-            args+=(-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)")
+            args+=(-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+                   -DDUSK_GAME_EXE="$DUSK_GAME_EXE")
           fi
           if [[ -n "${{matrix.android_ndk}}" ]]; then
             args+=(-DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/${{matrix.android_ndk}}/build/cmake/android.toolchain.cmake"
