@@ -1637,8 +1637,7 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         const bool remoteBlockAction =
             (actor == fpcNm_Obj_Movebox_e && remote_movebox_action_active(process)) ||
             (actor == fpcNm_Obj_IceBlock_e && remote_iceblock_action_active(process));
-        if (is_web_switch_actor(actor) ||
-            (is_room_action_actor(actor) && !room_actor_persistent_switch(process, flag)) ||
+        if ((is_room_action_actor(actor) && !room_actor_persistent_switch(process, flag)) ||
             remoteBlockAction ||
             is_floor_switch_momentary_output(actor, fpcM_GetParam(process), flag) ||
             is_remote_floor_switch_execution(process)) return;
