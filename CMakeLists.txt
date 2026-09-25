@@ -419,7 +419,6 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(dusklight_online PRIVATE opus)
     target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_VOICE=1)
 endif ()
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InterpolationSDKStub.cmake")
 if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_compile_definitions(dusklight_online PRIVATE DUSKLIGHT_ONLINE_NATIVE_ROOM_CHANNEL=1)
     target_sources(dusklight_online PRIVATE src/net/native_room_channel.cpp)
@@ -442,9 +441,6 @@ if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "D
 endif ()
 if (WIN32)
     target_link_libraries(dusklight_online PRIVATE ws2_32 user32)
-    if (PROJECT_IS_TOP_LEVEL)
-        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LineInterpolationImports.cmake")
-    endif ()
     # MSVC otherwise records the absolute build-machine PDB path in mod.dll's
     # PE debug directory. Keep distributed .dusk packages free of usernames
     # and local workspace paths while retaining a useful PDB basename.
