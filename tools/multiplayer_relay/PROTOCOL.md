@@ -192,7 +192,8 @@ are discarded, and authenticated UDP input is rate limited.
 UDP packet type 8 carries positional Opus voice: a 21-byte position followed by
 1 to 400 encoded bytes. The relay forwards it only to other members of the same
 room, including through UDP fallback. Clients choose whether to send or play
-voice; proximity attenuation is applied by the receiving client.
+voice. The owner sends proximity mode and range over reliable peer messages;
+the receiving client applies them to voice playback.
 
 ## Connection sequence
 

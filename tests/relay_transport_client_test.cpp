@@ -82,6 +82,8 @@ int main(int argc, char** argv) {
     ownerConfig.createRoom = true;
     ownerConfig.settings.syncWorld = true;
     ownerConfig.settings.pvp = true;
+    ownerConfig.settings.voiceProximity = false;
+    ownerConfig.settings.voiceProximityRange = 125;
 
     std::string error;
     if (!owner.start_relay(ownerConfig, &error)) {
@@ -94,6 +96,8 @@ int main(int argc, char** argv) {
     RelayConfig joinConfig = ownerConfig;
     joinConfig.name = "Joiner";
     joinConfig.createRoom = false;
+    joinConfig.settings.voiceProximity = true;
+    joinConfig.settings.voiceProximityRange = 50;
     auto rejectedConfig = joinConfig;
     rejectedConfig.password = "incorrect-password";
     if (!joiner.start_relay(rejectedConfig, &error) ||
@@ -120,6 +124,15 @@ int main(int argc, char** argv) {
         !owner.status().snapshotDeltasReady || !joiner.status().snapshotDeltasReady) {
         fail("relay owner/settings state was not normalized from welcome");
     }
+    if (!wait_until(owner, joiner, [&] { return joiner.status().voiceSettingsReady; }) ||
+        joiner.status().settings.voiceProximity ||
+        joiner.status().settings.voiceProximityRange != 125)
+        fail("relay joiner did not receive peer voice settings from owner");
+    if (!owner.publish_voice_settings(true, 75) ||
+        !wait_until(owner, joiner, [&] {
+            return joiner.status().settings.voiceProximity &&
+                   joiner.status().settings.voiceProximityRange == 75;
+        })) fail("relay peer voice setting update failed");
 
     bool ownerDirect = false, joinerDirect = false;
     if (!std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") && !wait_until(owner, joiner, [&] {
@@ -477,8 +490,8 @@ int main(int argc, char** argv) {
         fail("owner room_settings send failed");
     }
     if (!wait_until(owner, joiner, [&] {
-            return !joiner.status().settings.remoteCollision;
-        }) || joiner.status().settings.pvp) {
+        return !joiner.status().settings.remoteCollision;
+    }) || joiner.status().settings.pvp) {
         fail("relay did not normalize and publish room settings");
     }
 

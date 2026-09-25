@@ -40,6 +40,8 @@ struct RoomSettings {
     bool syncWorld = false;
     bool remoteCollision = true;
     bool pvp = true;
+    bool voiceProximity = true;
+    int voiceProximityRange = 50;
 };
 
 [[nodiscard]] inline bool effective_remote_collision(const RoomSettings& settings) {
@@ -168,6 +170,7 @@ struct Status {
     bool welcomed = false;
     bool udpReady = false;
     bool isOwner = false;
+    bool voiceSettingsReady = false;
     bool semanticVisualsReady = false;
     bool snapshotDeltasReady = false;
     std::string name;
@@ -243,6 +246,9 @@ public:
     // sessions emit the legacy individual setting messages; relay sessions
     // emit protocol-2 room_settings.
     bool publish_room_settings(const RoomSettings& settings);
+    // Proximity settings use the reliable peer path; the room service never
+    // stores or forwards them.
+    bool publish_voice_settings(bool proximity, int rangePercent);
     bool publish_visual_preferences(bool wantPuppet, bool wantMidna);
     // Removes one guest from the lobby. Direct hosts enforce this locally;
     // relay lobby owners request an owner-validated removal from the relay.

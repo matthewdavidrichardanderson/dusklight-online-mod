@@ -21,6 +21,8 @@ struct Broker {
     std::map<std::string, Channel*> members;
     uint32_t nextId = 1;
     bool gameplayForwardingAttempt = false;
+    bool voiceSettingsOnRoomChannel = false;
+    int roomSettingsMessages = 0;
     bool forwardIce = true;
     std::string dropJoinNotificationTo;
     RoomSettings roomSettings;
@@ -66,6 +68,9 @@ public:
 void Broker::accept(Channel& channel, const json& message) {
     const auto type = message.value("type", "");
     if (type == "hello") {
+        if (message.value("settings", json::object()).contains("voice_proximity") ||
+            message.value("settings", json::object()).contains("voice_proximity_range"))
+            voiceSettingsOnRoomChannel = true;
         if (message.value("protocol_version", 0) != 3) throw std::runtime_error("wrong cloud protocol");
         channel.id = "client_" + std::to_string(nextId++);
         channel.name = message.value("name", "Player");
@@ -92,6 +97,11 @@ void Broker::accept(Channel& channel, const json& message) {
             {"client_id", channel.id}, {"kind", message.at("kind")},
             {"data", message.at("data")}, {"generation", message.at("generation")}});
     } else if (type == "room_settings" || type == "settings_ready" || type == "kick") {
+        if (type == "room_settings") ++roomSettingsMessages;
+        if (type == "room_settings" &&
+            (message.value("settings", json::object()).contains("voice_proximity") ||
+             message.value("settings", json::object()).contains("voice_proximity_range")))
+            voiceSettingsOnRoomChannel = true;
         // Covered by the Worker protocol test. This broker only needs to
         // exercise the real native ICE/gameplay path.
     } else {
@@ -131,11 +141,15 @@ int main() {
     configuration.stunHost.clear(); // host candidates suffice on one machine
     configuration.stunPort = 0;
     configuration.createRoom = true;
+    configuration.settings.voiceProximity = false;
+    configuration.settings.voiceProximityRange = 125;
     std::string error;
     if (!host.start_cloud_room(configuration, std::make_unique<Channel>(broker), &error))
         fail(error.c_str());
     configuration.createRoom = false;
     configuration.name = "Guest";
+    configuration.settings.voiceProximity = true;
+    configuration.settings.voiceProximityRange = 50;
     if (!guest.start_cloud_room(configuration, std::make_unique<Channel>(broker), &error))
         fail(error.c_str());
 
@@ -143,7 +157,7 @@ int main() {
     bool sent = false, delivered = false, sawIceTx = false, sawIceRx = false;
     while (std::chrono::steady_clock::now() < deadline &&
            !(delivered && host.status().natPeerCount == 1 &&
-             guest.status().natPeerCount == 1)) {
+             guest.status().natPeerCount == 1 && guest.status().voiceSettingsReady)) {
         host.tick();
         guest.tick();
         if (host.status().welcomed && guest.status().welcomed &&
@@ -174,8 +188,64 @@ int main() {
                   << " guest_error=" << guest.status().error << '\n';
         fail("direct-only ICE did not deliver the buffered gameplay message");
     }
-    guest.disconnect();
+    if (!guest.status().voiceSettingsReady ||
+        guest.status().settings.voiceProximity ||
+        guest.status().settings.voiceProximityRange != 125) {
+        fail("host proximity settings did not arrive over the peer connection");
+    }
+    if (!guest.send({{"type", "voice_settings"}, {"enabled", true},
+                     {"range_percent", 1}})) fail("guest spoof send failed");
+    for (int i = 0; i < 60; ++i) { host.tick(); guest.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+    if (host.status().settings.voiceProximity ||
+        host.status().settings.voiceProximityRange != 125)
+        fail("non-owner changed peer voice settings");
+    if (!host.publish_voice_settings(true, 75)) fail("host peer voice update failed");
+    const auto voiceDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < voiceDeadline &&
+           (!guest.status().settings.voiceProximity ||
+            guest.status().settings.voiceProximityRange != 75)) {
+        host.tick(); guest.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!guest.status().settings.voiceProximity ||
+        guest.status().settings.voiceProximityRange != 75 ||
+        broker.gameplayForwardingAttempt || broker.voiceSettingsOnRoomChannel ||
+        broker.roomSettingsMessages != 0)
+        fail("host peer voice update did not stay on the peer path");
+    Transport late;
+    configuration.name = "Late";
+    configuration.settings.voiceProximity = false;
+    configuration.settings.voiceProximityRange = 50;
+    if (!late.start_cloud_room(configuration, std::make_unique<Channel>(broker), &error))
+        fail(error.c_str());
+    const auto lateDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+    while (std::chrono::steady_clock::now() < lateDeadline &&
+           (!late.status().voiceSettingsReady || late.status().natPeerCount != 2)) {
+        host.tick(); guest.tick(); late.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!late.status().voiceSettingsReady || !late.status().settings.voiceProximity ||
+        late.status().settings.voiceProximityRange != 75 ||
+        broker.voiceSettingsOnRoomChannel || broker.roomSettingsMessages != 0)
+        fail("late joiner did not receive host voice settings over the peer path");
     host.disconnect();
+    guest.tick(); late.tick();
+    if (!guest.status().isOwner) fail("remaining peer did not inherit room ownership");
+    if (!guest.publish_voice_settings(false, 90)) fail("new owner voice update failed");
+    const auto transferDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < transferDeadline &&
+           (late.status().settings.voiceProximity ||
+            late.status().settings.voiceProximityRange != 90)) {
+        guest.tick(); late.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (late.status().settings.voiceProximity ||
+        late.status().settings.voiceProximityRange != 90 ||
+        broker.voiceSettingsOnRoomChannel || broker.roomSettingsMessages != 0)
+        fail("transferred host voice settings did not stay on the peer path");
+    late.disconnect();
+    guest.disconnect();
 
     // A joined peer can receive authenticated ICE even if its peer-joined
     // notification was lost. It must recover the link and reply, not discard

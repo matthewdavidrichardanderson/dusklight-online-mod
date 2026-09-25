@@ -745,6 +745,7 @@ void OnlineApp::update() {
     const net::Status captureStatus = transport_.status();
     if (voice_ != nullptr) {
         const bool voiceEnabled = kVoiceRuntimeAvailable && captureStatus.welcomed &&
+                                  captureStatus.voiceSettingsReady &&
                                   bool_value(config_.voiceEnabled);
         if (voiceEnabled) refresh_master_volume_gain();
         voice_->configure(voiceEnabled, bool_value(config_.voiceMicMuted),
@@ -795,10 +796,11 @@ void OnlineApp::update() {
         switch (event.kind) {
         case net::EventKind::UdpVoice:
             if (kVoiceRuntimeAvailable && voice_ != nullptr &&
+                transport_.status().voiceSettingsReady &&
                 bool_value(config_.voiceEnabled)) {
-                const bool proximity = bool_value(config_.voiceProximity, true);
-                const int rangePercent = static_cast<int>(std::clamp(
-                    int_value(config_.voiceProximityRange, 50), int64_t{0}, int64_t{200}));
+                const net::RoomSettings settings = transport_.status().settings;
+                const bool proximity = settings.voiceProximity;
+                const int rangePercent = settings.voiceProximityRange;
                 const float gain = proximity && game_ != nullptr ?
                     game_->voice_gain(event.voicePosition, rangePercent) :
                     (proximity ? 0.0f : 1.0f);
@@ -917,33 +919,17 @@ void OnlineApp::update() {
         if (protocolFatal) break;
     }
     if (kVoiceRuntimeAvailable && voice_ != nullptr && transport_.status().welcomed &&
+        transport_.status().voiceSettingsReady &&
         bool_value(config_.voiceEnabled)) {
-        const auto now = std::chrono::steady_clock::now();
-        if (voiceStatsStarted_ == std::chrono::steady_clock::time_point{})
-            voiceStatsStarted_ = now;
         const auto position = game_ != nullptr ? game_->voice_position() : std::nullopt;
-        const bool proximity = bool_value(config_.voiceProximity, true);
+        const bool proximity = transport_.status().settings.voiceProximity;
         const net::udp::VoicePosition voicePosition =
             position.value_or(net::udp::VoicePosition{});
         for (const auto& frame : voice_->capture()) {
-            ++voiceCaptured_;
-            if (!position && proximity) { ++voiceNoPosition_; continue; }
+            if (!position && proximity) continue;
             // Global voice can transmit from menus, where Link has no position.
-            if (transport_.send_voice(frame.sequence, voicePosition, frame.bytes)) ++voiceSent_;
-            else ++voiceRejected_;
+            (void)transport_.send_voice(frame.sequence, voicePosition, frame.bytes);
         }
-        if (now - voiceStatsStarted_ >= std::chrono::seconds(1)) {
-            log_info("VOICE_TX mode=" + std::to_string(static_cast<int>(transport_.status().mode)) +
-                " captured=" + std::to_string(voiceCaptured_) +
-                " sent=" + std::to_string(voiceSent_) +
-                " rejected=" + std::to_string(voiceRejected_) +
-                " no_position=" + std::to_string(voiceNoPosition_));
-            voiceStatsStarted_ = now;
-            voiceCaptured_ = voiceSent_ = voiceRejected_ = voiceNoPosition_ = 0;
-        }
-    } else {
-        voiceStatsStarted_ = {};
-        voiceCaptured_ = voiceSent_ = voiceRejected_ = voiceNoPosition_ = 0;
     }
     const net::Status currentStatus = transport_.status();
     // A direct host owns a lobby before any guests arrive. Joiners must
@@ -1211,6 +1197,9 @@ net::RoomSettings OnlineApp::configured_settings() const {
     settings.syncWorld = false;
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
     settings.pvp = bool_value(config_.pvp, true) && settings.remoteCollision;
+    settings.voiceProximity = bool_value(config_.voiceProximity, true);
+    settings.voiceProximityRange = static_cast<int>(std::clamp(
+        int_value(config_.voiceProximityRange, 50), int64_t{0}, int64_t{200}));
     return settings;
 }
 
@@ -1944,21 +1933,23 @@ ModResult OnlineApp::build_voice_tab(ModContext*, UiWindowHandle, UiElementHandl
     svc_ui->pane_add_section(mod_ctx, left, "Voice chat");
 #if defined(DUSKLIGHT_ONLINE_VOICE)
     add_bound_control(left, UI_CONTROL_TOGGLE, "Voice chat", app.config_.voiceEnabled);
-    add_bound_control(left, UI_CONTROL_TOGGLE, "Proximity mode", app.config_.voiceProximity,
-                      0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
-                      "<p>Make voices follow Links and fade with distance.</p>");
+    add_session_toggle(left, "Proximity mode", &OnlineApp::voice_proximity_get,
+                       &OnlineApp::voice_proximity_set,
+                       &OnlineApp::voice_proximity_setting_locked, &app,
+                       "<p>The lobby host chooses whether voices follow Links and fade with distance. Voice chat remains optional for each player.</p>");
     UiControlDesc range = UI_CONTROL_DESC_INIT;
     range.kind = UI_CONTROL_NUMBER;
-    range.binding = UI_BINDING_CONFIG_VAR;
     range.label = "Proximity range";
-    range.config_var = app.config_.voiceProximityRange;
+    range.get = &OnlineApp::voice_proximity_range_get;
+    range.set = &OnlineApp::voice_proximity_range_set;
     range.min = 0;
     range.max = 200;
     range.step = 5;
     range.suffix = "%";
     range.is_disabled = &OnlineApp::voice_proximity_range_locked;
+    range.is_modified = &never_modified;
     range.user_data = &app;
-    range.help_rml = "<p>Adjust how far away you can hear other players. Their voices get quieter as they move away.</p>";
+    range.help_rml = "<p>The lobby host sets how far away players can hear each other.</p>";
     svc_ui->pane_add_control(mod_ctx, left, &range, nullptr);
     add_button(left, "Set mute hotkey", &OnlineApp::mute_hotkey_pressed, &app,
                nullptr, nullptr, nullptr, nullptr,
@@ -2347,9 +2338,17 @@ bool OnlineApp::player_colour_locked(ModContext*, void* data) {
         static_cast<OnlineApp*>(data)->config_.matchOutfitColor, true);
 }
 
-bool OnlineApp::voice_proximity_range_locked(ModContext*, void* data) {
+bool OnlineApp::voice_proximity_range_locked(ModContext* mod_ctx, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
-    return !app.bool_value(app.config_.voiceProximity, true);
+    return voice_proximity_setting_locked(mod_ctx, data) ||
+        !app.displayed_settings().voiceProximity;
+}
+
+bool OnlineApp::voice_proximity_setting_locked(ModContext*, void* data) {
+    const net::Status status = static_cast<OnlineApp*>(data)->transport_.status();
+    return status.enabled &&
+        (status.mode == net::Mode::DirectJoin ||
+         (net::is_room_mode(status.mode) && !status.isOwner));
 }
 
 void OnlineApp::reset_player_options(ModContext*, void* data) {
@@ -2654,6 +2653,42 @@ void OnlineApp::pvp_set(ModContext*, void* data, const UiControlValue* value) {
         settings.pvp = value->bool_value && settings.remoteCollision;
         settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
+    }
+}
+
+void OnlineApp::voice_proximity_get(ModContext*, void* data, UiControlValue* value) {
+    value->bool_value = static_cast<OnlineApp*>(data)->displayed_settings().voiceProximity;
+}
+
+void OnlineApp::voice_proximity_set(ModContext*, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    if (voice_proximity_setting_locked(mod_ctx, data)) return;
+    svc_config->set_bool(mod_ctx, app.config_.voiceProximity, value->bool_value);
+    if (status.enabled &&
+        (status.mode == net::Mode::DirectHost ||
+         (net::is_room_mode(status.mode) && status.isOwner))) {
+        app.transport_.publish_voice_settings(value->bool_value,
+                                              status.settings.voiceProximityRange);
+    }
+}
+
+void OnlineApp::voice_proximity_range_get(ModContext*, void* data, UiControlValue* value) {
+    value->int_value = static_cast<OnlineApp*>(data)->displayed_settings().voiceProximityRange;
+}
+
+void OnlineApp::voice_proximity_range_set(ModContext*, void* data,
+                                          const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    if (voice_proximity_setting_locked(mod_ctx, data) ||
+        !app.displayed_settings().voiceProximity) return;
+    const int percent = static_cast<int>(std::clamp(value->int_value, int64_t{0}, int64_t{200}));
+    svc_config->set_int(mod_ctx, app.config_.voiceProximityRange, percent);
+    if (status.enabled &&
+        (status.mode == net::Mode::DirectHost ||
+         (net::is_room_mode(status.mode) && status.isOwner))) {
+        app.transport_.publish_voice_settings(status.settings.voiceProximity, percent);
     }
 }
 

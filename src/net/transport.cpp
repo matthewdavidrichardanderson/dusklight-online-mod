@@ -613,6 +613,7 @@ struct Transport::Impl {
         status.udpReady = false;
         status.welcomed = false;
         status.isOwner = false;
+        status.voiceSettingsReady = false;
         status.semanticVisualsReady = false;
         status.snapshotDeltasReady = false;
         status.state = State::Disconnected;
@@ -817,6 +818,8 @@ struct Transport::Impl {
             {"sync_world", status.settings.syncWorld},
             {"remote_collision", status.settings.remoteCollision},
             {"pvp", status.settings.pvp && status.settings.remoteCollision},
+            {"voice_proximity", status.settings.voiceProximity},
+            {"voice_proximity_range", status.settings.voiceProximityRange},
             {"semantic_visuals_ready", semanticVisualsReady},
             {"snapshot_deltas_ready", snapshotDeltasReady},
             {"want_puppet", status.settings.dummyModel},
@@ -1409,6 +1412,9 @@ struct Transport::Impl {
             sender.wantMidna = false;
             return;
         }
+        // Direct guests cannot inject host-controlled voice settings into the
+        // host's broadcast path.
+        if (type == "voice_settings") return;
 
         const std::string target = routed.value("target_client_id", "");
         const bool targetedSync = type == "sync_request" ||
@@ -1549,6 +1555,14 @@ struct Transport::Impl {
         }
         settingsRequested = true; barrierStarted = std::chrono::steady_clock::now();
         return queue_primary(message);
+    }
+    bool send_voice_settings_to(const std::string& target = {}) {
+        if (!is_room_mode(status.mode) || !status.isOwner || !status.welcomed) return false;
+        json message = {{"type", "voice_settings"},
+                        {"enabled", status.settings.voiceProximity},
+                        {"range_percent", status.settings.voiceProximityRange}};
+        if (!target.empty()) message["target_client_id"] = target;
+        return send_mesh_message(message);
     }
     void flush_deferred_gameplay() {
         while (!settingsRequested && !settingsBarrier && !deferredSends.empty() && !deliveryFailure) {
@@ -1703,6 +1717,7 @@ struct Transport::Impl {
             status.ownerClientId = message.value("owner_client_id", "");
             status.udpToken = message.value("udp_token", "");
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
+            status.voiceSettingsReady = status.mode == Mode::DirectJoin || status.isOwner;
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
             status.snapshotDeltasReady =
@@ -1737,6 +1752,11 @@ struct Transport::Impl {
                     message.value("remote_collision", status.settings.remoteCollision);
                 status.settings.pvp = message.value("pvp", status.settings.pvp) &&
                                       status.settings.remoteCollision;
+                status.settings.voiceProximity =
+                    message.value("voice_proximity", status.settings.voiceProximity);
+                status.settings.voiceProximityRange = std::clamp(
+                    message.value("voice_proximity_range", status.settings.voiceProximityRange),
+                    0, 200);
                 const std::string hostName = message.value("direct_peer_name", "Host");
                 peerNames["direct"] = hostName;
             }
@@ -1759,6 +1779,12 @@ struct Transport::Impl {
             }
             sessionEstablished = true;
             status.reconnecting = false;
+            if (is_room_mode(status.mode) && !status.isOwner &&
+                meshLinks.contains(status.ownerClientId) &&
+                !send_mesh_message({{"type", "voice_settings_request"},
+                                    {"target_client_id", status.ownerClientId}})) {
+                deliveryFailure = true;
+            }
             if (status.mode == Mode::CloudRoom)
                 emit(EventKind::Diagnostic, {},
                      "room_membership self=" + status.clientId +
@@ -1870,7 +1896,38 @@ struct Transport::Impl {
         } else if (type == "owner_changed") {
             status.ownerClientId = message.value("owner_client_id", "");
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
+            if (status.isOwner) {
+                status.voiceSettingsReady = true;
+                if (!send_voice_settings_to()) deliveryFailure = true;
+            } else {
+                status.voiceSettingsReady = false;
+                if (meshLinks.contains(status.ownerClientId) &&
+                    !send_mesh_message({{"type", "voice_settings_request"},
+                                        {"target_client_id", status.ownerClientId}})) {
+                    deliveryFailure = true;
+                }
+            }
             emit(EventKind::Message, {}, {}, message);
+        } else if (type == "voice_settings_request") {
+            const std::string source = message.value("client_id", "");
+            if (is_room_mode(status.mode) && status.isOwner &&
+                meshLinks.contains(source) && !send_voice_settings_to(source)) {
+                deliveryFailure = true;
+            }
+        } else if (type == "voice_settings") {
+            const std::string source = message.value("client_id", "");
+            if (is_room_mode(status.mode) && source != status.ownerClientId) return;
+            if (status.mode != Mode::DirectJoin && !is_room_mode(status.mode)) return;
+            const auto enabled = message.find("enabled");
+            const auto range = message.find("range_percent");
+            if (enabled == message.end() || !enabled->is_boolean() ||
+                range == message.end() || !range->is_number_integer()) return;
+            const int64_t percent = range->get<int64_t>();
+            if (percent < 0 || percent > 200) return;
+            status.settings.voiceProximity = enabled->get<bool>();
+            status.settings.voiceProximityRange = static_cast<int>(percent);
+            status.voiceSettingsReady = true;
+            emit(EventKind::Message, source, {}, message);
         } else if (type == "room_settings") {
             status.ownerClientId = message.value("owner_client_id", status.ownerClientId);
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
@@ -2208,6 +2265,7 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
     impl_->status.port = config.port;
     impl_->status.settings = config.settings;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
+    impl_->status.voiceSettingsReady = true;
     impl_->sessionId = config.sessionId;
     impl_->sessionKey = config.sessionKey;
     impl_->wantPuppet = config.wantPuppet;
@@ -2518,7 +2576,8 @@ bool Transport::send_remote_object(const udp::RemoteObjectPacket& object) {
 
 bool Transport::send_voice(uint32_t sequence, const udp::VoicePosition& position,
                            std::span<const uint8_t> opus) {
-    if (!impl_->status.enabled || !impl_->status.welcomed || opus.empty() ||
+    if (!impl_->status.enabled || !impl_->status.welcomed ||
+        !impl_->status.voiceSettingsReady || opus.empty() ||
         opus.size() > 400) return false;
     const std::string senderId = impl_->local_udp_sender_id();
     if (impl_->status.mode == Mode::DirectHost)
@@ -2611,6 +2670,23 @@ bool Transport::publish_room_settings(const RoomSettings& settings) {
                     {"enabled", effective_pvp(impl_->status.settings)}});
     }
     return ok;
+}
+
+bool Transport::publish_voice_settings(bool proximity, int rangePercent) {
+    if (!impl_->status.enabled ||
+        (impl_->status.mode != Mode::DirectHost &&
+         (!is_room_mode(impl_->status.mode) || !impl_->status.isOwner))) return false;
+    const bool changed = impl_->status.settings.voiceProximity != proximity ||
+        impl_->status.settings.voiceProximityRange != std::clamp(rangePercent, 0, 200);
+    impl_->status.settings.voiceProximity = proximity;
+    impl_->status.settings.voiceProximityRange = std::clamp(rangePercent, 0, 200);
+    impl_->status.voiceSettingsReady = true;
+    if (!changed) return true;
+    if (impl_->status.mode == Mode::DirectHost) {
+        return send({{"type", "voice_settings"}, {"enabled", proximity},
+                     {"range_percent", impl_->status.settings.voiceProximityRange}});
+    }
+    return impl_->send_voice_settings_to();
 }
 
 bool Transport::publish_visual_preferences(bool wantPuppet, bool wantMidna) {

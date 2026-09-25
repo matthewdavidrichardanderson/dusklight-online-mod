@@ -119,7 +119,8 @@ void pump(Transport& host, Transport& first, Transport& second, int ticks = 300)
 int main() {
     constexpr dusklight_online::net::RoomSettings defaults{};
     static_assert(defaults.dummyModel && defaults.syncFlags && !defaults.syncWorld &&
-                  defaults.remoteCollision && defaults.pvp);
+                  defaults.remoteCollision && defaults.pvp &&
+                  defaults.voiceProximity && defaults.voiceProximityRange == 50);
 #if defined(_WIN32)
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
@@ -140,6 +141,8 @@ int main() {
     hostConfig.port = port;
     hostConfig.settings.syncWorld = true;
     hostConfig.settings.pvp = true;
+    hostConfig.settings.voiceProximity = false;
+    hostConfig.settings.voiceProximityRange = 125;
 
     std::string error;
     {
@@ -212,6 +215,11 @@ int main() {
     }
     if (!alice.status().settings.syncWorld || !alice.status().settings.pvp) {
         fail("host room settings were not applied by joiner");
+    }
+    if (alice.status().settings.voiceProximity ||
+        alice.status().settings.voiceProximityRange != 125 ||
+        bob.status().settings.voiceProximityRange != 125) {
+        fail("host proximity settings were not applied by joiners");
     }
     if (!host.status().semanticVisualsReady || !alice.status().semanticVisualsReady ||
         !bob.status().semanticVisualsReady) {
@@ -442,12 +450,26 @@ int main() {
     if (!host.publish_room_settings(changed)) {
         fail("host room settings publish failed");
     }
+    if (!host.publish_voice_settings(true, 75)) {
+        fail("host peer voice settings publish failed");
+    }
     pump(host, alice, bob, 30);
     if (alice.status().settings.remoteCollision || alice.status().settings.pvp) {
         fail("joiner did not apply direct settings messages");
     }
     if (host.status().settings.pvp || bob.status().settings.pvp) {
         fail("PvP was not forced off with remote collision");
+    }
+    if (!alice.status().settings.voiceProximity ||
+        alice.status().settings.voiceProximityRange != 75 ||
+        bob.status().settings.voiceProximityRange != 75) {
+        fail("host proximity changes were not applied by joiners");
+    }
+    alice.send({{"type", "voice_settings"}, {"enabled", false},
+                {"range_percent", 0}});
+    pump(host, alice, bob, 30);
+    if (bob.status().settings.voiceProximityRange != 75) {
+        fail("direct joiner changed host-controlled proximity range");
     }
 
     error.clear();

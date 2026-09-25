@@ -79,11 +79,6 @@ private:
     std::chrono::steady_clock::time_point lastMasterVolumePoll_{};
     float masterVolumeGain_ = 1.0f;
     std::string lastVoiceError_;
-    std::chrono::steady_clock::time_point voiceStatsStarted_{};
-    uint32_t voiceCaptured_ = 0;
-    uint32_t voiceSent_ = 0;
-    uint32_t voiceRejected_ = 0;
-    uint32_t voiceNoPosition_ = 0;
     UiWindowHandle window_ = 0;
     UiWindowHandle settingsWindow_ = 0;
     UiWindowHandle playerOptionsWindow_ = 0;
@@ -218,6 +213,7 @@ public:
     static void reset_player_options(ModContext*, void*);
     static bool player_colour_locked(ModContext*, void*);
     static bool voice_proximity_range_locked(ModContext*, void*);
+    static bool voice_proximity_setting_locked(ModContext*, void*);
     void match_player_colour();
     static void open_pressed(ModContext*, void*);
     static void settings_pressed(ModContext*, void*);
@@ -267,6 +263,10 @@ public:
     static void remote_collision_set(ModContext*, void*, const UiControlValue*);
     static void pvp_get(ModContext*, void*, UiControlValue*);
     static void pvp_set(ModContext*, void*, const UiControlValue*);
+    static void voice_proximity_get(ModContext*, void*, UiControlValue*);
+    static void voice_proximity_set(ModContext*, void*, const UiControlValue*);
+    static void voice_proximity_range_get(ModContext*, void*, UiControlValue*);
+    static void voice_proximity_range_set(ModContext*, void*, const UiControlValue*);
 };
 
 }  // namespace dusklight_online
