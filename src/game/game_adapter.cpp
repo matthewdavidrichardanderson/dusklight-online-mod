@@ -1,6 +1,7 @@
 #include "dusklight_online/game/appearance.hpp"
 #include "dusklight_online/game/game_adapter.hpp"
 #include "dusklight_online/game/pickup_sync.hpp"
+#include "dusklight_online/game/randomizer_check_names.hpp"
 #include "dusklight_online/game/poe_sync.hpp"
 #include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/bottle_sync.hpp"
@@ -4136,9 +4137,10 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
         itemToApply != dItemNo_HEART_e && itemToApply != dItemNo_NONE_e) {
         const auto name = peerNames_.find(message.peerId);
         const std::string peerName = name != peerNames_.end() ? name->second : message.peerId;
-        const std::string notice = " found " + std::string(randomizer_item_name(itemToApply));
+        const auto check = randomizer_check_display_name(checkName);
         push_online_player_notification(
-            peerName, notice, appearance::peer_color(message.peerId));
+            peerName, std::string(randomizer_item_name(itemToApply)),
+            std::string(check), appearance::peer_color(message.peerId));
     }
 
     std::ostringstream log;

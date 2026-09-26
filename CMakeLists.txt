@@ -321,6 +321,7 @@ set(ONLINE_GAME_SOURCES
     src/game/game_adapter.cpp
     src/game/local_pose.cpp
     src/game/protocol_router.cpp
+    src/game/randomizer_check_names.cpp
     src/game/randomizer_item_names.cpp
     src/game/remote_pose.cpp
     src/game/remote_actor_bridge.cpp
@@ -568,6 +569,15 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_randomizer_item_names_test PRIVATE include)
     add_test(NAME dusklight_online_randomizer_item_names
              COMMAND dusklight_online_randomizer_item_names_test)
+
+    add_executable(dusklight_online_randomizer_check_names_test
+        tests/randomizer_check_names_test.cpp
+        src/game/randomizer_check_names.cpp
+    )
+    target_compile_features(dusklight_online_randomizer_check_names_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_randomizer_check_names_test PRIVATE include)
+    add_test(NAME dusklight_online_randomizer_check_names
+             COMMAND dusklight_online_randomizer_check_names_test)
 
     add_executable(dusklight_online_remote_pose_test
         tests/remote_pose_test.cpp

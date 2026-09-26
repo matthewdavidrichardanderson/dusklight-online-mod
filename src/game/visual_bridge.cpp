@@ -122,7 +122,8 @@ struct NameLabelFontAtlas {
 
 struct Notification {
     std::string playerName;
-    std::string text;
+    std::string itemName;
+    std::string checkName;
     PlayerColor playerColor{255, 255, 255, 255};
     float ageSeconds = 0.0f;
     float durationSeconds = 5.0f;
@@ -947,6 +948,81 @@ void draw_imgui_progression_prompt() {
     ImGui::PopStyleVar(2);
 }
 
+struct PresentationRect {
+    ImVec2 pos;
+    ImVec2 size;
+};
+
+PresentationRect game_presentation_rect();
+
+ImFont* notification_bold_font() {
+    for (ImFont* font : ImGui::GetIO().Fonts->Fonts) {
+        if (std::string_view(font->GetDebugName()).starts_with("Inter Bold")) return font;
+    }
+    return nullptr;
+}
+
+void draw_notification(const Notification& notification, float maxWidth, ImFont* boldFont) {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float fontSize = ImGui::GetFontSize();
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const float right = start.x + maxWidth;
+    float x = start.x;
+    float y = start.y;
+    float usedWidth = 0.0f;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float remaining = notification.durationSeconds - notification.ageSeconds;
+    const float alpha = std::clamp(remaining, 0.0f, 1.0f);
+    const PlayerColor color = notification.playerColor;
+    const ImU32 nameColor = IM_COL32(color.r, color.g, color.b,
+        static_cast<int>(color.a * alpha));
+    const ImU32 textColor = IM_COL32(240, 247, 255, static_cast<int>(255.0f * alpha));
+    const ImU32 shadowColor = IM_COL32(0, 0, 0, static_cast<int>(110.0f * alpha));
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float shadowOffset = viewport != nullptr ? viewport->DpiScale : 1.0f;
+
+    const auto drawRun = [&](std::string_view text, ImFont* font, ImU32 ink,
+                             bool emboldenFallback = false) {
+        for (size_t i = 0; i < text.size();) {
+            const bool spaces = text[i] == ' ';
+            size_t end = i;
+            while (end < text.size() && (text[end] == ' ') == spaces) ++end;
+            const char* first = text.data() + i;
+            const char* last = text.data() + end;
+            const float runWidth = font->CalcTextSizeA(fontSize, 10000.0f, 0.0f,
+                                                       first, last).x;
+            if (spaces) {
+                if (x > start.x && x + runWidth <= right) x += runWidth;
+            } else {
+                if (x > start.x && x + runWidth > right) {
+                    x = start.x;
+                    y += lineHeight;
+                }
+                draw->AddText(font, fontSize,
+                              ImVec2(x + shadowOffset, y + shadowOffset),
+                              shadowColor, first, last);
+                draw->AddText(font, fontSize, ImVec2(x, y), ink, first, last);
+                if (emboldenFallback)
+                    draw->AddText(font, fontSize, ImVec2(x + 0.7f, y), ink, first, last);
+                x += runWidth;
+                usedWidth = std::max(usedWidth, x - start.x);
+            }
+            i = end;
+        }
+    };
+
+    ImFont* normalFont = ImGui::GetFont();
+    drawRun(notification.playerName, normalFont, nameColor);
+    drawRun(" found ", normalFont, textColor);
+    drawRun(notification.itemName, boldFont != nullptr ? boldFont : normalFont,
+            textColor, boldFont == nullptr);
+    if (!notification.checkName.empty()) {
+        const std::string location = " (" + notification.checkName + ")";
+        drawRun(location, normalFont, textColor);
+    }
+    ImGui::Dummy(ImVec2(std::max(1.0f, usedWidth), y - start.y + lineHeight));
+}
+
 void draw_imgui_notifications() {
     if (!sConnected || sNotifications.empty()) return;
     const float dt = ImGui::GetIO().DeltaTime;
@@ -955,32 +1031,27 @@ void draw_imgui_notifications() {
         return notification.ageSeconds >= notification.durationSeconds;
     });
     if (sNotifications.empty()) return;
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const ImVec2 workPos = viewport != nullptr ? viewport->WorkPos : ImVec2(0.0f, 0.0f);
-    ImGui::SetNextWindowPos(ImVec2(workPos.x + 16.0f, workPos.y + 44.0f), ImGuiCond_Always);
+    const PresentationRect gameRect = game_presentation_rect();
+    const float scale = std::clamp(gameRect.size.y / 1080.0f, 0.75f, 2.5f);
+    const float margin = 16.0f * scale;
+    const float width = std::min(720.0f * scale,
+        std::max(1.0f, gameRect.size.x - margin * 2.0f));
+    ImGui::SetNextWindowPos(
+        ImVec2(gameRect.pos.x + margin, gameRect.pos.y + 44.0f * scale),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+        ImVec2(width, std::max(1.0f, gameRect.size.y - 60.0f * scale)));
     ImGui::SetNextWindowBgAlpha(0.58f);
     constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs;
     if (ImGui::Begin("Multiplayer Notices", nullptr, flags)) {
-        for (const Notification& notification : sNotifications) {
-            const float remaining = notification.durationSeconds - notification.ageSeconds;
-            const float alpha = remaining < 1.0f ? remaining : 1.0f;
-            if (!notification.playerName.empty()) {
-                const PlayerColor color = notification.playerColor;
-                ImGui::PushStyleColor(
-                    ImGuiCol_Text,
-                    ImVec4(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f,
-                           (color.a / 255.0f) * alpha));
-                ImGui::TextUnformatted(notification.playerName.c_str());
-                ImGui::PopStyleColor();
-                ImGui::SameLine(0.0f, 0.0f);
-            }
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.97f, 1.0f, alpha));
-            ImGui::TextUnformatted(notification.text.c_str());
-            ImGui::PopStyleColor();
-        }
+        const float maxTextWidth = std::max(1.0f,
+            width - 2.0f * ImGui::GetStyle().WindowPadding.x);
+        ImFont* boldFont = notification_bold_font();
+        for (const Notification& notification : sNotifications)
+            draw_notification(notification, maxTextWidth, boldFont);
     }
     ImGui::End();
 }
@@ -1078,11 +1149,6 @@ int chat_composer_edit_callback(ImGuiInputTextCallbackData* data) {
     data->BufDirty = true;
     return 0;
 }
-
-struct PresentationRect {
-    ImVec2 pos;
-    ImVec2 size;
-};
 
 PresentationRect game_presentation_rect() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1567,10 +1633,12 @@ void push_online_notification(std::string text, float durationSeconds, bool warn
     svc_ui->push_toast(mod_ctx, &toast);
 }
 
-void push_online_player_notification(std::string playerName, std::string text,
-                                     uint32_t color, float durationSeconds) {
-    if (playerName.empty() || text.empty()) return;
-    sNotifications.push_back({std::move(playerName), std::move(text),
+void push_online_player_notification(std::string playerName, std::string itemName,
+                                     std::string checkName, uint32_t color,
+                                     float durationSeconds) {
+    if (playerName.empty() || itemName.empty()) return;
+    sNotifications.push_back({std::move(playerName), std::move(itemName),
+                              std::move(checkName),
                               display_color(color), 0.0f, durationSeconds});
     if (sNotifications.size() > 5) sNotifications.erase(sNotifications.begin());
 }

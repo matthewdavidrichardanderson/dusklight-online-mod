@@ -48,8 +48,9 @@ void update_visual_overlays(
     const ProgressionPromptView& progressionPrompt);
 void push_online_notification(std::string text, float durationSeconds = 5.0f,
                               bool warning = false);
-void push_online_player_notification(std::string playerName, std::string text,
-                                     uint32_t color, float durationSeconds = 5.0f);
+void push_online_player_notification(std::string playerName, std::string itemName,
+                                     std::string checkName, uint32_t color,
+                                     float durationSeconds = 5.0f);
 void push_chat_message(std::string playerName, std::string text, uint32_t color);
 [[nodiscard]] std::optional<std::string> take_chat_submission();
 void configure_voice_mute_hotkey(int scancode, bool enabled);
