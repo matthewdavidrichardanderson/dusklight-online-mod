@@ -2126,7 +2126,7 @@ ModResult OnlineApp::build_sync_tab(ModContext*, UiWindowHandle, UiElementHandle
     app.manualSyncWarpButton_ = add_button(
         left, "Sync and warp", &OnlineApp::manual_sync_warp_pressed, &app,
         &OnlineApp::manual_sync_unavailable);
-    add_button(left, "Refresh players", &OnlineApp::refresh_sync_peers_pressed, &app);
+    add_button(left, "Refresh player list", &OnlineApp::refresh_sync_peers_pressed, &app);
     app.set_manual_sync_pending_visual(app.manualSyncCooldownTicks_ > 0);
 
     svc_ui->pane_add_section(mod_ctx, right, "Players");
