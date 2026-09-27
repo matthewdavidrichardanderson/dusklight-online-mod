@@ -143,6 +143,11 @@ private:
     // contacts already reported during this game update so those colliders
     // produce one network hit without imposing a cross-frame cooldown.
     std::set<std::pair<std::string, uintptr_t>> pvpLocalHitContactsThisUpdate_;
+    // A Spinner spin attack can remain in contact for several game updates.
+    // Send its heavy hit once per target for each attack animation.
+    uintptr_t pvpSpinnerActor_ = 0;
+    bool pvpSpinnerAttackActive_ = false;
+    std::set<std::string> pvpSpinnerAttackTargets_;
     std::deque<nlohmann::json> deferredSwitches_;
     std::map<std::string, uint32_t> permanentPickupSequence_;
     std::map<std::string, uint32_t> fishCatchSequence_;

@@ -30,6 +30,7 @@
 #include "JSystem/JParticle/JPAParticle.h"
 #include "SSystem/SComponent/c_math.h"
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_spinner.h"
 #include "d/actor/d_a_midna.h"
 #include "d/actor/d_a_nbomb.h"
 #include "d/d_bomb.h"
@@ -997,6 +998,9 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteSpinnerVisualShape(0, 0, 0),
       mRemoteSpinnerVisualRotY(0),
       mRemoteSpinnerVisualYOffset(90.0f),
+      mPreviousSpinnerBasePos(cXyz::Zero),
+      mCurrentSpinnerBasePos(cXyz::Zero),
+      mSpinnerBaseHistoryValid(false),
       mRemoteSpinnerJumpEpoch(0),
       mAppliedSpinnerJumpEpoch(0),
       mRemoteIronBallVisualValid(false),
@@ -3636,6 +3640,20 @@ void daRemoteLink_c::updatePvpTargetCollision() {
     mPvpTargetCyl.OnTgSetBit();
     mPvpTargetCyl.OffAtSetBit();
     mPvpTargetCyl.OffCoSetBit();
+    // Normal Spinner contact uses the cylinder's no-continuous-hit rule.
+    // During the A attack, allow a new hit even if the Spinner was already
+    // touching this player; the PvP sender reports it once per animation.
+    daAlink_c* localLink = daAlink_getAlinkActorClass();
+    fopAc_ac_c* rideActor = localLink != nullptr ? localLink->mRideAcKeep.getActor() : nullptr;
+    const bool spinnerAttacking = rideActor != nullptr &&
+        fopAcM_GetName(rideActor) == fpcNm_SPINNER_e &&
+        localLink->checkSpinnerRideOwn(rideActor) &&
+        static_cast<daSpinner_c*>(rideActor)->reflectAccept();
+    if (spinnerAttacking) {
+        mPvpTargetCyl.OffTgNoConHit();
+    } else {
+        mPvpTargetCyl.OnTgNoConHit();
+    }
     dComIfG_Ccsp()->Set(&mPvpTargetCyl);
 
     if (sPvpTargetLogCount < 20 || (++sPvpTargetLogTicks % 120) == 0) {
@@ -4003,6 +4021,51 @@ void daRemoteLink_c::alignSemanticBodyRootForPresentation() {
 void daRemoteLink_c::updateRemoteSpinnerVisual(bool i_presentation) {
     if (!mRemoteSpinnerVisualValid || mpRideActorModel == NULL) return;
 
+    if (i_presentation && dusk::frame_interp::is_enabled()) {
+        // Preserve Dusklight's interpolation of the Spinner's rotation and
+        // animated joints. Only shift its interpolated matrices to the same
+        // presented foot center as Link; rebuilding the model here replaces
+        // those matrices with the latest 30 Hz simulation pose.
+        if (!mRemoteSpinnerLinkAnchored || !mSpinnerBaseHistoryValid ||
+            !mRemoteBodyRootValid || mpBodyModel == NULL ||
+            mpBodyModel->getModelData() == NULL ||
+            mpBodyModel->getModelData()->getJointNum() <= 0x19 ||
+            mpRideActorModel->getModelData() == NULL) return;
+
+        Mtx leftFoot, rightFoot;
+        if (!dusk::frame_interp::lookup_replacement(mpBodyModel->getAnmMtx(0x14), leftFoot) ||
+            !dusk::frame_interp::lookup_replacement(mpBodyModel->getAnmMtx(0x19), rightFoot))
+            return;
+
+        static const Vec leftSoleOffset = {-3.0f, 13.0f, 0.0f};
+        static const Vec rightSoleOffset = {-3.0f, -13.0f, 0.0f};
+        cXyz leftSole, rightSole;
+        mDoMtx_multVec(leftFoot, &leftSoleOffset, &leftSole);
+        mDoMtx_multVec(rightFoot, &rightSoleOffset, &rightSole);
+        const f32 alpha = std::clamp(dusk::frame_interp::get_interpolation_step(), 0.0f, 1.0f);
+        const cXyz base = mPreviousSpinnerBasePos +
+            (mCurrentSpinnerBasePos - mPreviousSpinnerBasePos) * alpha;
+        const f32 dx = (leftSole.x + rightSole.x) * 0.5f - base.x;
+        const f32 dz = (leftSole.z + rightSole.z) * 0.5f - base.z;
+        if (!std::isfinite(dx) || !std::isfinite(dz) ||
+            dx * dx + dz * dz >= 400.0f * 400.0f) return;
+
+        const auto shiftReplacement = [&](MtxP source) {
+            Mtx presented;
+            if (dusk::frame_interp::lookup_replacement(source, presented)) {
+                presented[0][3] += dx;
+                presented[2][3] += dz;
+                dusk::frame_interp::override_replacement(source, presented);
+            }
+        };
+        J3DModelData* data = mpRideActorModel->getModelData();
+        for (u16 i = 0; i < data->getJointNum(); ++i)
+            shiftReplacement(mpRideActorModel->getAnmMtx(i));
+        for (u16 i = 0; i < data->getWEvlpMtxNum(); ++i)
+            shiftReplacement(mpRideActorModel->getWeightAnmMtx(i));
+        return;
+    }
+
     cXyz spinnerPos = mRemoteSpinnerVisualPos;
     if (mRemoteSpinnerLinkAnchored && mRemoteBodyRootValid && mpBodyModel != NULL &&
         mpBodyModel->getModelData() != NULL &&
@@ -4037,6 +4100,13 @@ void daRemoteLink_c::updateRemoteSpinnerVisual(bool i_presentation) {
         }
     }
 
+    if (!i_presentation) {
+        const cXyz delta = spinnerPos - mCurrentSpinnerBasePos;
+        mPreviousSpinnerBasePos = !mSpinnerBaseHistoryValid ||
+            delta.abs2() > 600.0f * 600.0f ? spinnerPos : mCurrentSpinnerBasePos;
+        mCurrentSpinnerBasePos = spinnerPos;
+        mSpinnerBaseHistoryValid = true;
+    }
     mDoMtx_stack_c::transS(spinnerPos.x,
                            spinnerPos.y + mRemoteSpinnerVisualYOffset,
                            spinnerPos.z);
@@ -6349,9 +6419,12 @@ void daRemoteLink_c::setRemoteSpinnerVisualState(bool i_valid, bool i_linkAnchor
                                                  f32 i_visualYOffset,
                                                  u32 i_jumpEpoch) {
     const bool wasValid = mRemoteSpinnerVisualValid;
+    const bool wasLinkAnchored = mRemoteSpinnerLinkAnchored;
     mRemoteSpinnerVisualValid =
         i_valid && mRemoteRideActorKind == 1 && mVisualState.form != FORM_WOLF;
     mRemoteSpinnerLinkAnchored = i_linkAnchored;
+    if (!mRemoteSpinnerVisualValid || wasLinkAnchored != i_linkAnchored)
+        mSpinnerBaseHistoryValid = false;
     if (mRemoteSpinnerVisualValid != wasValid) {
         DuskLog.info("RemoteLink: semantic Spinner visual {} (passive model, no actor)",
                      mRemoteSpinnerVisualValid ? "enabled" : "disabled");

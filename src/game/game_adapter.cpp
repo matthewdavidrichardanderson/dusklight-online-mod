@@ -51,6 +51,7 @@
 #include "d/actor/d_a_obj_mirror_chain.h"
 #include "d/actor/d_a_obj_spinLift.h"
 #include "d/actor/d_a_player.h"
+#include "d/actor/d_a_spinner.h"
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "Z2AudioLib/Z2AudioMgr.h"
 #include "Z2AudioLib/Z2Audience.h"
@@ -2804,6 +2805,12 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
         link = daAlink_getAlinkActorClass();
         sourceActor = attackActor;
         allowSwordReaction = false;
+    } else if (attackActorName == fpcNm_SPINNER_e) {
+        link = daAlink_getAlinkActorClass();
+        if (link == nullptr || !link->checkSpinnerRideOwn(attackActor) ||
+            !attackInfo->ChkAtType(AT_TYPE_SPINNER)) return;
+        sourceActor = attackActor;
+        allowSwordReaction = false;
     } else {
         return;
     }
@@ -2830,8 +2837,20 @@ void GameAdapter::report_pvp_target_hit(fopAc_ac_c* remoteLinkActor,
         reinterpret_cast<uintptr_t>(attackActor));
     if (!pvpLocalHitContactsThisUpdate_.insert(contact).second) return;
 
-    int attackClass = kPvpAttackLight;
-    if (!attackInfo->ChkAtType(AT_TYPE_HEAVY_BOOTS) &&
+    const bool spinnerHit = attackActorName == fpcNm_SPINNER_e;
+    const bool spinnerAttack = spinnerHit && attackInfo->GetAtAtp() >= 2;
+    if (spinnerHit) {
+        const uintptr_t spinnerActor = reinterpret_cast<uintptr_t>(attackActor);
+        if (pvpSpinnerActor_ != spinnerActor || pvpSpinnerAttackActive_ != spinnerAttack) {
+            pvpSpinnerAttackTargets_.clear();
+        }
+        pvpSpinnerActor_ = spinnerActor;
+        pvpSpinnerAttackActive_ = spinnerAttack;
+        if (spinnerAttack && !pvpSpinnerAttackTargets_.insert(targetPeerId).second) return;
+    }
+
+    int attackClass = spinnerAttack ? kPvpAttackHeavy : kPvpAttackLight;
+    if (!spinnerHit && !attackInfo->ChkAtType(AT_TYPE_HEAVY_BOOTS) &&
         (attackInfo->GetAtSpl() != dCcG_At_Spl_UNK_0 ||
          attackInfo->ChkAtType(AT_TYPE_IRON_BALL | AT_TYPE_WOLF_CUT_TURN |
                                AT_TYPE_MIDNA_LOCK))) {
@@ -3569,6 +3588,19 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
                          bool remoteCollisionEnabled,
                          bool pvpEnabled, bool playerListEnabled) {
     pvpLocalHitContactsThisUpdate_.clear();
+    daAlink_c* localLink = daAlink_getAlinkActorClass();
+    fopAc_ac_c* rideActor = localLink != nullptr ? localLink->mRideAcKeep.getActor() : nullptr;
+    const bool ownsSpinner = rideActor != nullptr &&
+        fopAcM_GetName(rideActor) == fpcNm_SPINNER_e &&
+        localLink->checkSpinnerRideOwn(rideActor);
+    const uintptr_t spinnerActor = ownsSpinner ? reinterpret_cast<uintptr_t>(rideActor) : 0;
+    const bool spinnerAttackActive = ownsSpinner &&
+        static_cast<daSpinner_c*>(rideActor)->reflectAccept();
+    if (spinnerActor != pvpSpinnerActor_ || !spinnerAttackActive) {
+        pvpSpinnerAttackTargets_.clear();
+    }
+    pvpSpinnerActor_ = spinnerActor;
+    pvpSpinnerAttackActive_ = spinnerAttackActive;
     const bool syncFlagsWereEnabled = syncFlagsEnabled_;
     syncFlagsEnabled_ = syncFlagsEnabled;
     syncWorldEnabled_ = syncWorldEnabled;
@@ -4360,7 +4392,8 @@ ApplyResult GameAdapter::consume_pvp_hit(const RoutedMessage& message) {
     const float sourceZ = state.value("source_z", 0.0f);
 
     daAlink_c* player = static_cast<daAlink_c*>(daPy_getPlayerActorClass());
-    if (player != nullptr && player->checkCameraLargeDamage()) {
+    if (player != nullptr &&
+        (player->checkCameraLargeDamage() || player->getDamageWaitTimer() != 0)) {
         pvpRemoteHitLastSequence_[message.peerId] = sequence;
         return ApplyResult::IgnoredByPolicy;
     }
@@ -4755,6 +4788,7 @@ void GameAdapter::peer_left(std::string_view peerId) {
     pvpRemoteHitLastSequence_.erase(key);
     chatMessageTimes_.erase(key);
     pvpLocalHitContactsThisUpdate_.clear();
+    pvpSpinnerAttackTargets_.erase(key);
     fishCatchSequence_.erase(key);
     const std::string prefix = key + ':';
     const auto erasePrefixedMap = [&](auto& values) {
@@ -4822,6 +4856,9 @@ void GameAdapter::reset_session() {
     pvpRemoteHitLastSequence_.clear();
     chatMessageTimes_.clear();
     pvpLocalHitContactsThisUpdate_.clear();
+    pvpSpinnerAttackTargets_.clear();
+    pvpSpinnerActor_ = 0;
+    pvpSpinnerAttackActive_ = false;
     localPvpHitSequence_ = 0;
     reset_visual_overlays();
     clear_replaced_save_progression_state();

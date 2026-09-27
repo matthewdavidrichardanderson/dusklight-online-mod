@@ -586,6 +586,9 @@ private:
     csXyz mRemoteSpinnerVisualShape;
     s16 mRemoteSpinnerVisualRotY;
     f32 mRemoteSpinnerVisualYOffset;
+    cXyz mPreviousSpinnerBasePos;
+    cXyz mCurrentSpinnerBasePos;
+    bool mSpinnerBaseHistoryValid;
     u32 mRemoteSpinnerJumpEpoch;
     u32 mAppliedSpinnerJumpEpoch;
     bool mRemoteIronBallVisualValid;
