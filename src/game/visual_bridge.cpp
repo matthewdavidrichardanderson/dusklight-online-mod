@@ -34,7 +34,6 @@
 #include "SSystem/SComponent/c_math.h"
 #include "d/d_camera.h"
 #include "d/d_msg_object.h"
-#include "d/d_s_play.h"
 #include "dusk/map_loader_definitions.h"
 #include "dusk/multiplayer/remote_link_dummy.hpp"
 #include "dusk/settings.h"
@@ -683,10 +682,15 @@ NameLabelFontAtlas* get_font_atlas() {
 }
 
 bool labels_allowed() {
+    // Room creation briefly pauses simulation while the world and remote
+    // actors remain visible. Keep their labels attached during that pause.
     if (!sConnected || !sGameplayReady || !sNameLabelsEnabled || !sRemoteModelEnabled ||
-        dComIfGp_isPauseFlag() || dScnPly_c::isPause()) return false;
+        dComIfGp_isPauseFlag()) return false;
     dMsgObject_c* message = dMsgObject_getMsgObjectClass();
-    return message == nullptr || !dMsgObject_isTalkNowCheck();
+    // Entering a new area displays its title as a place message. It sets the
+    // same "talk now" status as dialogue without obscuring the 3D world.
+    return message == nullptr || message->isPlaceMessage() ||
+           !dMsgObject_isTalkNowCheck();
 }
 
 void setup_label_gx(NameLabelFontAtlas& atlas) {
