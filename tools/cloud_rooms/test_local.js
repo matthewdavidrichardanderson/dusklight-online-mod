@@ -6,6 +6,11 @@ const base = process.env.ROOMS_TEST_URL ?? "http://127.0.0.1:8787";
 const response = await fetch(`${base}/health`);
 assert.equal(response.status, 200);
 assert.equal((await response.json()).service, "dusklight-rooms");
+const publicLobbies = async () => {
+  const result = await fetch(`${base}/public-lobbies`);
+  assert.equal(result.status, 200);
+  return (await result.json()).rooms;
+};
 
 class Client {
   constructor(socket) {
@@ -56,6 +61,7 @@ const host = await connect(room);
 host.send(hello("create", "Host"));
 const hostWelcome = await host.next("welcome");
 assert.equal(hostWelcome.owner_client_id, hostWelcome.client_id);
+assert.equal((await publicLobbies()).some(entry => entry.name === room), false);
 
 const guest = await connect(room);
 guest.send(hello("join", "Guest"));
@@ -84,4 +90,23 @@ await host.next("peer_left");
 assert.equal(host.messages.some(value => value.type === "peer_reliable"), false);
 host.close();
 guest.close();
+
+const openRoom = `Public Test ${Date.now()}`;
+const openHello = (action, name) => ({ ...hello(action, name), room_id: openRoom, password: "" });
+const openHost = await connect(openRoom);
+openHost.send(openHello("create", "Host"));
+await openHost.next("welcome");
+assert.deepEqual((await publicLobbies()).find(entry => entry.name === openRoom),
+  { name: openRoom, players: 1, max_players: 8 });
+const openGuest = await connect(openRoom);
+openGuest.send(openHello("join", "Guest"));
+await openGuest.next("welcome");
+assert.equal((await publicLobbies()).find(entry => entry.name === openRoom)?.players, 2);
+openGuest.close();
+openHost.close();
+for (let attempt = 0; attempt < 40; attempt++) {
+  if (!(await publicLobbies()).some(entry => entry.name === openRoom)) break;
+  await new Promise(resolve => setTimeout(resolve, 50));
+}
+assert.equal((await publicLobbies()).some(entry => entry.name === openRoom), false);
 console.log("Local Cloudflare Worker integration passed");

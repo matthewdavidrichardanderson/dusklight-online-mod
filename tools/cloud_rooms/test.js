@@ -1,8 +1,9 @@
 import assert from "assert";
-import { Room, normalizedRoom } from "./src/index.js";
+import worker, { PublicLobbies, Room, normalizedRoom } from "./src/index.js";
 
 class Socket {
-  constructor(state) { this.state = state; this.sent = []; this.closed = false; this.info = { joined: false }; }
+  constructor(state) { this.state = state; this.sent = []; this.closed = false;
+    this.info = { joined: false, roomKey: "example lobby" }; }
   serializeAttachment(value) { this.info = value; }
   deserializeAttachment() { return this.info; }
   send(value) { this.sent.push(JSON.parse(value)); }
@@ -15,6 +16,9 @@ class Storage {
   async get(key) { return this.values.get(key); }
   async put(key, value) { this.values.set(key, structuredClone(value)); }
   async delete(key) { this.values.delete(key); }
+  async list({ prefix } = {}) {
+    return new Map([...this.values].filter(([key]) => !prefix || key.startsWith(prefix)));
+  }
   async setAlarm(value) { this.alarm = value; }
   async deleteAlarm() { this.alarm = null; }
 }
@@ -142,5 +146,45 @@ idle.serializeAttachment({ joined: false, deadline: Date.now() - 1 });
 await room3.alarm();
 assert.equal(idle.closed, true);
 assert.ok(!state3.storage.alarm || state3.storage.alarm > Date.now());
+
+// Empty passwords publish only a room name and player count. Passworded rooms
+// stay private, and the directory is updated as members join and leave.
+const directoryState = new State();
+const publicDirectory = new PublicLobbies(directoryState);
+const env = { PUBLIC_LOBBIES: {
+  idFromName: name => name,
+  get: () => ({ fetch: (...args) => publicDirectory.fetch(new Request(...args)) }),
+} };
+const list = async () => {
+  const response = await worker.fetch(new Request("https://rooms.test/public-lobbies"), env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  return (await response.json()).rooms;
+};
+assert.deepEqual(await list(), []);
+const publicState = new State();
+const publicRoom = new Room(publicState, env);
+await publicRoom.ready;
+const publicHost = publicState.add();
+await publicRoom.webSocketMessage(publicHost, JSON.stringify(hello("create", "")));
+assert.ok(publicHost.take("welcome"));
+assert.deepEqual(await list(), [{ name: "Example Lobby", players: 1, max_players: 8 }]);
+const publicGuest = publicState.add();
+await publicRoom.webSocketMessage(publicGuest, JSON.stringify(hello("join", "")));
+assert.ok(publicGuest.take("welcome"));
+assert.deepEqual(await list(), [{ name: "Example Lobby", players: 2, max_players: 8 }]);
+const publicWrongPassword = publicState.add();
+await publicRoom.webSocketMessage(publicWrongPassword, JSON.stringify(hello("join", "wrong-password")));
+assert.equal(publicWrongPassword.take("error").error, "invalid_password");
+assert.equal((await list())[0].players, 2);
+await publicRoom.webSocketClose(publicGuest);
+assert.equal((await list())[0].players, 1);
+await publicRoom.webSocketClose(publicHost);
+assert.deepEqual(await list(), []);
+
+const forged = publicState.add();
+await publicRoom.webSocketMessage(forged, JSON.stringify({ ...hello("create", ""), room_id: "Other Lobby" }));
+assert.equal(forged.take("error").error, "invalid_hello");
+assert.deepEqual(await list(), []);
 
 console.log("Cloud room protocol tests passed");
