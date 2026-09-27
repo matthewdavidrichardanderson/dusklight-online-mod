@@ -119,6 +119,10 @@ bool start_run() {
     dComIfGs_setNoFile(0);
     dComIfGs_setDataNum(0);
     nativeNewSave(0);
+    // File select normally refreshes this live flag after initializing the
+    // new save. This direct start skips that step; match its rumble-on default.
+    dComIfGs_setOptVibration(1);
+    dComIfGp_setNowVibration(1);
     // dComIfGs_init supplies the localized default names and fresh state.
     dComIfGs_setSaveTotalTime(dComIfGs_getTotalTime());
     dComIfGs_setSaveStartTime(OSGetTime());
