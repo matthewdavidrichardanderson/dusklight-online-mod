@@ -49,6 +49,7 @@
 #include "d/actor/d_a_door_shutter.h"
 #include "d/actor/d_a_obj_mirror_table.h"
 #include "d/actor/d_a_obj_mirror_chain.h"
+#include "d/actor/d_a_obj_spinLift.h"
 #include "d/actor/d_a_player.h"
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "Z2AudioLib/Z2AudioMgr.h"
@@ -276,6 +277,34 @@ constexpr std::string_view kPvpReactionMortalDraw = "mortal_draw";
 constexpr std::string_view kPvpReactionGreatSpin = "great_spin";
 constexpr std::string_view kPvpReactionShieldBash = "shield_bash";
 GameAdapter* sActiveAdapter = nullptr;
+
+bool is_arbiter_spin_lift(void* process) {
+    if (process == nullptr || fpcM_GetName(process) != fpcNm_Obj_SpinLift_e) return false;
+    auto* lift = static_cast<daSpinLift_c*>(process);
+    const char* stage = dComIfGp_getStartStageName();
+    return fopAcM_GetRoomNo(lift) == 9 && lift->mModelType == 1 &&
+           lift->getEndSw() == 0x11 && stage != nullptr &&
+           std::strcmp(stage, "D_MN10") == 0;
+}
+
+void finish_remote_arbiter_spin_lift(void* process) {
+    if (!is_arbiter_spin_lift(process)) return;
+    auto* lift = static_cast<daSpinLift_c*>(process);
+    if (lift->mpModel == nullptr || !fopAcM_isSwitch(lift, lift->getEndSw())) return;
+    const float finishedY = lift->home.pos.y + lift->mMoveHeight;
+    if (lift->current.pos.y >= finishedY - 0.5f) return;
+
+    // A remote completion bit can arrive while the lift is already loaded.
+    // Its native moveLift() then stops watching the trigger switch, leaving
+    // the drawn model below the floor until the room is reloaded. Match the
+    // native create path for an already completed lift, including its moving
+    // background matrix, so the visible rail and collision agree this frame.
+    lift->current.pos.y = finishedY;
+    lift->init_modeMoveEnd();
+    lift->setBaseMtx();
+    MTXCopy(lift->mpModel->getBaseTRMtx(), lift->mBgMtx);
+    if (lift->mpBgW != nullptr && lift->mpBgW->ChkUsed()) lift->mpBgW->Move();
+}
 std::vector<void*> sExecutingProcessStack;
 std::vector<int> sWebDeleteTimerStack;
 std::vector<int> sRoomActorActionStateStack;
@@ -2032,6 +2061,7 @@ void door20_stop_open_post(ModContext*, void*, void*, void*) {
 
 void process_execute_post(ModContext*, void* args, void*, void*) {
     void* process = mods::arg<void*>(args, 0);
+    finish_remote_arbiter_spin_lift(process);
     const int preservePushPullKeep = sRemoteMoveboxPushPullKeepStack.empty()
                                          ? -1
                                          : sRemoteMoveboxPushPullKeepStack.back();
