@@ -193,6 +193,27 @@ int main() {
         guest.status().settings.voiceProximityRange != 125) {
         fail("host proximity settings did not arrive over the peer connection");
     }
+    const std::string hostId = host.status().clientId;
+    const std::string guestId = guest.status().clientId;
+    if (!guest.send({{"type", "trade_item"}, {"phase", 0}, {"item", 0x80}}))
+        fail("trade item did not use the peer connection");
+    bool tradeDelivered = false;
+    const auto tradeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < tradeDeadline && !tradeDelivered) {
+        host.tick(); guest.tick();
+        while (host.has_events()) {
+            const auto event = host.pop_event();
+            if (event.message.is_object() && event.message.value("type", "") == "trade_item" &&
+                event.message.value("phase", -1) == 0 &&
+                event.message.value("item", -1) == 0x80)
+                tradeDelivered = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!tradeDelivered || broker.gameplayForwardingAttempt ||
+        host.status().clientId != hostId || guest.status().clientId != guestId ||
+        !host.status().error.empty() || !guest.status().error.empty())
+        fail("trade item was not delivered peer-to-peer without reconnecting");
     if (!guest.send({{"type", "voice_settings"}, {"enabled", true},
                      {"range_percent", 1}})) fail("guest spoof send failed");
     for (int i = 0; i < 60; ++i) { host.tick(); guest.tick();

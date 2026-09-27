@@ -44,6 +44,7 @@ GAMEPLAY_ROUTE_TYPES = (
     "fish_record",
     "collect_smell",
     "item_get",
+    "trade_item",
     "rando_item_get",
     "item_first_bit",
     "collect_crystal",

@@ -265,10 +265,15 @@ The following messages may be broadcast or may include `target_client_id`:
 | Area | Message types |
 | --- | --- |
 | World flags | `event_bit`, `tbox_bit`, `switch_bit`, `room_switch_bit`, `item_bit`, `dungeon_item_bit` |
-| Inventory/progression | `save_snapshot`, `item_get`, `rando_item_get`, `item_first_bit`, `collect_crystal`, `collect_mirror`, `dark_clear_lv`, `transform_lv`, `region_bit`, `collect`, `visited_room`, `letter_get`, `ooccoo_state`, `collect_smell` |
+| Inventory/progression | `save_snapshot`, `item_get`, `trade_item`, `rando_item_get`, `item_first_bit`, `collect_crystal`, `collect_mirror`, `dark_clear_lv`, `transform_lv`, `region_bit`, `collect`, `visited_room`, `letter_get`, `ooccoo_state`, `collect_smell` |
 | Counts and slots | `key_num`, `light_drop_num`, `light_drop_get_flag`, `max_life_update`, `bottle_slots`, `bomb_bag_slot`, `rupee_count`, `rupee_delta`, `poe_count`, `malo_fundraising`, `charlo_offering`, `fish_record` |
 | Peer status/preferences | `presence`, `progression_state`, `puppet_preference`, `midna_preference` |
 | Visual/PvP | `midna_pose`, `pvp_hit` |
+
+`trade_item` carries `{phase, item}` for the vanilla Ilia quest's shared
+inventory slot. Even phases 0–8 represent the five acquired items; odd phases
+represent an empty slot after the preceding item. Empty slots carry item `255`.
+The save snapshot may include the same object for late joiners.
 | Ganondorf encounter | `ganondorf_owner_claim`, `ganondorf_owner`, `ganondorf_hit`, `ganondorf_reaction`, `ganondorf_player_damage`, `ganondorf_state` |
 
 The relay transports these payloads but does not interpret or persist their

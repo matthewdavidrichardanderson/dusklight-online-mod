@@ -136,6 +136,7 @@ const std::set<std::string> kGameplayRouteTypes = {
     "fish_record",
     "collect_smell",
     "item_get",
+    "trade_item",
     "rando_item_get",
     "item_first_bit",
     "collect_crystal",
@@ -220,7 +221,8 @@ const char* packet_category(const std::string& type) {
     {
         return "world_state";
     }
-    if (type == "item_get" || type == "item_first_bit" || type == "collect_smell" ||
+    if (type == "item_get" || type == "trade_item" || type == "item_first_bit" ||
+        type == "collect_smell" ||
         type == "collect_crystal" || type == "collect_mirror" ||
         type == "dark_clear_lv" || type == "transform_lv" || type == "region_bit" ||
         type == "collect" || type == "visited_room" || type == "letter_get")

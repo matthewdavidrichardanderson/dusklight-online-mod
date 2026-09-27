@@ -71,7 +71,8 @@ int main() {
         {"web_timer",Domain::Progression,true,true}, {"room_actor_action",Domain::Progression,false,true},
         {"floor_switch_state",Domain::Progression,false,true},
         {"item_bit",Domain::Progression,true,true}, {"dungeon_item_bit",Domain::Progression,true,true},
-        {"item_get",Domain::Progression,false,true}, {"item_first_bit",Domain::Progression,false,true},
+        {"item_get",Domain::Progression,false,true}, {"trade_item",Domain::Progression,true,true},
+        {"item_first_bit",Domain::Progression,false,true},
         {"collect_crystal",Domain::Progression,false,true}, {"collect_mirror",Domain::Progression,false,true},
         {"dark_clear_lv",Domain::Progression,true,true}, {"transform_lv",Domain::Progression,false,true},
         {"region_bit",Domain::Progression,false,true}, {"collect",Domain::Progression,false,true},
@@ -97,6 +98,11 @@ int main() {
         assert(spec.stageDependent == item.stageDependent);
         assert(spec.syncFlagsControlled == item.syncFlagGated);
         assert(ProtocolRouter::is_known_type(item.type));
+        if (item.domain == Domain::Progression || item.domain == Domain::OptionalRandomizer ||
+            item.domain == Domain::Interaction || item.domain == Domain::Ganondorf ||
+            item.domain == Domain::Chat || std::string_view(item.type) == "progression_state") {
+            assert(dusklight_online::net::peer_delivery_type(item.type));
+        }
     }
     assert(ProtocolRouter::classify("save_snapshot").domain == MessageDomain::Progression);
     assert(ProtocolRouter::classify("save_snapshot").stageDependent);

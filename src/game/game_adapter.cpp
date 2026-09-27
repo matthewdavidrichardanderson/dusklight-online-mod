@@ -3,6 +3,7 @@
 #include "dusklight_online/game/pickup_sync.hpp"
 #include "dusklight_online/game/randomizer_check_names.hpp"
 #include "dusklight_online/game/poe_sync.hpp"
+#include "dusklight_online/game/trade_item_sync.hpp"
 #include "dusklight_online/game/bomb_bag_sync.hpp"
 #include "dusklight_online/game/bottle_sync.hpp"
 #include "dusklight_online/game/cave_map_sync.hpp"
@@ -93,6 +94,7 @@ DEFINE_HOOK(&dSv_memBit_c::onDungeonItem, MemoryDungeonItemOnHook);
 DEFINE_HOOK(&dComIfGs_onVisitedRoom, VisitedRoomOnHook);
 DEFINE_HOOK(&dSv_player_get_item_c::onFirstBit, PlayerItemFirstOnHook);
 DEFINE_HOOK(&dSv_player_get_item_c::offFirstBit, PlayerItemFirstOffHook);
+DEFINE_HOOK(&dSv_player_item_c::setItem, PlayerItemSetHook);
 DEFINE_HOOK(&dSv_player_collect_c::setCollect, PlayerCollectSetHook);
 DEFINE_HOOK(&dSv_player_collect_c::onCollectCrystal, PlayerCrystalSetHook);
 DEFINE_HOOK(&dSv_player_collect_c::onCollectMirror, PlayerMirrorSetHook);
@@ -285,6 +287,7 @@ std::vector<bool> sInfoSwitchWasSetOffStack;
 std::vector<bool> sMemorySwitchWasSetStack;
 std::vector<bool> sMemorySwitchWasSetOffStack;
 std::vector<bool> sItemFirstWasOwnedStack;
+std::vector<int> sTradeItemPreviousStack;
 std::vector<int> sPoePickupPrevious;
 std::vector<bool> sItemFirstWasOwnedOffStack;
 std::vector<int> sStageKeyPreviousCounts;
@@ -1238,6 +1241,48 @@ bool is_synced_key_item(int itemId) {
     }
 }
 
+static_assert(dItemNo_LETTER_e == trade_item::kFirst);
+static_assert(dItemNo_BILL_e == trade_item::kFirst + 1);
+static_assert(dItemNo_WOOD_STATUE_e == trade_item::kFirst + 2);
+static_assert(dItemNo_IRIAS_PENDANT_e == trade_item::kFirst + 3);
+static_assert(dItemNo_HORSE_FLUTE_e == trade_item::kLast);
+
+int observed_trade_phase() {
+    const int slot = dComIfGs_getItem(SLOT_21, false);
+    int phase = trade_item::item_phase(slot);
+    for (int item = trade_item::kFirst; item <= trade_item::kLast; ++item) {
+        if (!dComIfGs_isItemFirstBit(static_cast<u8>(item))) continue;
+        int acquired = trade_item::item_phase(item);
+        if (slot == trade_item::kNone) ++acquired;
+        phase = std::max(phase, acquired);
+    }
+    // These durable story milestones also identify hand-ins when the game
+    // changes the shared slot without setting a new item-first bit.
+    if (dComIfGs_isEventBit(0x2180)) phase = std::max(phase, 1); // Letter -> Telma
+    if (dComIfGs_isEventBit(0x2102)) phase = std::max(phase, 3); // Past the doctor
+    if (dComIfGs_isEventBit(0x2204)) phase = std::max(phase, 4); // Wooden Statue
+    if (dComIfGs_isEventBit(0x2340)) phase = std::max(phase, 5); // Statue -> Ilia
+    if (dComIfGs_isEventBit(0x2280)) phase = std::max(phase, 6); // Ilia's Charm
+    if (dComIfGs_isEventBit(0x2320)) phase = std::max(phase, 7); // Memory restored
+    return phase;
+}
+
+bool apply_trade_state(int phase, int item) {
+    if (!trade_item::valid_state(phase, item)) return false;
+    if (trade_item::should_apply(observed_trade_phase(), phase) &&
+        dComIfGs_getItem(SLOT_21, false) != item) {
+        dComIfGs_setWarashibeItem(static_cast<u8>(item));
+    }
+    return true;
+}
+
+void record_older_trade_item(int item) {
+    dComIfGs_onItemFirstBit(static_cast<u8>(item));
+    // This item getter also marks the field encounter, unlike the other four
+    // trade-item getters. Preserve that side effect without restoring the item.
+    if (item == dItemNo_WOOD_STATUE_e) dComIfGs_onEventBit(0x2204);
+}
+
 bool is_synced_item_first_bit(int itemId) {
     return itemId == dItemNo_KAKERA_HEART_e || itemId == dItemNo_UTAWA_HEART_e ||
            itemId == dItemNo_LINKS_SAVINGS_e ||
@@ -1622,7 +1667,20 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
     auto* bits = mods::arg<dSv_memBit_c*>(args, 0);
     // The engine often mirrors this mutation into the durable stage table;
     // observing both low-level calls would publish the same switch twice.
-    if (bits != &g_dComIfG_gameInfo.info.getMemory().getBit()) return;
+    if (bits != &g_dComIfG_gameInfo.info.getMemory().getBit()) {
+        // Ilia's Wooden Statue scene writes these field switches directly to
+        // the saved stage table while the player is inside Kakariko. They do
+        // not pass through the current-stage hook below.
+        const int flag = mods::arg<int>(args, 1);
+        if (bits == &g_dComIfG_gameInfo.info.getSavedata()
+                         .getSave(dStage_SaveTbl_FIELD).getBit() &&
+            (flag == 0x40 || flag == 0x1C) &&
+            !sActiveAdapter->randomizer_active()) {
+            sActiveAdapter->publish_local({{"type", "switch_bit"},
+                {"stage", dStage_SaveTbl_FIELD}, {"flag", flag}, {"set", true}});
+        }
+        return;
+    }
     const int stage = current_stage_table();
     const int flag = mods::arg<int>(args, 1);
     if (!valid_stage(stage) || flag < 0 || flag >= dSv_info_c::MEMORY_SWITCH ||
@@ -1795,6 +1853,31 @@ void player_item_first_on_post(ModContext*, void* args, void*, void*) {
         sActiveAdapter->publish_local(
             {{"type", "item_first_bit"}, {"item_id", item}, {"owned", true}});
     }
+}
+
+HookAction player_item_set_pre(ModContext*, void* args, void*, void*) {
+    const auto* items = mods::arg<dSv_player_item_c*>(args, 0);
+    const int slot = mods::arg<int>(args, 1);
+    sTradeItemPreviousStack.push_back(
+        items == &g_dComIfG_gameInfo.info.getPlayer().getItem() && slot == SLOT_21
+            ? dComIfGs_getItem(SLOT_21, false) : -1);
+    return HOOK_CONTINUE;
+}
+
+void player_item_set_post(ModContext*, void*, void*, void*) {
+    int previous = -1;
+    if (!sTradeItemPreviousStack.empty()) {
+        previous = sTradeItemPreviousStack.back();
+        sTradeItemPreviousStack.pop_back();
+    }
+    if (previous < 0 || sActiveAdapter == nullptr || sActiveAdapter->applying_remote() ||
+        sActiveAdapter->randomizer_active()) return;
+    const int current = dComIfGs_getItem(SLOT_21, false);
+    if (current == previous) return;
+    const int phase = trade_item::phase_for_change(previous, current);
+    if (phase < 0) return;
+    sActiveAdapter->publish_local({{"type", "trade_item"}, {"phase", phase},
+                                  {"item", trade_item::item_for_phase(phase)}});
 }
 
 HookAction player_item_first_off_pre(ModContext*, void* args, void*, void*) {
@@ -2472,6 +2555,8 @@ ModResult GameAdapter::initialize_hooks(ModError* error) {
         mods::hook::add_post<VisitedRoomOnHook>(&visited_room_on_post) != MOD_OK ||
         mods::hook::add_pre<PlayerItemFirstOnHook>(&player_item_first_on_pre) != MOD_OK ||
         mods::hook::add_post<PlayerItemFirstOnHook>(&player_item_first_on_post) != MOD_OK ||
+        mods::hook::add_pre<PlayerItemSetHook>(&player_item_set_pre) != MOD_OK ||
+        mods::hook::add_post<PlayerItemSetHook>(&player_item_set_post) != MOD_OK ||
         mods::hook::add_pre<PlayerItemFirstOffHook>(&player_item_first_off_pre) != MOD_OK ||
         mods::hook::add_post<PlayerItemFirstOffHook>(&player_item_first_off_post) != MOD_OK ||
         mods::hook::add_post<PlayerCollectSetHook>(&player_collect_set_post) != MOD_OK ||
@@ -2569,6 +2654,7 @@ void GameAdapter::shutdown_hooks() {
     mods::hook::uninstall<PlayerCollectSetHook>();
     mods::hook::uninstall<PlayerItemFirstOffHook>();
     mods::hook::uninstall<PlayerItemFirstOnHook>();
+    mods::hook::uninstall<PlayerItemSetHook>();
     mods::hook::uninstall<VisitedRoomOnHook>();
     mods::hook::uninstall<MemoryDungeonItemOnHook>();
     mods::hook::uninstall<MemorySwitchOffHook>();
@@ -3484,6 +3570,29 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
         }
     }
     const net::Status status = transport_.status();
+    // Hidden Village has two overlapping field exits. Only the exit gated by
+    // the pendant event sets Impaz's house switch; a Dusk warp bypasses both.
+    // Commit the same durable switch when a completed quest leaves the village
+    // and send it through the existing peer switch path before stage unload.
+    if (syncFlagsEnabled_ && status.welcomed && !randomizerActive &&
+        dComIfGp_isEnableNextStage()) {
+        const char* currentStage = dComIfGp_getStartStageName();
+        const char* nextStage = dComIfGp_getNextStageName();
+        if (currentStage != nullptr && std::strcmp(currentStage, "F_SP128") == 0 &&
+            nextStage != nullptr && nextStage[0] != '\0' &&
+            std::strcmp(nextStage, "F_SP128") != 0 &&
+            std::strcmp(nextStage, "R_SP128") != 0 &&
+            std::strcmp(nextStage, kTitleDemoStage.data()) != 0 &&
+            dComIfGs_isEventBit(dSv_event_flag_c::saveBitLabels[0x116]) &&
+            !dComIfGs_isSaveSwitch(0x61)) {
+            {
+                RemoteApplicationGuard applying(applyingRemote_);
+                dComIfGs_onStageSwitch(dStage_SaveTbl_ELDIN, 0x61);
+            }
+            publish_local({{"type", "switch_bit"}, {"stage", dStage_SaveTbl_ELDIN},
+                           {"flag", 0x61}, {"set", true}});
+        }
+    }
     sample_live_field_map_marker();
     if (!opening_or_title_active() && dComIfGp_getStageStagInfo() != nullptr) {
         (void)local_wagon_escort_unfinished();
@@ -5475,9 +5584,22 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
             return reject("invalid or unsynchronized item_get item_id");
         }
         if (!dComIfGs_isItemFirstBit(static_cast<u8>(itemId))) {
-            execItemGet(static_cast<u8>(itemId), 0, nullptr);
+            // Record an older quest grant without putting its already-traded
+            // item back into the shared slot.
+            if (!randomizer_active() && trade_item::item_phase(itemId) >= 0 &&
+                observed_trade_phase() > trade_item::item_phase(itemId))
+                record_older_trade_item(itemId);
+            else
+                execItemGet(static_cast<u8>(itemId), 0, nullptr);
         }
         if (itemId == dItemNo_KANTERA_e) repair_lantern_item_state();
+        return ApplyResult::Applied;
+    }
+    if (type == "trade_item") {
+        if (randomizer_active()) return ApplyResult::IgnoredByPolicy;
+        const int phase = message.value("phase", -1);
+        const int item = message.value("item", -1);
+        if (!apply_trade_state(phase, item)) return reject("invalid trade_item state");
         return ApplyResult::Applied;
     }
     if (type == "item_first_bit") {
@@ -6096,6 +6218,13 @@ nlohmann::json GameAdapter::make_save_snapshot() {
         {"charlo_offering", dMsgObject_getOffering()}, {"fish_records", fish},
         {"collect_smell", raw_collect_smell()},
     };
+    if (!randomizer_active()) {
+        const int tradePhase = observed_trade_phase();
+        if (tradePhase >= 0) {
+            snapshot["trade_item"] = {{"phase", tradePhase},
+                                      {"item", trade_item::item_for_phase(tradePhase)}};
+        }
+    }
 
     snapshot["ooccoo_state"] = ooccoo_snapshot_state();
     return snapshot;
@@ -6520,8 +6649,18 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         if (!raw.is_number_integer()) continue;
         const int item = raw.get<int>();
         if (item >= 0 && item <= 0xFF && is_synced_key_item(item) &&
-            !dComIfGs_isItemFirstBit(static_cast<u8>(item)))
-            execItemGet(static_cast<u8>(item), 0, nullptr);
+            !dComIfGs_isItemFirstBit(static_cast<u8>(item))) {
+            if (!randomizer_active() && trade_item::item_phase(item) >= 0 &&
+                observed_trade_phase() > trade_item::item_phase(item))
+                record_older_trade_item(item);
+            else
+                execItemGet(static_cast<u8>(item), 0, nullptr);
+        }
+    }
+    if (!randomizer_active() && message.contains("trade_item") &&
+        message["trade_item"].is_object()) {
+        const auto& trade = message["trade_item"];
+        (void)apply_trade_state(trade.value("phase", -1), trade.value("item", -1));
     }
     repair_lantern_item_state();
     repair_current_stage_collectibles();

@@ -442,6 +442,11 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_player_color_test PRIVATE include)
     add_test(NAME dusklight_online_player_color COMMAND dusklight_online_player_color_test)
 
+    add_executable(dusklight_online_trade_item_sync_test tests/trade_item_sync_test.cpp)
+    target_compile_features(dusklight_online_trade_item_sync_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_trade_item_sync_test PRIVATE include)
+    add_test(NAME dusklight_online_trade_item_sync COMMAND dusklight_online_trade_item_sync_test)
+
     add_executable(dusklight_online_bottle_sync_test tests/bottle_sync_test.cpp)
     target_compile_features(dusklight_online_bottle_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_bottle_sync_test PRIVATE include)
