@@ -1900,10 +1900,6 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     add_button(left, "Join lobby", &OnlineApp::join_lobby_pressed, &app);
 
     svc_ui->pane_add_section(mod_ctx, left, "Session");
-    add_button(left, "Voice chat", &OnlineApp::voice_pressed, &app);
-    add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
-    add_button(left, "Speedrun options", &OnlineApp::speedrun_pressed, &app,
-               &OnlineApp::speedrun_unavailable);
     add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
     add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
                &OnlineApp::sync_menu_unavailable);
@@ -1920,6 +1916,11 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
                &OnlineApp::host_inactive, nullptr, "online-danger-action");
     add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app,
                &OnlineApp::joiner_inactive, nullptr, "online-danger-action");
+    svc_ui->pane_add_section(mod_ctx, left, "Misc");
+    add_button(left, "Voice chat", &OnlineApp::voice_pressed, &app);
+    add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
+    add_button(left, "Speedrun options", &OnlineApp::speedrun_pressed, &app,
+               &OnlineApp::speedrun_unavailable);
 
     svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
     svc_ui->pane_add_section(mod_ctx, right, "Status");
