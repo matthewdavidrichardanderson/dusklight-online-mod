@@ -66,7 +66,8 @@ public:
     void setRemoteMatrices(const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
     void setRemoteAttachmentMatrices(
         const dusk::multiplayer::RemoteLinkMatrixSnapshot& i_matrices);
-    void setRemoteSpinnerVisualState(bool i_valid, const cXyz& i_pos,
+    void setRemoteSpinnerVisualState(bool i_valid, bool i_linkAnchored,
+                                     const cXyz& i_pos,
                                      s16 i_shapeX, s16 i_shapeY, s16 i_shapeZ,
                                      s16 i_rotY, f32 i_visualYOffset,
                                      u32 i_jumpEpoch);
@@ -296,6 +297,7 @@ private:
     void updateRemoteFishingRodVisual(bool i_presentation);
     void updateRemoteBowVisual(bool i_presentation);
     void updateRemoteLanternVisual(bool i_presentation);
+    void updateRemoteSpinnerVisual(bool i_presentation);
     void updateRemoteSimpleHeldItemVisual(bool i_presentation);
     void updateRemoteLanternFlame(bool i_presentation, const cXyz& i_flamePos);
     void stopRemoteLanternFlame(bool i_release);
@@ -576,6 +578,7 @@ private:
     /* 0xC18 */ int mLoadedItemActorKind;
     /* 0xC1C */ int mLoadedRideActorKind;
     bool mRemoteSpinnerVisualValid;
+    bool mRemoteSpinnerLinkAnchored;
     bool mSpinnerBckInitialized;
     bool mHookshotItemBckInitialized;
     bool mHookshotTipBckInitialized;

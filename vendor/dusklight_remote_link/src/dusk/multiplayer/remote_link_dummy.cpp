@@ -1517,13 +1517,13 @@ void sync_remote_link_actor_dummies(const std::map<std::string, PeerPoseSnapshot
         if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&
             dummy.spinnerPresentationValid) {
             actor->setRemoteSpinnerVisualState(
-                true, dummy.spinnerPresentedPos,
+                true, pose.spinnerLinkAnchored, dummy.spinnerPresentedPos,
                 dummy.spinnerPresentedShape.x, dummy.spinnerPresentedShape.y,
                 dummy.spinnerPresentedShape.z, dummy.spinnerPresentedRotY,
                 pose.spinnerLinkAnchored ? 0.0f : dummy.spinnerPresentedYOffset,
                 pose.spinnerJumpEpoch);
         } else {
-            actor->setRemoteSpinnerVisualState(false, cXyz::Zero, 0, 0, 0, 0,
+            actor->setRemoteSpinnerVisualState(false, false, cXyz::Zero, 0, 0, 0, 0,
                                                90.0f, pose.spinnerJumpEpoch);
         }
         if (presentationMode == ReceiverPresentationMode::SemanticGameplay &&

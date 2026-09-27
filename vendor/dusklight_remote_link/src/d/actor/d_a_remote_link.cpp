@@ -989,6 +989,7 @@ daRemoteLink_c::daRemoteLink_c()
       mLoadedItemActorKind(-1),
       mLoadedRideActorKind(-1),
       mRemoteSpinnerVisualValid(false),
+      mRemoteSpinnerLinkAnchored(false),
       mSpinnerBckInitialized(false),
       mHookshotItemBckInitialized(false),
       mHookshotTipBckInitialized(false),
@@ -3999,6 +4000,54 @@ void daRemoteLink_c::alignSemanticBodyRootForPresentation() {
     }
 }
 
+void daRemoteLink_c::updateRemoteSpinnerVisual(bool i_presentation) {
+    if (!mRemoteSpinnerVisualValid || mpRideActorModel == NULL) return;
+
+    cXyz spinnerPos = mRemoteSpinnerVisualPos;
+    if (mRemoteSpinnerLinkAnchored && mRemoteBodyRootValid && mpBodyModel != NULL &&
+        mpBodyModel->getModelData() != NULL &&
+        mpBodyModel->getModelData()->getJointNum() > 0x19) {
+        // Use the same sole points as Link's foot placement. The semantic body
+        // root can differ from actor current.pos, which otherwise leaves the
+        // separately reconstructed Spinner trailing behind his rendered feet.
+        MtxP leftFoot = mpBodyModel->getAnmMtx(0x14);
+        MtxP rightFoot = mpBodyModel->getAnmMtx(0x19);
+        Mtx presentedLeft, presentedRight;
+        if (i_presentation) {
+            if (dusk::frame_interp::lookup_replacement(leftFoot, presentedLeft)) {
+                leftFoot = presentedLeft;
+            }
+            if (dusk::frame_interp::lookup_replacement(rightFoot, presentedRight)) {
+                rightFoot = presentedRight;
+            }
+        }
+        static const Vec leftSoleOffset = {-3.0f, 13.0f, 0.0f};
+        static const Vec rightSoleOffset = {-3.0f, -13.0f, 0.0f};
+        cXyz leftSole, rightSole;
+        mDoMtx_multVec(leftFoot, &leftSoleOffset, &leftSole);
+        mDoMtx_multVec(rightFoot, &rightSoleOffset, &rightSole);
+        const f32 centerX = (leftSole.x + rightSole.x) * 0.5f;
+        const f32 centerZ = (leftSole.z + rightSole.z) * 0.5f;
+        const f32 dx = centerX - spinnerPos.x;
+        const f32 dz = centerZ - spinnerPos.z;
+        if (std::isfinite(centerX) && std::isfinite(centerZ) &&
+            dx * dx + dz * dz < 400.0f * 400.0f) {
+            spinnerPos.x = centerX;
+            spinnerPos.z = centerZ;
+        }
+    }
+
+    mDoMtx_stack_c::transS(spinnerPos.x,
+                           spinnerPos.y + mRemoteSpinnerVisualYOffset,
+                           spinnerPos.z);
+    mDoMtx_stack_c::ZXYrotM(mRemoteSpinnerVisualShape);
+    mDoMtx_stack_c::YrotM(mRemoteSpinnerVisualRotY);
+    mpRideActorModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    mpRideActorModel->calc();
+    if (i_presentation) overrideRemoteModelMatrices(mpRideActorModel);
+    mRideActorMatrixValid = true;
+}
+
 void daRemoteLink_c::calcModels() {
     if (mHasRemoteMatrices) {
         return;
@@ -4104,15 +4153,7 @@ void daRemoteLink_c::calcModels() {
                 mpSpinnerBck->play();
                 mpSpinnerBck->entry(mpRideActorModel->getModelData());
             }
-            mDoMtx_stack_c::transS(
-                mRemoteSpinnerVisualPos.x,
-                mRemoteSpinnerVisualPos.y + mRemoteSpinnerVisualYOffset,
-                mRemoteSpinnerVisualPos.z);
-            mDoMtx_stack_c::ZXYrotM(mRemoteSpinnerVisualShape);
-            mDoMtx_stack_c::YrotM(mRemoteSpinnerVisualRotY);
-            mpRideActorModel->setBaseTRMtx(mDoMtx_stack_c::get());
-            mpRideActorModel->calc();
-            mRideActorMatrixValid = true;
+            updateRemoteSpinnerVisual(false);
         } else {
             mpRideActorModel->calc();
         }
@@ -5044,6 +5085,7 @@ void daRemoteLink_c::clearRemoteBodyMatrixInterpolation() {
 void daRemoteLink_c::applyRemoteBodyMatrixInterpolationForPresentation() {
     applyInterpolatedRemoteBodyMatrices();
     alignSemanticBodyRootForPresentation();
+    updateRemoteSpinnerVisual(true);
     // Attention markers are drawn during presentation, so anchor them after
     // semantic/body replacement matrices have reached their render-frame pose.
     updatePvpAttentionTarget();
@@ -6300,7 +6342,8 @@ void daRemoteLink_c::updateRemotePresentedItemVisual(bool i_presentation) {
     if (i_presentation) overrideRemoteModelMatrices(mpPresentedItemModel);
 }
 
-void daRemoteLink_c::setRemoteSpinnerVisualState(bool i_valid, const cXyz& i_pos,
+void daRemoteLink_c::setRemoteSpinnerVisualState(bool i_valid, bool i_linkAnchored,
+                                                 const cXyz& i_pos,
                                                  s16 i_shapeX, s16 i_shapeY,
                                                  s16 i_shapeZ, s16 i_rotY,
                                                  f32 i_visualYOffset,
@@ -6308,6 +6351,7 @@ void daRemoteLink_c::setRemoteSpinnerVisualState(bool i_valid, const cXyz& i_pos
     const bool wasValid = mRemoteSpinnerVisualValid;
     mRemoteSpinnerVisualValid =
         i_valid && mRemoteRideActorKind == 1 && mVisualState.form != FORM_WOLF;
+    mRemoteSpinnerLinkAnchored = i_linkAnchored;
     if (mRemoteSpinnerVisualValid != wasValid) {
         DuskLog.info("RemoteLink: semantic Spinner visual {} (passive model, no actor)",
                      mRemoteSpinnerVisualValid ? "enabled" : "disabled");
