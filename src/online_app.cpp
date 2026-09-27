@@ -552,8 +552,7 @@ window content pane.online-form-pane > button.online-danger-action {
 }
 button.online-primary-action:disabled,
 button.online-danger-action:disabled,
-button.online-copy-action:disabled,
-.online-session-actions-hidden {
+button.online-copy-action:disabled {
     display: none;
 }
 window content pane.online-form-pane > .online-manual-only-hidden {
@@ -1892,34 +1891,25 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
-    app.sessionActionsHeading_ = 0;
     svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
 
     svc_ui->pane_add_section(mod_ctx, left, "PLAY");
     add_button(left, "Host lobby", &OnlineApp::host_lobby_pressed, &app);
     add_button(left, "Join lobby", &OnlineApp::join_lobby_pressed, &app);
-
-    svc_ui->pane_add_section(mod_ctx, left, "Session");
-    add_button(left, "Voice chat", &OnlineApp::voice_pressed, &app);
-    add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
-    add_button(left, "Speedrun options", &OnlineApp::speedrun_pressed, &app,
-               &OnlineApp::speedrun_unavailable);
-    add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
-    add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
-               &OnlineApp::sync_menu_unavailable);
-    svc_ui->pane_add_rml(mod_ctx, left,
-                         "<div class=\"section-heading\">Session actions</div>",
-                         &app.sessionActionsHeading_);
-    app.sessionActionsVisible_ = app.transport_.status().enabled;
-    if (app.sessionActionsHeading_ != 0) {
-        svc_ui->elem_set_class(mod_ctx, app.sessionActionsHeading_,
-                               "online-session-actions-hidden",
-                               !app.sessionActionsVisible_);
-    }
     add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
                &OnlineApp::host_inactive, nullptr, "online-danger-action");
     add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app,
                &OnlineApp::joiner_inactive, nullptr, "online-danger-action");
+
+    svc_ui->pane_add_section(mod_ctx, left, "Session");
+    add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
+    add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
+               &OnlineApp::sync_menu_unavailable);
+    svc_ui->pane_add_section(mod_ctx, left, "Misc");
+    add_button(left, "Voice chat", &OnlineApp::voice_pressed, &app);
+    add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
+    add_button(left, "Speedrun options", &OnlineApp::speedrun_pressed, &app,
+               &OnlineApp::speedrun_unavailable);
 
     svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
     svc_ui->pane_add_section(mod_ctx, right, "Status");
@@ -2798,17 +2788,6 @@ ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
         }
         app.windowRenderedStatus_ = status;
     }
-    if (app.sessionActionsHeading_ != 0) {
-        const bool visible = app.transport_.status().enabled;
-        if (visible != app.sessionActionsVisible_) {
-            if (svc_ui->elem_set_class(mod_ctx, app.sessionActionsHeading_,
-                                       "online-session-actions-hidden", !visible) != MOD_OK) {
-                app.sessionActionsHeading_ = 0;
-            } else {
-                app.sessionActionsVisible_ = visible;
-            }
-        }
-    }
     return MOD_OK;
 }
 
@@ -2831,7 +2810,6 @@ void OnlineApp::window_closed(ModContext*, UiWindowHandle, void* data) {
     app.manualPeerButtonElements_.clear();
     app.manualSyncFlagsButton_ = 0;
     app.manualSyncWarpButton_ = 0;
-    app.sessionActionsHeading_ = 0;
     app.manualHostControls_ = {};
 }
 

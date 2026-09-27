@@ -99,7 +99,6 @@ private:
     UiElementHandle windowStatus_ = 0;
     UiElementHandle windowPlayersEmpty_ = 0;
     bool windowPlayersEmptyVisible_ = true;
-    UiElementHandle sessionActionsHeading_ = 0;
     std::array<UiElementHandle, 3> manualHostControls_{};
     enum class ConnectionRole : uint8_t {
         Host,
@@ -111,7 +110,6 @@ private:
     std::string relayCodeDisplay_;
     bool reopenWindowPending_ = false;
     bool reopenSyncWindowPending_ = false;
-    bool sessionActionsVisible_ = false;
     std::string statusMessage_ = "Not connected";
     std::string requestedDisconnectStatus_;
     std::string activeCode_;
