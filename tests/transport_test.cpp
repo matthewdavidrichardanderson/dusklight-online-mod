@@ -270,6 +270,29 @@ int main() {
     }
     if (drain_for_type(alice, "chat")) fail("direct chat echoed to sender");
 
+    // A direct guest must not be able to make a host-only Speedrun command
+    // appear to come from the host when the transport fans out its messages.
+    for (const char* type : {"speedrun_check", "speedrun_start", "speedrun_reset"}) {
+        if (!alice.send({{"type", type}, {"request_id", 7U}}))
+            fail("guest speedrun command send");
+        pump(host, alice, bob, 30);
+        if (drain_for_type(host, type) || drain_for_type(bob, type))
+            fail("guest speedrun command crossed the host boundary");
+    }
+    if (!host.send({{"type", "speedrun_check"}, {"request_id", 8U}}))
+        fail("host speedrun check send");
+    pump(host, alice, bob, 30);
+    if (!drain_for_type(alice, "speedrun_check") ||
+        !drain_for_type(bob, "speedrun_check"))
+        fail("host speedrun check did not reach both players");
+    if (!alice.send({{"type", "speedrun_ready"}, {"request_id", 8U},
+                     {"ready", true}}))
+        fail("guest speedrun readiness send");
+    pump(host, alice, bob, 30);
+    if (!drain_for_type(host, "speedrun_ready") ||
+        drain_for_type(bob, "speedrun_ready"))
+        fail("speedrun readiness must go only to the host");
+
     // Appearance is reliable presence metadata, including the empty default.
     for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},
                                       std::pair{"C06030", ""}, std::pair{"", "204060"},

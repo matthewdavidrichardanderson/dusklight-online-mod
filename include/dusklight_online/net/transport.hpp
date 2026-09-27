@@ -238,6 +238,7 @@ public:
     [[nodiscard]] Status status() const;
     [[nodiscard]] VisualSendStats last_visual_send_stats() const;
     [[nodiscard]] const std::map<std::string, std::string>& peers() const;
+    [[nodiscard]] bool reliable_peer_ready(std::string_view peerId) const;
     [[nodiscard]] std::optional<uint32_t> direct_peer_rtt_ms(std::string_view peerId) const;
     [[nodiscard]] bool has_events() const;
     Event pop_event();

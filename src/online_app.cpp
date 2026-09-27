@@ -619,6 +619,8 @@ ModResult OnlineApp::initialize(ModError* error) {
     if (register_ui(error) != MOD_OK) {
         return MOD_ERROR;
     }
+    speedrunAvailable_ = game::speedrun::initialize();
+    if (!speedrunAvailable_) log_info("Speedrun controls unavailable: native symbols not found");
     game_ = std::make_unique<game::GameAdapter>(transport_);
     if (game_->initialize_hooks(error) != MOD_OK) {
         game_.reset();
@@ -780,6 +782,14 @@ void OnlineApp::update() {
             // Peer IDs are session-local; bound the diagnostic history on churn.
             timing.sequences.clear();
             if (voice_ != nullptr) voice_->peer_left(event.peerId);
+            if (speedrunRequestId_ != 0 && speedrunWaitingPeers_.contains(event.peerId)) {
+                clear_speedrun_request();
+                game::push_online_notification("Speedrun start cancelled: a player left.", 4.0f, true);
+            }
+        } else if (event.kind == net::EventKind::PeerJoined && speedrunRequestId_ != 0) {
+            clear_speedrun_request();
+            game::push_online_notification("Speedrun start cancelled: player list changed.",
+                                           4.0f, true);
         }
         if (event.kind == net::EventKind::Message &&
             event.message.value("type", std::string()) == "owner_changed" &&
@@ -837,6 +847,8 @@ void OnlineApp::update() {
             break;
         }
         case net::EventKind::Disconnected:
+            clear_speedrun_request();
+            speedrunResetAt_ = {};
             if (voice_ != nullptr) voice_->stop();
             if (event.ingress.mode == net::Mode::CloudRoom)
                 log_info("MP_CLOUD_DISCONNECT reason=" + event.detail);
@@ -896,6 +908,14 @@ void OnlineApp::update() {
             }
             break;
         default:
+            if (event.kind == net::EventKind::Message) {
+                const std::string type = event.message.value("type", std::string());
+                if (type == "speedrun_check" || type == "speedrun_ready" ||
+                    type == "speedrun_start" || type == "speedrun_reset") {
+                    handle_speedrun_message(event);
+                    break;
+                }
+            }
             if (router_ != nullptr) {
                 const net::Status routeStatus = transport_.status();
                 const bool routeSyncFlags = routeStatus.enabled ? routeStatus.settings.syncFlags :
@@ -918,6 +938,8 @@ void OnlineApp::update() {
         }
         if (protocolFatal) break;
     }
+    tick_speedrun();
+    update_speedrun_mods_visibility();
     if (kVoiceRuntimeAvailable && voice_ != nullptr && transport_.status().welcomed &&
         transport_.status().voiceSettingsReady &&
         bool_value(config_.voiceEnabled)) {
@@ -1021,6 +1043,12 @@ void OnlineApp::shutdown() {
         svc_ui->window_close(mod_ctx, playerOptionsWindow_);
         playerOptionsWindow_ = 0;
     }
+    if (speedrunWindow_ != 0) {
+        svc_ui->window_close(mod_ctx, speedrunWindow_);
+        speedrunWindow_ = 0;
+    }
+    clear_speedrun_request();
+    speedrunResetAt_ = {};
     if (voiceWindow_ != 0) {
         svc_ui->window_close(mod_ctx, voiceWindow_);
         voiceWindow_ = 0;
@@ -1050,6 +1078,10 @@ void OnlineApp::shutdown() {
     if (overlayStyle_ != 0) {
         svc_ui->unregister_styles(mod_ctx, overlayStyle_);
         overlayStyle_ = 0;
+    }
+    if (hideActiveModsStyle_ != 0) {
+        svc_ui->unregister_styles(mod_ctx, hideActiveModsStyle_);
+        hideActiveModsStyle_ = 0;
     }
     panelStatus_ = 0;
     windowStatus_ = 0;
@@ -1131,6 +1163,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"remote-collision", true, &config_.remoteCollision},
         BoolVar{"pvp", true, &config_.pvp},
         BoolVar{"player-list-overlay", false, &config_.playerList},
+        BoolVar{"speedrun-hide-active-mods", false, &config_.hideActiveMods},
         BoolVar{"voice-enabled", false, &config_.voiceEnabled},
         BoolVar{"voice-proximity", true, &config_.voiceProximity},
         BoolVar{"voice-mic-muted", false, &config_.voiceMicMuted},
@@ -1344,6 +1377,22 @@ void OnlineApp::open_player_options_window() {
     desc.on_closed = &OnlineApp::player_options_window_closed;
     desc.user_data = this;
     svc_ui->window_push(mod_ctx, &desc, &playerOptionsWindow_);
+}
+
+void OnlineApp::open_speedrun_window() {
+    if (speedrunWindow_ != 0 || !speedrunAvailable_ || !game::speedrun::mode_active()) return;
+    static UiTabDesc tab;
+    tab = UI_TAB_DESC_INIT;
+    tab.title = "Speedrun options";
+    tab.build = &OnlineApp::build_speedrun_tab;
+    tab.user_data = this;
+    UiWindowDesc desc = UI_WINDOW_DESC_INIT;
+    desc.tabs = &tab;
+    desc.tab_count = 1;
+    desc.rcss = kOnlineWindowRcss;
+    desc.on_closed = &OnlineApp::speedrun_window_closed;
+    desc.user_data = this;
+    svc_ui->window_push(mod_ctx, &desc, &speedrunWindow_);
 }
 
 void OnlineApp::open_voice_window() {
@@ -1751,6 +1800,8 @@ void OnlineApp::join_relay() {
 void OnlineApp::disconnect() {
     if (requestedDisconnectStatus_.empty()) requestedDisconnectStatus_ = "Disconnected";
     transport_.disconnect();
+    clear_speedrun_request();
+    speedrunResetAt_ = {};
     game::appearance::set_lobby_active(false);
     if (router_ != nullptr) {
         router_->clear();
@@ -1838,6 +1889,8 @@ ModResult OnlineApp::build_session_tab(ModContext*, UiWindowHandle, UiElementHan
     svc_ui->pane_add_section(mod_ctx, left, "Session");
     add_button(left, "Voice chat", &OnlineApp::voice_pressed, &app);
     add_button(left, "Cosmetic options", &OnlineApp::player_options_pressed, &app);
+    add_button(left, "Speedrun options", &OnlineApp::speedrun_pressed, &app,
+               &OnlineApp::speedrun_unavailable);
     add_button(left, "Session options", &OnlineApp::settings_pressed, &app);
     add_button(left, "Manual sync", &OnlineApp::sync_menu_pressed, &app,
                &OnlineApp::sync_menu_unavailable);
@@ -1923,6 +1976,25 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     match.help_rml = "Use your outfit colour for your player colour.";
     svc_ui->pane_add_control(mod_ctx, left, &match, nullptr);
     add_button(left, "Reset to defaults", &OnlineApp::reset_player_options, &app);
+    return MOD_OK;
+}
+
+ModResult OnlineApp::build_speedrun_tab(ModContext*, UiWindowHandle, UiElementHandle left,
+                                       UiElementHandle right, void* data, ModError*) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    svc_ui->elem_set_class(mod_ctx, left, "online-session-pane", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Speedrun options");
+    add_button(left, "Start Speedrun", &OnlineApp::start_speedrun_pressed, &app,
+               &OnlineApp::start_speedrun_unavailable);
+    add_button(left, "Reset Speedrun", &OnlineApp::reset_speedrun_pressed, &app,
+               &OnlineApp::speedrun_action_unavailable);
+    add_bound_control(left, UI_CONTROL_TOGGLE, "Hide Active Mods",
+                      app.config_.hideActiveMods);
+    svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
+    svc_ui->pane_add_rml(mod_ctx, right,
+        "<p>Start requires all three Speedrun save slots to be empty for every "
+        "player. Reset ends the timer and soft resets everyone.</p>",
+        nullptr);
     return MOD_OK;
 }
 
@@ -2225,6 +2297,10 @@ void OnlineApp::player_options_window_closed(ModContext*, UiWindowHandle, void* 
     app.playerOptionsWindow_ = 0;
 }
 
+void OnlineApp::speedrun_window_closed(ModContext*, UiWindowHandle, void* data) {
+    static_cast<OnlineApp*>(data)->speedrunWindow_ = 0;
+}
+
 void OnlineApp::voice_window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.voiceWindow_ = 0;
@@ -2261,6 +2337,258 @@ void OnlineApp::voice_input_set(ModContext*, void* data, const UiControlValue* v
 
 void OnlineApp::player_options_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->open_player_options_window();
+}
+
+void OnlineApp::speedrun_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->open_speedrun_window();
+}
+
+bool OnlineApp::speedrun_unavailable(ModContext*, void* data) {
+    const auto& app = *static_cast<OnlineApp*>(data);
+    return !app.speedrunAvailable_ || !game::speedrun::mode_active();
+}
+
+bool OnlineApp::speedrun_action_unavailable(ModContext*, void* data) {
+    const auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    const bool owner = status.mode == net::Mode::DirectHost ||
+        (net::is_room_mode(status.mode) && status.isOwner);
+    return speedrun_unavailable(nullptr, data) || !status.enabled || !owner ||
+           (status.mode != net::Mode::DirectHost && !status.welcomed);
+}
+
+bool OnlineApp::start_speedrun_unavailable(ModContext*, void* data) {
+    const auto& app = *static_cast<OnlineApp*>(data);
+    return speedrun_action_unavailable(nullptr, data) ||
+           !game::speedrun::can_start_here() || app.speedrunRequestId_ != 0;
+}
+
+void OnlineApp::clear_speedrun_request() {
+    speedrunProbe_.clear();
+    speedrunWaitingPeers_.clear();
+    speedrunParticipants_.clear();
+    speedrunRequestId_ = 0;
+    speedrunPeerRequestId_ = 0;
+    speedrunLocalReady_ = false;
+    speedrunPeerReady_ = false;
+    speedrunChecksSent_ = false;
+    speedrunDeadline_ = {};
+}
+
+void OnlineApp::start_speedrun_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (start_speedrun_unavailable(nullptr, data)) return;
+    for (const auto& [peerId, _] : app.transport_.peers()) {
+        if (!app.transport_.reliable_peer_ready(peerId)) {
+            game::push_online_notification("Wait for every player's reliable connection.",
+                                           4.0f, true);
+            return;
+        }
+    }
+    app.clear_speedrun_request();
+    if (app.speedrunSequence_ == 0)
+        app.speedrunSequence_ = static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+    app.speedrunRequestId_ = ++app.speedrunSequence_;
+    app.speedrunDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    for (const auto& [peerId, _] : app.transport_.peers())
+        app.speedrunParticipants_.insert(peerId);
+    app.speedrunWaitingPeers_ = app.speedrunParticipants_;
+    app.speedrunProbe_.begin();
+}
+
+void OnlineApp::reset_speedrun_pressed(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (speedrun_action_unavailable(nullptr, data)) return;
+    for (const auto& [peerId, _] : app.transport_.peers()) {
+        if (!app.transport_.reliable_peer_ready(peerId)) {
+            game::push_online_notification("Wait for every player's reliable connection.",
+                                           4.0f, true);
+            return;
+        }
+    }
+    if (!app.transport_.send({{"type", "speedrun_reset"}})) {
+        game::push_online_notification("Could not send Speedrun reset.", 4.0f, true);
+        return;
+    }
+    app.clear_speedrun_request();
+    // Allow the reliable transport to transmit before the host resets its scene.
+    app.speedrunResetAt_ = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(500);
+}
+
+void OnlineApp::update_speedrun_mods_visibility() {
+    const bool hide = speedrunAvailable_ && game::speedrun::mode_active() &&
+                      bool_value(config_.hideActiveMods);
+    if (!hide) {
+        if (hideActiveModsStyle_ != 0) {
+            svc_ui->unregister_styles(mod_ctx, hideActiveModsStyle_);
+            hideActiveModsStyle_ = 0;
+        }
+        hideActiveModsStyleUnavailable_ = false;
+        return;
+    }
+    if (hideActiveModsStyle_ != 0 || hideActiveModsStyleUnavailable_) return;
+
+    // The host draws this element in its passive overlay. A scoped sheet hides
+    // only the mod list while leaving the speedrun timer and other overlays on.
+    constexpr const char* style = "#mods-display[open] { display: none; }";
+    if (svc_ui->register_styles(mod_ctx, UI_SCOPE_OVERLAY, style,
+                                &hideActiveModsStyle_) != MOD_OK) {
+        hideActiveModsStyleUnavailable_ = true;
+        log_info("Could not hide Speedrun active mods overlay");
+    }
+}
+
+void OnlineApp::tick_speedrun() {
+    if (speedrunResetAt_ != std::chrono::steady_clock::time_point{}) {
+        if (std::chrono::steady_clock::now() >= speedrunResetAt_) {
+            speedrunResetAt_ = {};
+            if (!game::speedrun::reset_run())
+                game::push_online_notification("Could not reset Speedrun locally.", 4.0f, true);
+        }
+        return;
+    }
+    if (speedrunRequestId_ == 0 && speedrunPeerRequestId_ == 0) return;
+    if (std::chrono::steady_clock::now() > speedrunDeadline_) {
+        clear_speedrun_request();
+        game::push_online_notification("Speedrun save check timed out.", 4.0f, true);
+        return;
+    }
+    if (speedrunRequestId_ != 0) {
+        if (!speedrunLocalReady_) {
+            const auto result = speedrunProbe_.tick();
+            if (result == game::speedrun::SaveProbe::Result::Pending) return;
+            if (result != game::speedrun::SaveProbe::Result::Clear) {
+                const std::string reason = speedrunProbe_.error();
+                clear_speedrun_request();
+                game::push_online_notification(reason.empty() ?
+                    "Speedrun saves are not clear." : reason, 5.0f, true);
+                return;
+            }
+            speedrunLocalReady_ = true;
+        }
+        if (!speedrunChecksSent_) {
+            for (const auto& peerId : speedrunParticipants_) {
+                if (!transport_.reliable_peer_ready(peerId) ||
+                    !transport_.send_to(peerId, {{"type", "speedrun_check"},
+                                                 {"request_id", speedrunRequestId_}})) {
+                    clear_speedrun_request();
+                    game::push_online_notification("Could not check every player's Speedrun saves.",
+                                                   4.0f, true);
+                    return;
+                }
+            }
+            speedrunChecksSent_ = true;
+        }
+        if (speedrunWaitingPeers_.empty()) commit_speedrun_start();
+        return;
+    }
+    if (speedrunPeerRequestId_ != 0 && !speedrunPeerReady_) {
+        const auto result = speedrunProbe_.tick();
+        if (result == game::speedrun::SaveProbe::Result::Pending) return;
+        speedrunPeerReady_ = result == game::speedrun::SaveProbe::Result::Clear;
+        const std::string reason = speedrunProbe_.error();
+        if (!transport_.send_to(transport_.status().mode == net::Mode::DirectJoin ?
+                "direct" : transport_.status().ownerClientId,
+                {{"type", "speedrun_ready"}, {"request_id", speedrunPeerRequestId_},
+                 {"ready", speedrunPeerReady_}, {"reason", reason}})) {
+            clear_speedrun_request();
+            game::push_online_notification("Could not answer Speedrun save check.", 4.0f, true);
+            return;
+        }
+        if (!speedrunPeerReady_) {
+            clear_speedrun_request();
+            game::push_online_notification(reason.empty() ?
+                "Speedrun saves are not clear." : reason, 5.0f, true);
+        }
+    }
+}
+
+void OnlineApp::commit_speedrun_start() {
+    if (!speedrunLocalReady_ || !speedrunWaitingPeers_.empty() ||
+        !game::speedrun::mode_active() || !game::speedrun::can_start_here() ||
+        speedrunParticipants_.size() != transport_.peers().size()) {
+        clear_speedrun_request();
+        game::push_online_notification("Speedrun start cancelled: lobby or mode changed.",
+                                       4.0f, true);
+        return;
+    }
+    const auto id = speedrunRequestId_;
+    if (!transport_.send({{"type", "speedrun_start"}, {"request_id", id}})) {
+        clear_speedrun_request();
+        game::push_online_notification("Could not send Speedrun start.", 4.0f, true);
+        return;
+    }
+    clear_speedrun_request();
+    if (router_ != nullptr) router_->clear();
+    if (!game::speedrun::start_run())
+        game::push_online_notification("Could not start Speedrun locally.", 4.0f, true);
+    else {
+        if (!game::speedrun::close_menus_after_start())
+            log_info("Speedrun started, but Dusklight menu close is unavailable");
+        game::push_online_notification("Starting Speedrun...", 1.5f);
+    }
+}
+
+void OnlineApp::handle_speedrun_message(const net::Event& event) {
+    if (!speedrunAvailable_ || event.kind != net::EventKind::Message) return;
+    const net::Status status = transport_.status();
+    if (!status.enabled) return;
+    const std::string type = event.message.value("type", std::string());
+    const bool localOwner = status.mode == net::Mode::DirectHost ||
+        (net::is_room_mode(status.mode) && status.isOwner);
+    const bool fromOwner = status.mode == net::Mode::DirectJoin ?
+        event.peerId == "direct" :
+        net::is_room_mode(status.mode) && !status.isOwner &&
+            !status.ownerClientId.empty() && event.peerId == status.ownerClientId;
+    if (type == "speedrun_reset") {
+        if (fromOwner && game::speedrun::mode_active()) {
+            clear_speedrun_request();
+            speedrunResetAt_ = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(500);
+        }
+        return;
+    }
+    const auto idField = event.message.find("request_id");
+    if (idField == event.message.end() || !idField->is_number_unsigned()) return;
+    const uint64_t id = idField->get<uint64_t>();
+    if (id == 0) return;
+    if (type == "speedrun_check") {
+        if (!fromOwner || speedrunRequestId_ != 0) return;
+        clear_speedrun_request();
+        speedrunPeerRequestId_ = id;
+        // The host's 10-second deadline can expire just before its commit
+        // reaches a guest, so retain the guest's ready state a little longer.
+        speedrunDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        speedrunProbe_.begin();
+    } else if (type == "speedrun_ready") {
+        if (!localOwner || id != speedrunRequestId_ ||
+            !speedrunWaitingPeers_.contains(event.peerId)) return;
+        const auto ready = event.message.find("ready");
+        if (ready == event.message.end() || !ready->is_boolean()) return;
+        if (!ready->get<bool>()) {
+            const auto reason = event.message.find("reason");
+            const std::string detail = reason != event.message.end() && reason->is_string() ?
+                reason->get<std::string>() : "Speedrun saves are not clear.";
+            clear_speedrun_request();
+            game::push_online_notification(detail, 5.0f, true);
+            return;
+        }
+        speedrunWaitingPeers_.erase(event.peerId);
+        if (speedrunLocalReady_ && speedrunWaitingPeers_.empty()) commit_speedrun_start();
+    } else if (type == "speedrun_start") {
+        if (!fromOwner || id != speedrunPeerRequestId_ || !speedrunPeerReady_) return;
+        clear_speedrun_request();
+        if (router_ != nullptr) router_->clear();
+        if (!game::speedrun::start_run())
+            game::push_online_notification("Could not start Speedrun locally.", 4.0f, true);
+        else {
+            if (!game::speedrun::close_menus_after_start())
+                log_info("Speedrun started, but Dusklight menu close is unavailable");
+            game::push_online_notification("Starting Speedrun...", 1.5f);
+        }
+    }
 }
 
 ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {

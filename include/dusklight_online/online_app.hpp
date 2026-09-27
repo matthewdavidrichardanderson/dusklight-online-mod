@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dusklight_online/net/transport.hpp"
+#include "dusklight_online/game/speedrun_bridge.hpp"
 
 #include <array>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,6 +62,7 @@ private:
         ConfigVarHandle remoteCollision = 0;
         ConfigVarHandle pvp = 0;
         ConfigVarHandle playerList = 0;
+        ConfigVarHandle hideActiveMods = 0;
         ConfigVarHandle voiceEnabled = 0;
         ConfigVarHandle voiceProximity = 0;
         ConfigVarHandle voiceProximityRange = 0;
@@ -82,6 +85,7 @@ private:
     UiWindowHandle window_ = 0;
     UiWindowHandle settingsWindow_ = 0;
     UiWindowHandle playerOptionsWindow_ = 0;
+    UiWindowHandle speedrunWindow_ = 0;
     UiWindowHandle voiceWindow_ = 0;
     UiElementHandle voiceMuteHotkeyText_ = 0;
     std::string renderedVoiceMuteHotkeyText_;
@@ -89,6 +93,8 @@ private:
     UiWindowHandle lobbyWindow_ = 0;
     UiMenuTabHandle menuTab_ = 0;
     UiStyleHandle overlayStyle_ = 0;
+    UiStyleHandle hideActiveModsStyle_ = 0;
+    bool hideActiveModsStyleUnavailable_ = false;
     UiElementHandle panelStatus_ = 0;
     UiElementHandle windowStatus_ = 0;
     UiElementHandle windowPlayersEmpty_ = 0;
@@ -122,6 +128,18 @@ private:
     std::string pendingLobbyFailurePrefix_;
     bool pendingLobbyFailureNotified_ = false;
     std::string connectedLobbyName_;
+    game::speedrun::SaveProbe speedrunProbe_;
+    std::set<std::string> speedrunWaitingPeers_;
+    std::set<std::string> speedrunParticipants_;
+    uint64_t speedrunSequence_ = 0;
+    uint64_t speedrunRequestId_ = 0;
+    uint64_t speedrunPeerRequestId_ = 0;
+    std::chrono::steady_clock::time_point speedrunDeadline_{};
+    std::chrono::steady_clock::time_point speedrunResetAt_{};
+    bool speedrunLocalReady_ = false;
+    bool speedrunPeerReady_ = false;
+    bool speedrunChecksSent_ = false;
+    bool speedrunAvailable_ = false;
     std::vector<std::string> manualPeerIds_;
     std::vector<std::string> manualPeerLabels_;
     std::vector<std::string> voiceInputLabels_;
@@ -160,6 +178,12 @@ private:
     void open_window();
     void open_settings_window();
     void open_player_options_window();
+    void open_speedrun_window();
+    void tick_speedrun();
+    void update_speedrun_mods_visibility();
+    void clear_speedrun_request();
+    void handle_speedrun_message(const net::Event& event);
+    void commit_speedrun_start();
     void open_voice_window();
     void open_sync_window();
     void open_lobby_window(ConnectionRole role);
@@ -185,11 +209,20 @@ public:
                                        UiElementHandle, void*, ModError*);
     static ModResult build_player_options_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                               UiElementHandle, void*, ModError*);
+    static ModResult build_speedrun_tab(ModContext*, UiWindowHandle, UiElementHandle,
+                                       UiElementHandle, void*, ModError*);
     static ModResult build_voice_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                     UiElementHandle, void*, ModError*);
     static void player_options_window_closed(ModContext*, UiWindowHandle, void*);
+    static void speedrun_window_closed(ModContext*, UiWindowHandle, void*);
     static void voice_window_closed(ModContext*, UiWindowHandle, void*);
     static void player_options_pressed(ModContext*, void*);
+    static void speedrun_pressed(ModContext*, void*);
+    static void start_speedrun_pressed(ModContext*, void*);
+    static void reset_speedrun_pressed(ModContext*, void*);
+    static bool speedrun_unavailable(ModContext*, void*);
+    static bool speedrun_action_unavailable(ModContext*, void*);
+    static bool start_speedrun_unavailable(ModContext*, void*);
     static void voice_pressed(ModContext*, void*);
     static void mute_hotkey_pressed(ModContext*, void*);
     static void voice_input_get(ModContext*, void*, UiControlValue*);

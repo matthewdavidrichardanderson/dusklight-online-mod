@@ -325,6 +325,7 @@ set(ONLINE_GAME_SOURCES
     src/game/randomizer_item_names.cpp
     src/game/remote_pose.cpp
     src/game/remote_actor_bridge.cpp
+    src/game/speedrun_bridge.cpp
     src/game/visual_bridge.cpp
     src/game/remote_link.cpp
     src/game/remote_link_dummy.cpp

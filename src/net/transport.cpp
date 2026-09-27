@@ -1415,6 +1415,14 @@ struct Transport::Impl {
         // Direct guests cannot inject host-controlled voice settings into the
         // host's broadcast path.
         if (type == "voice_settings") return;
+        // A rebroadcast would give a guest's command the host's identity on
+        // other clients. Readiness replies are for the host alone.
+        if (type == "speedrun_check" || type == "speedrun_start" ||
+            type == "speedrun_reset") return;
+        if (type == "speedrun_ready") {
+            emit(EventKind::Message, sender.id, {}, routed);
+            return;
+        }
 
         const std::string target = routed.value("target_client_id", "");
         const bool targetedSync = type == "sync_request" ||
@@ -2612,6 +2620,22 @@ VisualSendStats Transport::last_visual_send_stats() const {
 
 const std::map<std::string, std::string>& Transport::peers() const {
     return impl_->peerNames;
+}
+
+bool Transport::reliable_peer_ready(std::string_view peerId) const {
+    if (impl_->status.mode == Mode::DirectHost) {
+        const auto peer = impl_->directPeers.find(std::string(peerId));
+        return peer != impl_->directPeers.end() && peer->second.welcomed &&
+               !peer->second.kickPending;
+    }
+    if (impl_->status.mode == Mode::DirectJoin)
+        return peerId == "direct" && impl_->status.welcomed;
+    if (!is_room_mode(impl_->status.mode) || !impl_->status.welcomed ||
+        !impl_->meshLinks.contains(std::string(peerId))) return false;
+    // Cloud rooms have no relay fallback for peer gameplay. Wait until the
+    // reliable direct route is actually established before a group action.
+    return impl_->status.mode != Mode::CloudRoom ||
+           impl_->connections.mesh_direct(std::string(peerId));
 }
 
 std::optional<uint32_t> Transport::direct_peer_rtt_ms(std::string_view peerId) const {
