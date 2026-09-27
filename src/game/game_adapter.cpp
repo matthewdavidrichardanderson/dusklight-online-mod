@@ -3148,7 +3148,7 @@ bool GameAdapter::applying_remote() const { return applyingRemote_; }
 
 void GameAdapter::maybe_queue_progression_switch_prompt(std::string_view peerId,
                                                         int stage, int flag) {
-    if (peerId.empty() || randomizer_active()) return;
+    if (peerId.empty() || randomizer_active() || progressionPromptsSuppressed_) return;
     const auto queue = [&](std::string_view cueKey, std::string_view action,
                            std::string_view area) {
         const std::string guard = std::string(peerId) + ':' + std::string(cueKey);
@@ -3209,7 +3209,7 @@ void GameAdapter::maybe_queue_progression_switch_prompt(std::string_view peerId,
 
 void GameAdapter::maybe_queue_progression_event_prompt(std::string_view peerId,
                                                        uint16_t flag) {
-    if (peerId.empty() || randomizer_active()) return;
+    if (peerId.empty() || randomizer_active() || progressionPromptsSuppressed_) return;
     auto queue = [&](std::string_view cueKey, std::string title,
                      std::string_view expectedStage = {}) {
         const std::string guard = std::string(peerId) + ':' + std::string(cueKey);
@@ -3244,7 +3244,7 @@ void GameAdapter::maybe_queue_progression_event_prompt(std::string_view peerId,
 
 void GameAdapter::maybe_queue_progression_pose_prompt(
     std::string_view peerId, const dusk::multiplayer::PeerPoseSnapshot& pose) {
-    if (peerId.empty() || randomizer_active()) return;
+    if (peerId.empty() || randomizer_active() || progressionPromptsSuppressed_) return;
 
     constexpr std::string_view cueKey = "final_ganondorf_entered";
     const std::string guard = std::string(peerId) + ':' + std::string(cueKey);
@@ -3268,7 +3268,7 @@ void GameAdapter::maybe_queue_progression_pose_prompt(
 }
 
 void GameAdapter::update_progression_prompts() {
-    if (randomizer_active()) {
+    if (randomizer_active() || progressionPromptsSuppressed_) {
         progressionPrompt_ = {};
         progressionPromptAcceptHeld_ = false;
         pendingProgressionCues_.clear();
@@ -3368,9 +3368,19 @@ void GameAdapter::update_progression_prompts() {
     }
 }
 
+void GameAdapter::suppress_progression_prompts(bool suppress) {
+    progressionPromptsSuppressed_ = suppress;
+    if (!suppress) return;
+    progressionPrompt_ = {};
+    progressionPromptAcceptHeld_ = false;
+    pendingProgressionCues_.clear();
+    pendingProgressionPeerId_.clear();
+    pendingProgressionCueKey_.clear();
+}
+
 void GameAdapter::consume_progression_prompt_input() {
     progressionPromptAcceptHeld_ = false;
-    if (randomizer_active() || !progressionPrompt_.active) {
+    if (randomizer_active() || progressionPromptsSuppressed_ || !progressionPrompt_.active) {
         return;
     }
 
@@ -4718,6 +4728,7 @@ void GameAdapter::reset_session() {
     lastLocalTboxFlag_ = -1;
     lastLocalTboxAt_ = {};
     progressionPrompt_ = {};
+    progressionPromptsSuppressed_ = false;
     pendingProgressionCues_.clear();
     pendingProgressionPeerId_.clear();
     pendingProgressionCueKey_.clear();

@@ -22,6 +22,16 @@ struct ProgressionPromptView {
     float holdRatio = 0.0f;
 };
 
+struct SpeedrunPromptView {
+    bool active = false;
+    bool countdown = false;
+    bool localReady = false;
+    uint32_t readyCount = 0;
+    uint32_t playerCount = 0;
+    float holdRatio = 0.0f;
+    float countdownSeconds = 0.0f;
+};
+
 struct PlayerLocationView {
     std::string stage;
     int room = -1;
@@ -48,6 +58,7 @@ void update_visual_overlays(
     const ProgressionPromptView& progressionPrompt);
 void push_online_notification(std::string text, float durationSeconds = 5.0f,
                               bool warning = false);
+void set_speedrun_prompt(const SpeedrunPromptView& prompt);
 void push_online_player_notification(std::string playerName, std::string itemName,
                                      std::string checkName, uint32_t color,
                                      float durationSeconds = 5.0f);

@@ -272,7 +272,9 @@ int main() {
 
     // A direct guest must not be able to make a host-only Speedrun command
     // appear to come from the host when the transport fans out its messages.
-    for (const char* type : {"speedrun_check", "speedrun_start", "speedrun_reset"}) {
+    for (const char* type : {"speedrun_check", "speedrun_prompt",
+                             "speedrun_ready_count", "speedrun_countdown",
+                             "speedrun_cancel", "speedrun_start", "speedrun_reset"}) {
         if (!alice.send({{"type", type}, {"request_id", 7U}}))
             fail("guest speedrun command send");
         pump(host, alice, bob, 30);
@@ -292,6 +294,19 @@ int main() {
     if (!drain_for_type(host, "speedrun_ready") ||
         drain_for_type(bob, "speedrun_ready"))
         fail("speedrun readiness must go only to the host");
+    if (!host.send({{"type", "speedrun_prompt"}, {"request_id", 8U},
+                    {"player_count", 3U}}))
+        fail("host speedrun prompt send");
+    pump(host, alice, bob, 30);
+    if (!drain_for_type(alice, "speedrun_prompt") ||
+        !drain_for_type(bob, "speedrun_prompt"))
+        fail("host speedrun prompt did not reach both players");
+    if (!alice.send({{"type", "speedrun_player_ready"}, {"request_id", 8U}}))
+        fail("guest speedrun player ready send");
+    pump(host, alice, bob, 30);
+    if (!drain_for_type(host, "speedrun_player_ready") ||
+        drain_for_type(bob, "speedrun_player_ready"))
+        fail("speedrun player readiness must go only to the host");
 
     // Appearance is reliable presence metadata, including the empty default.
     for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},

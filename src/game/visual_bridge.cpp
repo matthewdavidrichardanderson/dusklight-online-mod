@@ -157,6 +157,7 @@ std::map<std::string, PlayerLocationView> sLocations;
 std::map<std::string, uint32_t> sLatencies;
 std::unique_ptr<NameLabelFontAtlas> sFontAtlas;
 ProgressionPromptView sProgressionPrompt;
+SpeedrunPromptView sSpeedrunPrompt;
 std::vector<Notification> sNotifications;
 std::deque<ChatLine> sChatLines;
 std::optional<std::string> sPendingChatSubmission;
@@ -879,14 +880,20 @@ void draw_imgui_player_list() {
     ImGui::PopStyleVar(3);
 }
 
+struct PresentationRect {
+    ImVec2 pos;
+    ImVec2 size;
+};
+
+PresentationRect game_presentation_rect();
+
 void draw_imgui_progression_prompt() {
-    if (!sConnected || !sProgressionPrompt.active) return;
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const ImVec2 workPos = viewport != nullptr ? viewport->WorkPos : ImVec2(0.0f, 0.0f);
-    const ImVec2 workSize = viewport != nullptr ? viewport->WorkSize : ImVec2(1280.0f, 720.0f);
+    if (!sConnected || !sProgressionPrompt.active || sSpeedrunPrompt.active) return;
+    const PresentationRect gameRect = game_presentation_rect();
     const ImVec2 windowSize(360.0f, 112.0f);
     ImGui::SetNextWindowPos(
-        ImVec2(workPos.x + workSize.x - windowSize.x - 24.0f, workPos.y + 72.0f),
+        ImVec2(gameRect.pos.x + gameRect.size.x - windowSize.x - 24.0f,
+               gameRect.pos.y + 72.0f),
         ImGuiCond_Always);
     ImGui::SetNextWindowSize(windowSize, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.86f);
@@ -948,12 +955,82 @@ void draw_imgui_progression_prompt() {
     ImGui::PopStyleVar(2);
 }
 
-struct PresentationRect {
-    ImVec2 pos;
-    ImVec2 size;
-};
+void draw_imgui_speedrun_prompt() {
+    if (!sConnected || !sSpeedrunPrompt.active) return;
+    const PresentationRect gameRect = game_presentation_rect();
+    const ImVec2 windowSize(360.0f, 120.0f);
+    ImGui::SetNextWindowPos(
+        ImVec2(gameRect.pos.x + gameRect.size.x - windowSize.x - 24.0f,
+               gameRect.pos.y + 72.0f),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSize(windowSize, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.86f);
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.05f, 0.06f, 0.86f));
+    if (ImGui::Begin("Multiplayer Speedrun Ready", nullptr, flags)) {
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const ImVec2 pos = ImGui::GetWindowPos();
+        const ImVec2 size = ImGui::GetWindowSize();
+        drawList->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+                          IM_COL32(245, 193, 51, 230), 6.0f, 0, 2.0f);
+        ImGui::PushTextWrapPos(pos.x + 276.0f);
+        ImGui::TextUnformatted(sSpeedrunPrompt.countdown ? "Starting Speedrun" :
+                                                       "Speedrun Ready Up");
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.85f, 0.92f, 1.0f));
+        ImGui::Text("%u / %u players ready", sSpeedrunPrompt.readyCount,
+                    sSpeedrunPrompt.playerCount);
+        if (sSpeedrunPrompt.countdown)
+            ImGui::TextUnformatted("Starting when the countdown ends");
+        else if (sSpeedrunPrompt.localReady)
+            ImGui::TextUnformatted("Waiting for the other players");
+        else
+            ImGui::TextUnformatted("Hold D-pad Down to ready up");
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
 
-PresentationRect game_presentation_rect();
+        constexpr float kPi = 3.14159265358979323846f;
+        const ImVec2 ringCenter(pos.x + size.x - 46.0f, pos.y + size.y * 0.5f);
+        constexpr float ringRadius = 20.0f;
+        drawList->AddCircle(ringCenter, ringRadius, IM_COL32(255, 255, 255, 70), 48, 3.0f);
+        const float ratio = sSpeedrunPrompt.countdown ?
+            std::clamp(1.0f - sSpeedrunPrompt.countdownSeconds / 3.0f, 0.0f, 1.0f) :
+            (sSpeedrunPrompt.localReady ? 1.0f : sSpeedrunPrompt.holdRatio);
+        if (ratio > 0.0f) {
+            drawList->PathArcTo(ringCenter, ringRadius, -0.5f * kPi,
+                                -0.5f * kPi + 2.0f * kPi * ratio, 48);
+            drawList->PathStroke(IM_COL32(255, 176, 38, 255), 0, 5.0f);
+        }
+        if (sSpeedrunPrompt.countdown) {
+            const std::string number = sSpeedrunPrompt.countdownSeconds > 0.0f ?
+                std::to_string(static_cast<int>(std::ceil(sSpeedrunPrompt.countdownSeconds))) : "GO";
+            const float fontSize = ImGui::GetFontSize() * 1.15f;
+            const ImVec2 textSize = ImGui::GetFont()->CalcTextSizeA(fontSize, 1000.0f, 0.0f,
+                                                                    number.c_str());
+            drawList->AddText(ImGui::GetFont(), fontSize,
+                ImVec2(ringCenter.x - textSize.x * 0.5f, ringCenter.y - textSize.y * 0.5f),
+                IM_COL32(255, 255, 255, 245), number.c_str());
+        } else if (sSpeedrunPrompt.localReady) {
+            const ImVec2 textSize = ImGui::CalcTextSize("OK");
+            drawList->AddText(ImVec2(ringCenter.x - textSize.x * 0.5f,
+                                     ringCenter.y - textSize.y * 0.5f),
+                              IM_COL32(255, 255, 255, 245), "OK");
+        }
+        const float barRatio = sSpeedrunPrompt.countdown ?
+            std::clamp(sSpeedrunPrompt.countdownSeconds / 3.0f, 0.0f, 1.0f) :
+            (sSpeedrunPrompt.playerCount != 0 ?
+                static_cast<float>(sSpeedrunPrompt.readyCount) / sSpeedrunPrompt.playerCount : 0.0f);
+        drawList->AddRectFilled(ImVec2(pos.x, pos.y + size.y - 3.0f),
+            ImVec2(pos.x + size.x * barRatio, pos.y + size.y), IM_COL32(255, 176, 38, 210));
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
 
 ImFont* notification_bold_font() {
     for (ImFont* font : ImGui::GetIO().Fonts->Fonts) {
@@ -1426,6 +1503,7 @@ void draw_host_imgui_overlays() {
     draw_imgui_voice_mute_indicator();
     draw_imgui_player_list();
     draw_imgui_progression_prompt();
+    draw_imgui_speedrun_prompt();
     draw_imgui_notifications();
     draw_imgui_chat();
 }
@@ -1633,6 +1711,10 @@ void push_online_notification(std::string text, float durationSeconds, bool warn
     svc_ui->push_toast(mod_ctx, &toast);
 }
 
+void set_speedrun_prompt(const SpeedrunPromptView& prompt) {
+    sSpeedrunPrompt = prompt;
+}
+
 void push_online_player_notification(std::string playerName, std::string itemName,
                                      std::string checkName, uint32_t color,
                                      float durationSeconds) {
@@ -1741,6 +1823,7 @@ void reset_visual_overlays() {
     sLocalStatus.clear();
     sLocalName.clear();
     sProgressionPrompt = {};
+    sSpeedrunPrompt = {};
     sNotifications.clear();
     sChatLines.clear();
     sPendingChatSubmission.reset();

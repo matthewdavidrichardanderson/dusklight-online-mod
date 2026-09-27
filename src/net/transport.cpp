@@ -1417,9 +1417,11 @@ struct Transport::Impl {
         if (type == "voice_settings") return;
         // A rebroadcast would give a guest's command the host's identity on
         // other clients. Readiness replies are for the host alone.
-        if (type == "speedrun_check" || type == "speedrun_start" ||
+        if (type == "speedrun_check" || type == "speedrun_prompt" ||
+            type == "speedrun_ready_count" || type == "speedrun_countdown" ||
+            type == "speedrun_cancel" || type == "speedrun_start" ||
             type == "speedrun_reset") return;
-        if (type == "speedrun_ready") {
+        if (type == "speedrun_ready" || type == "speedrun_player_ready") {
             emit(EventKind::Message, sender.id, {}, routed);
             return;
         }
