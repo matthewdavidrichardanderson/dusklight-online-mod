@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -44,6 +45,7 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/resource.h"
 #include "mods/svc/ui.h"
+#include "mods/svc/ui.hpp"
 
 #include <imgui.h>
 #include <SDL3/SDL_events.h>
@@ -171,6 +173,10 @@ bool sChatFocusRequested = false;
 bool sHostWantsKeyboard = false;
 bool sHostDocumentWasVisible = false;
 bool sChatScrollToBottom = false;
+std::optional<size_t> sChatSelectionLine;
+size_t sChatSelectionAnchor = 0;
+size_t sChatSelectionCaret = 0;
+bool sChatSelecting = false;
 bool sHostUiKeyRewritten = false;
 SDL_Keycode sHostUiOriginalKey = SDLK_UNKNOWN;
 
@@ -197,6 +203,10 @@ void close_chat_input() {
     sChatWrappedInput.clear();
     sChatAutoBreaks.clear();
     sChatWrapWidth = 0.0f;
+    sChatSelectionLine.reset();
+    sChatSelectionAnchor = 0;
+    sChatSelectionCaret = 0;
+    sChatSelecting = false;
     if (wasOpen) restore_pad_input_block();
 }
 
@@ -1137,7 +1147,77 @@ void draw_imgui_notifications() {
     ImGui::End();
 }
 
-void draw_chat_line(const ChatLine& line, float alpha) {
+struct ChatVisualSpan {
+    size_t begin;
+    size_t end;
+};
+
+size_t next_chat_codepoint(std::string_view text, size_t offset) {
+    if (offset >= text.size()) return text.size();
+    ++offset;
+    while (offset < text.size() &&
+           (static_cast<unsigned char>(text[offset]) & 0xC0) == 0x80) ++offset;
+    return offset;
+}
+
+std::vector<ChatVisualSpan> chat_visual_spans(std::string_view text, float wrapWidth) {
+    std::vector<ChatVisualSpan> spans;
+    ImFont* font = ImGui::GetFont();
+    const float scale = ImGui::GetFontSize() / font->FontSize;
+    size_t cursor = 0;
+    while (cursor < text.size()) {
+        const size_t newline = text.find('\n', cursor);
+        const size_t segmentEnd = newline == std::string_view::npos ? text.size() : newline;
+        if (cursor == segmentEnd) spans.push_back({cursor, cursor});
+        while (cursor < segmentEnd) {
+            const char* first = text.data() + cursor;
+            const char* limit = text.data() + segmentEnd;
+            const char* wrap = font->CalcWordWrapPositionA(scale, first, limit, wrapWidth);
+            const size_t end = wrap > first ? static_cast<size_t>(wrap - text.data()) :
+                next_chat_codepoint(text, cursor);
+            spans.push_back({cursor, end});
+            cursor = end;
+            // ImGui skips blanks at a soft wrap. Keep their byte offsets in
+            // the copied original, while placing the next glyph on its line.
+            while (cursor < segmentEnd && (text[cursor] == ' ' || text[cursor] == '\t'))
+                ++cursor;
+        }
+        if (newline == std::string_view::npos) break;
+        cursor = newline + 1;
+    }
+    if (spans.empty() || (!text.empty() && text.back() == '\n'))
+        spans.push_back({text.size(), text.size()});
+    return spans;
+}
+
+float chat_span_width(std::string_view text, size_t begin, size_t end) {
+    if (end <= begin) return 0.0f;
+    return ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f,
+        text.data() + begin, text.data() + end).x;
+}
+
+size_t chat_byte_at(const std::string& text, const std::vector<ChatVisualSpan>& spans,
+                    ImVec2 origin, ImVec2 mouse) {
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const size_t row = static_cast<size_t>(std::clamp(
+        static_cast<int>((mouse.y - origin.y) / lineHeight),
+        0, static_cast<int>(spans.size()) - 1));
+    const ChatVisualSpan span = spans[row];
+    const float x = mouse.x - origin.x;
+    if (x <= 0.0f) return span.begin;
+    size_t previous = span.begin;
+    float previousWidth = 0.0f;
+    for (size_t next = next_chat_codepoint(text, previous); previous < span.end;
+         previous = next, next = next_chat_codepoint(text, next)) {
+        next = std::min(next, span.end);
+        const float width = chat_span_width(text, span.begin, next);
+        if (x < (previousWidth + width) * 0.5f) return previous;
+        previousWidth = width;
+    }
+    return span.end;
+}
+
+void draw_chat_line(const ChatLine& line, size_t index, float alpha) {
     const PlayerColor color = line.playerColor;
     const std::string nameLabel = line.playerName + ":";
     const ImVec2 namePos = ImGui::GetCursorScreenPos();
@@ -1157,6 +1237,46 @@ void draw_chat_line(const ChatLine& line, float alpha) {
     ImGui::SameLine();
     const ImVec2 messagePos = ImGui::GetCursorScreenPos();
     const float messageWrapWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    if (sChatInputActive) {
+        const auto spans = chat_visual_spans(line.text, messageWrapWidth);
+        const float lineHeight = ImGui::GetTextLineHeight();
+        const ImVec2 bottomRight(messagePos.x + messageWrapWidth,
+                                 messagePos.y + lineHeight * spans.size());
+        const bool hovered = ImGui::IsWindowHovered(
+            ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+            ImGui::IsMouseHoveringRect(messagePos, bottomRight);
+        if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            sChatSelectionLine = index;
+            sChatSelectionAnchor = chat_byte_at(
+                line.text, spans, messagePos, ImGui::GetIO().MousePos);
+            sChatSelectionCaret = sChatSelectionAnchor;
+            sChatSelecting = true;
+        }
+        if (sChatSelecting && sChatSelectionLine == index) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                sChatSelectionCaret = chat_byte_at(
+                    line.text, spans, messagePos, ImGui::GetIO().MousePos);
+            else
+                sChatSelecting = false;
+        }
+        if (sChatSelectionLine == index && sChatSelectionAnchor != sChatSelectionCaret) {
+            const size_t first = std::min(sChatSelectionAnchor, sChatSelectionCaret);
+            const size_t last = std::max(sChatSelectionAnchor, sChatSelectionCaret);
+            const ImU32 highlight = ImGui::GetColorU32(ImGuiCol_TextSelectedBg);
+            for (size_t row = 0; row < spans.size(); ++row) {
+                const size_t begin = std::max(first, spans[row].begin);
+                const size_t end = std::min(last, spans[row].end);
+                if (end <= begin) continue;
+                const float left = chat_span_width(line.text, spans[row].begin, begin);
+                const float right = chat_span_width(line.text, spans[row].begin, end);
+                const float y = messagePos.y + lineHeight * row;
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(messagePos.x + left, y),
+                    ImVec2(messagePos.x + right, y + lineHeight), highlight);
+            }
+        }
+    }
     ImGui::GetWindowDrawList()->AddText(
         ImGui::GetFont(), ImGui::GetFontSize(),
         ImVec2(messagePos.x + shadowOffset, messagePos.y + shadowOffset),
@@ -1387,7 +1507,7 @@ void draw_imgui_chat() {
             if (!sChatInputActive) {
                 alpha = closed_chat_line_alpha(sChatLines[index], now);
             }
-            draw_chat_line(sChatLines[index], alpha);
+            draw_chat_line(sChatLines[index], index, alpha);
         }
         ImGui::PopTextWrapPos();
 
@@ -1420,6 +1540,10 @@ void draw_imgui_chat() {
                 ImVec2(-1.0f, composerHeight), inputFlags,
                 &chat_composer_edit_callback);
             const bool inputFocused = ImGui::IsItemActive();
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                sChatSelectionLine.reset();
+                sChatSelecting = false;
+            }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
                 close_chat_input();
             } else if (submitted) {
@@ -1446,13 +1570,24 @@ void draw_imgui_chat() {
                     dusklight_online::log_info("CHAT_UI keyboard focus acquired");
                 }
                 sChatInputFocused = inputFocused;
-                if (!inputFocused) {
+                if (!inputFocused && !sChatSelectionLine) {
                     // Focus can settle a frame after SetKeyboardFocusHere and
-                    // can be transiently released by ImGui. Chat lifetime is
-                    // explicit; retry focus instead of treating that as close.
+                    // can be transiently released by ImGui. Let a selected
+                    // history message retain keyboard focus for Ctrl+C.
                     sChatFocusRequested = true;
                 }
                 PADBlockInput(true);
+            }
+            if (!sChatInputFocused && sChatSelectionLine &&
+                *sChatSelectionLine < sChatLines.size() &&
+                ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+                const std::string& selected = sChatLines[*sChatSelectionLine].text;
+                const size_t first = std::min(sChatSelectionAnchor, sChatSelectionCaret);
+                const size_t last = std::min(
+                    std::max(sChatSelectionAnchor, sChatSelectionCaret), selected.size());
+                if (first < last &&
+                    mods::ui::set_clipboard_text(selected.substr(first, last - first)) == MOD_OK)
+                    sChatFocusRequested = true;
             }
         }
     }
@@ -1736,7 +1871,17 @@ void push_chat_message(std::string playerName, std::string text, uint32_t color)
     sChatLines.push_back({std::move(playerName), std::move(normalized),
                           brighten_display_color(display_color(color)),
                           std::chrono::steady_clock::now()});
-    while (sChatLines.size() > kMaxChatHistory) sChatLines.pop_front();
+    while (sChatLines.size() > kMaxChatHistory) {
+        if (sChatSelectionLine) {
+            if (*sChatSelectionLine == 0) {
+                sChatSelectionLine.reset();
+                sChatSelecting = false;
+            } else {
+                --*sChatSelectionLine;
+            }
+        }
+        sChatLines.pop_front();
+    }
     sChatScrollToBottom = true;
 }
 
