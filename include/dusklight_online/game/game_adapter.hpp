@@ -79,7 +79,7 @@ public:
     void notify_local_item_grant(const ItemGiveInfo& info);
     void notify_local_ooccoo_warp_out();
 
-    void set_player_color(uint32_t color, uint32_t outfit);
+    void set_player_color(uint32_t color, uint32_t outfit, uint32_t zora);
     void publish_player_color();
     [[nodiscard]] std::optional<uint32_t> peer_latency_ms(std::string_view peerId) const;
     [[nodiscard]] std::optional<net::udp::VoicePosition> voice_position() const;

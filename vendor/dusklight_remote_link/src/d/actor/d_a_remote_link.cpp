@@ -7977,6 +7977,7 @@ int daRemoteLink_c::Draw() {
     const auto appearancePeer = dusklight_online::game::appearance::peer_for_actor(this);
     dusklight_online::game::appearance::apply(this,
         dusklight_online::game::appearance::peer_outfit_color(appearancePeer),
+        dusklight_online::game::appearance::peer_zora_color(appearancePeer),
         mpBodyModel, mpHeadModel, mpTransformBridgeModel);
     if (isRemoteLinkSceneUnsafe()) {
         return TRUE;

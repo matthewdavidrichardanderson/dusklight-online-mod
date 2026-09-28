@@ -816,6 +816,8 @@ void OnlineApp::update() {
     if (game_) game_->set_player_color(game::appearance::parse_color(
         string_value(config_.playerColor)).value_or(game::appearance::default_color),
         game::appearance::parse_color(string_value(config_.outfitColor))
+            .value_or(game::appearance::default_color),
+        game::appearance::parse_color(string_value(config_.zoraColor))
             .value_or(game::appearance::default_color));
     if (reopenWindowPending_ && window_ == 0) {
         reopenWindowPending_ = false;
@@ -1217,6 +1219,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         StringVar{"player-name", "Player", &config_.playerName},
         StringVar{"player-color", "", &config_.playerColor},
         StringVar{"outfit-color", "inherit", &config_.outfitColor},
+        StringVar{"zora-color", "inherit", &config_.zoraColor},
         StringVar{"direct-room", "Lobby", &config_.directRoom},
         StringVar{"bind-host", "0.0.0.0", &config_.bindHost},
         StringVar{"public-host", "127.0.0.1", &config_.publicHost},
@@ -1248,6 +1251,19 @@ ModResult OnlineApp::register_config(ModError* error) {
     config_.outfitColor = 0;
     if (add_config("outfit-color", CONFIG_VAR_STRING, "", 0, false,
                    config_.outfitColor, error) != MOD_OK)
+        return MOD_ERROR;
+    // Existing users had one outfit colour for both tunic and Zora Armour.
+    // Preserve that appearance once, then let the two choices diverge.
+    if (string_value(config_.zoraColor) == "inherit") {
+        const auto value = string_value(config_.outfitColor);
+        if (svc_config->set_string(mod_ctx, config_.zoraColor, value.c_str()) != MOD_OK)
+            return MOD_ERROR;
+    }
+    if (svc_config->unregister_var(mod_ctx, config_.zoraColor) != MOD_OK)
+        return MOD_ERROR;
+    config_.zoraColor = 0;
+    if (add_config("zora-color", CONFIG_VAR_STRING, "", 0, false,
+                   config_.zoraColor, error) != MOD_OK)
         return MOD_ERROR;
     if (add_config("port", CONFIG_VAR_INT, nullptr, 34197, false, config_.port, error) != MOD_OK) {
         return MOD_ERROR;
@@ -2206,12 +2222,12 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     };
     UiControlDesc colour = UI_CONTROL_DESC_INIT;
     colour.kind = UI_CONTROL_COLOR;
-    colour.label = "Outfit colour";
+    colour.label = "Tunic colour";
     colour.binding = UI_BINDING_CONFIG_VAR;
     colour.config_var = app.config_.outfitColor;
     colour.color_presets = presets;
     colour.color_preset_count = std::size(presets);
-    colour.help_rml = "Choose Link's tunic and Zora armour colour.";
+    colour.help_rml = "Choose Link's tunic colour.";
     svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
     colour.label = "Player colour";
     colour.config_var = app.config_.playerColor;
@@ -2221,11 +2237,17 @@ ModResult OnlineApp::build_player_options_tab(ModContext*, UiWindowHandle, UiEle
     svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
     UiControlDesc match = UI_CONTROL_DESC_INIT;
     match.kind = UI_CONTROL_TOGGLE;
-    match.label = "Match outfit colour";
+    match.label = "Match tunic colour";
     match.binding = UI_BINDING_CONFIG_VAR;
     match.config_var = app.config_.matchOutfitColor;
-    match.help_rml = "Use your outfit colour for your player colour.";
+    match.help_rml = "Use your tunic colour for your player colour.";
     svc_ui->pane_add_control(mod_ctx, left, &match, nullptr);
+    colour.label = "Zora Armour colour";
+    colour.config_var = app.config_.zoraColor;
+    colour.is_disabled = nullptr;
+    colour.user_data = nullptr;
+    colour.help_rml = "Choose Link's Zora Armour colour separately from the tunic.";
+    svc_ui->pane_add_control(mod_ctx, left, &colour, nullptr);
     add_button(left, "Reset to defaults", &OnlineApp::reset_player_options, &app);
     return MOD_OK;
 }
@@ -3199,6 +3221,7 @@ bool OnlineApp::voice_proximity_setting_locked(ModContext*, void* data) {
 void OnlineApp::reset_player_options(ModContext*, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     svc_config->set_string(mod_ctx, app.config_.outfitColor, "");
+    svc_config->set_string(mod_ctx, app.config_.zoraColor, "");
     svc_config->set_string(mod_ctx, app.config_.playerColor, "");
     svc_config->set_bool(mod_ctx, app.config_.matchOutfitColor, true);
 }

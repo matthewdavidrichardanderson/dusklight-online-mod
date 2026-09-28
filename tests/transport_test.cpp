@@ -312,20 +312,26 @@ int main() {
     for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},
                                       std::pair{"C06030", ""}, std::pair{"", "204060"},
                                       std::pair{"", ""}}) {
-        alice.send({{"type", "presence"}, {"player_color", color}, {"outfit_color", outfit}, {"client_id", "spoof"}});
+        const char* zora = outfit[0] == '\0' ? "00ABCD" : "";
+        alice.send({{"type", "presence"}, {"player_color", color},
+                    {"outfit_color", outfit}, {"zora_color", zora}, {"client_id", "spoof"}});
         pump(host, alice, bob, 20);
         nlohmann::json appearance;
         if (!drain_for_type(bob, "presence", &appearance) ||
             appearance.value("outfit_color", "missing") != outfit ||
+            appearance.value("zora_color", "missing") != zora ||
             appearance.value("player_color", "missing") != color ||
             appearance.value("client_id", "") == "spoof") fail("direct appearance forwarding");
         if (!drain_for_type(host, "presence", &appearance) ||
             appearance.value("outfit_color", "missing") != outfit ||
+            appearance.value("zora_color", "missing") != zora ||
             appearance.value("player_color", "missing") != color) fail("host appearance receipt");
-        host.send({{"type", "presence"}, {"player_color", color}, {"outfit_color", outfit}});
+        host.send({{"type", "presence"}, {"player_color", color},
+                   {"outfit_color", outfit}, {"zora_color", zora}});
         pump(host, alice, bob, 20);
         if (!drain_for_type(alice, "presence", &appearance) ||
             appearance.value("outfit_color", "missing") != outfit ||
+            appearance.value("zora_color", "missing") != zora ||
             appearance.value("player_color", "missing") != color) fail("host appearance publication");
         while (bob.has_events()) bob.pop_event();
     }

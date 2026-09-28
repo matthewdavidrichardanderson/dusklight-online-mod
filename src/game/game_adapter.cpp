@@ -4156,7 +4156,15 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                         outfit = appearance::parse_color(field->get_ref<const std::string&>());
                         if (!outfit) return reject("invalid outfit colour");
                     }
-                    appearance::set_peer(message.peerId, *color, *outfit);
+                    // Older clients sent one outfit colour for both garments.
+                    auto zora = outfit;
+                    if (const auto field = message.payload.find("zora_color");
+                        field != message.payload.end()) {
+                        if (!field->is_string()) return reject("invalid Zora Armour colour");
+                        zora = appearance::parse_color(field->get_ref<const std::string&>());
+                        if (!zora) return reject("invalid Zora Armour colour");
+                    }
+                    appearance::set_peer(message.peerId, *color, *outfit, *zora);
                 }
             }
             if (type == "progression_state") {
@@ -4504,9 +4512,10 @@ ApplyResult GameAdapter::consume_udp(const net::Event& event) {
     return ApplyResult::Applied;
 }
 
-void GameAdapter::set_player_color(uint32_t color, uint32_t outfit) {
-    if (appearance::local_color() == color && appearance::local_outfit_color() == outfit) return;
-    appearance::set_local(color, outfit);
+void GameAdapter::set_player_color(uint32_t color, uint32_t outfit, uint32_t zora) {
+    if (appearance::local_color() == color && appearance::local_outfit_color() == outfit &&
+        appearance::local_zora_color() == zora) return;
+    appearance::set_local(color, outfit, zora);
     publish_player_color();
 }
 
@@ -4559,6 +4568,7 @@ void GameAdapter::publish_player_color() {
     nlohmann::json message = {{"type", "presence"},
                              {"player_color", appearance::color_string(appearance::local_color())},
                              {"outfit_color", appearance::color_string(appearance::local_outfit_color())},
+                             {"zora_color", appearance::color_string(appearance::local_zora_color())},
                              {"latency_probe", ++nextLatencyNonce_}};
     nlohmann::json echoes = nlohmann::json::object();
     for (const auto& [peerId, probe] : latencyEchoes_) {

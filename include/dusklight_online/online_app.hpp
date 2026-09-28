@@ -45,6 +45,7 @@ private:
         ConfigVarHandle playerName = 0;
         ConfigVarHandle playerColor = 0;
         ConfigVarHandle outfitColor = 0;
+        ConfigVarHandle zoraColor = 0;
         ConfigVarHandle matchOutfitColor = 0;
         ConfigVarHandle directRoom = 0;
         ConfigVarHandle bindHost = 0;

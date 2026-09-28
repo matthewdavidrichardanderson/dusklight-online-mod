@@ -12,19 +12,23 @@ namespace dusklight_online::game::appearance {
 namespace {
 Color local = default_color;
 Color localOutfit = default_color;
+Color localZora = default_color;
 bool lobbyActive = false;
-struct PeerColors { Color player; Color outfit; };
+struct PeerColors { Color player; Color outfit; Color zora; };
 std::map<std::string, PeerColors, std::less<>> peers;
 struct Replacement {
     TextureReplacementHandle handle = 0;
     Color color = 0;
 };
 std::map<const void*, std::map<const void*, Replacement>> owners;
-bool selected(std::string_view name) {
-    constexpr std::string_view names[] = {"al_cap", "al_upbody", "al_lowbody",
+enum class Garment { None, Tunic, Zora };
+Garment garment(std::string_view name) {
+    constexpr std::string_view tunic[] = {"al_cap", "al_upbody", "al_lowbody"};
+    constexpr std::string_view zora[] = {
         "zl_cap", "zl_helmet", "zl_armor", "zl_armL", "zl_body", "zl_boots"};
-    for (auto n : names) if (name == n) return true;
-    return false;
+    for (auto n : tunic) if (name == n) return Garment::Tunic;
+    for (auto n : zora) if (name == n) return Garment::Zora;
+    return Garment::None;
 }
 DEFINE_HOOK(&daAlink_c::draw, LocalDraw);
 DEFINE_HOOK(&daAlink_c::loadModelDVD, LocalModelChange);
@@ -34,7 +38,7 @@ HookAction draw_pre(ModContext*, void* args, void*, void*) {
     auto* link = mods::arg<daAlink_c*>(args, 0);
     // Models can already be freed during the outfit-load wait.
     if (link->mClothesChangeWaitTimer != 0 || link->checkWolf()) release(link);
-    else apply(link, localOutfit, link->mpLinkModel, link->mpLinkHatModel);
+    else apply(link, localOutfit, localZora, link->mpLinkModel, link->mpLinkHatModel);
     return HOOK_CONTINUE;
 }
 HookAction change_pre(ModContext*, void* args, void*, void*) {
@@ -51,11 +55,15 @@ void set_lobby_active(bool active) {
     lobbyActive = active;
     if (!active) while (!owners.empty()) release(owners.begin()->first);
 }
-void set_local(Color c, Color outfit) { local = c; localOutfit = outfit; }
+void set_local(Color c, Color outfit, Color zora) {
+    local = c; localOutfit = outfit; localZora = zora;
+}
 Color local_outfit_color() { return localOutfit; }
+Color local_zora_color() { return localZora; }
 Color local_color() { return local; }
-void set_peer(std::string_view id, Color c, Color outfit) {
-    if (!id.empty() && (peers.contains(id) || peers.size() < 8)) peers[std::string(id)] = {c, outfit};
+void set_peer(std::string_view id, Color c, Color outfit, Color zora) {
+    if (!id.empty() && (peers.contains(id) || peers.size() < 8))
+        peers[std::string(id)] = {c, outfit, zora};
 }
 Color peer_color(std::string_view id) {
     auto it = peers.find(id);
@@ -65,6 +73,10 @@ Color peer_outfit_color(std::string_view id) {
     auto it = peers.find(id);
     return it == peers.end() ? default_color : it->second.outfit;
 }
+Color peer_zora_color(std::string_view id) {
+    auto it = peers.find(id);
+    return it == peers.end() ? default_color : it->second.zora;
+}
 void forget_peer(std::string_view id) { peers.erase(std::string(id)); }
 void reset_peers() { peers.clear(); }
 void release(const void* owner) {
@@ -73,7 +85,8 @@ void release(const void* owner) {
     for (auto& [ptr, r] : it->second) svc_texture->unregister(mod_ctx,r.handle);
     owners.erase(it);
 }
-void apply(const void* owner, Color color, J3DModel* body, J3DModel* head, J3DModel* bridge) {
+void apply(const void* owner, Color outfit, Color zora, J3DModel* body,
+           J3DModel* head, J3DModel* bridge) {
     if (!lobbyActive) return;
     auto& registrations = owners[owner];
     std::set<const void*> live;
@@ -85,7 +98,10 @@ void apply(const void* owner, Color color, J3DModel* body, J3DModel* head, J3DMo
         if (!names || !textures) continue;
         for (u16 i=0; i<textures->getNum(); ++i) {
             const char* name=names->getName(i);
-            if (!name || !selected(name)) continue;
+            if (!name) continue;
+            const Garment part = garment(name);
+            if (part == Garment::None) continue;
+            const Color color = part == Garment::Zora ? zora : outfit;
             const auto* img=textures->getResTIMG(i);
             const void* ptr=textures->getImgDataPtr(i);
             if (!img || !ptr) continue;
