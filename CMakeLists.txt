@@ -216,6 +216,21 @@ configure_file(
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/THIRD_PARTY_LICENSES.txt"
     COPYONLY
 )
+foreach (emoji_license EMOJI_APACHE_LICENSE.txt GEMOJI_LICENSE.txt STB_IMAGE_LICENSE.txt)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/res/${emoji_license}"
+        "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/${emoji_license}"
+        COPYONLY
+    )
+endforeach ()
+file(GLOB DUSKLIGHT_ONLINE_EMOJI_ASSETS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/emoji/*.png")
+file(MAKE_DIRECTORY "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/emoji")
+foreach (emoji_asset IN LISTS DUSKLIGHT_ONLINE_EMOJI_ASSETS)
+    get_filename_component(emoji_filename "${emoji_asset}" NAME)
+    configure_file("${emoji_asset}"
+        "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/emoji/${emoji_filename}" COPYONLY)
+endforeach ()
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/res/OPUS_LICENSE.txt"
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/OPUS_LICENSE.txt"
@@ -311,6 +326,8 @@ set(ONLINE_CORE_SOURCES
 )
 
 set(ONLINE_GAME_SOURCES
+    src/game/chat_emoji.cpp
+    src/game/chat_emoji_atlas.cpp
     src/game/voice_chat.cpp
     src/game/player_color.cpp
     src/game/appearance.cpp
@@ -347,6 +364,7 @@ add_mod(dusklight_online
 target_include_directories(dusklight_online PRIVATE
     include
     src
+    vendor/stb
     "${DUSKLIGHT_ONLINE_SDL3_INCLUDE_DIR}"
     "${DUSKLIGHT_ONLINE_GENERATED_INCLUDE_DIR}"
     "${DUSKLIGHT_ONLINE_GENERATED_SOURCE_DIR}"
@@ -575,6 +593,15 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_randomizer_item_names_test PRIVATE include)
     add_test(NAME dusklight_online_randomizer_item_names
              COMMAND dusklight_online_randomizer_item_names_test)
+
+    add_executable(dusklight_online_chat_emoji_test
+        tests/chat_emoji_test.cpp
+        src/game/chat_emoji.cpp
+    )
+    target_compile_features(dusklight_online_chat_emoji_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_chat_emoji_test PRIVATE include)
+    add_test(NAME dusklight_online_chat_emoji
+             COMMAND dusklight_online_chat_emoji_test)
 
     add_executable(dusklight_online_randomizer_check_names_test
         tests/randomizer_check_names_test.cpp

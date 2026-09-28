@@ -1,6 +1,24 @@
 Third-party software notices
 ============================
 
+Chat emoji artwork: Noto Emoji v2.034
+------------------------------------
+Copyright (c) Google LLC and contributors.
+Apache License 2.0; full text in EMOJI_APACHE_LICENSE.txt.
+Source: https://github.com/googlefonts/noto-emoji/tree/v2.034/png/32
+
+Chat emoji aliases: github/gemoji
+--------------------------------
+Copyright (c) 2019 GitHub, Inc.
+MIT license; full text in GEMOJI_LICENSE.txt.
+Source: https://github.com/github/gemoji/blob/master/db/emoji.json
+
+PNG decoder: stb_image
+----------------------
+Copyright (c) 2017 Sean Barrett.
+MIT license; full text in STB_IMAGE_LICENSE.txt.
+Source: https://github.com/nothings/stb/blob/master/stb_image.h
+
 Opus v1.5.2
 -----------
 Copyright (c) Xiph.Org Foundation and contributors.

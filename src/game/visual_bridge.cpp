@@ -1,5 +1,7 @@
 #include "dusklight_online/game/appearance.hpp"
 #include "dusklight_online/game/chat.hpp"
+#include "dusklight_online/game/chat_emoji.hpp"
+#include "dusklight_online/game/chat_emoji_atlas.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
 #include "dusklight_online/logging.hpp"
 
@@ -1217,6 +1219,198 @@ size_t chat_byte_at(const std::string& text, const std::vector<ChatVisualSpan>& 
     return span.end;
 }
 
+struct ChatEmojiUnit {
+    size_t begin = 0;
+    size_t end = 0;
+    float width = 0.0f;
+    float x = 0.0f;
+    size_t emoji = kChatEmojis.size();
+    bool space = false;
+    bool newline = false;
+};
+
+struct ChatEmojiRow {
+    std::vector<ChatEmojiUnit> units;
+    float width = 0.0f;
+    size_t fallbackByte = 0;
+};
+
+struct ChatEmojiLayout {
+    std::vector<ChatEmojiRow> rows;
+};
+
+bool chat_has_emoji(std::string_view text) {
+    for (size_t offset = 0; offset < text.size();) {
+        if (const auto match = match_chat_emoji(text, offset)) return true;
+        offset = next_chat_codepoint(text, offset);
+    }
+    return false;
+}
+
+ChatEmojiLayout layout_chat_emojis(std::string_view text, float wrapWidth) {
+    ChatEmojiLayout layout;
+    layout.rows.push_back(ChatEmojiRow{});
+    const float fontSize = ImGui::GetFontSize();
+    const float emojiWidth = ImGui::GetTextLineHeight() * 0.94f;
+    std::vector<ChatEmojiUnit> units;
+    units.reserve(text.size());
+    for (size_t offset = 0; offset < text.size();) {
+        ChatEmojiUnit unit;
+        unit.begin = offset;
+        if (text[offset] == '\n') {
+            unit.end = ++offset;
+            unit.newline = true;
+        } else if (const auto match = match_chat_emoji(text, offset)) {
+            unit.end = offset + match->bytes;
+            unit.emoji = match->index;
+            unit.width = emojiWidth;
+            offset = unit.end;
+        } else {
+            unit.end = next_chat_codepoint(text, offset);
+            unit.space = text[offset] == ' ';
+            unit.width = ImGui::GetFont()->CalcTextSizeA(
+                fontSize, FLT_MAX, 0.0f,
+                text.data() + offset, text.data() + unit.end).x;
+            offset = unit.end;
+        }
+        units.push_back(unit);
+    }
+
+    const auto append = [&](ChatEmojiUnit unit) {
+        ChatEmojiRow& row = layout.rows.back();
+        unit.x = row.width;
+        row.width += unit.width;
+        row.units.push_back(unit);
+    };
+    const auto nextRow = [&](size_t fallbackByte) {
+        layout.rows.push_back(ChatEmojiRow{});
+        layout.rows.back().fallbackByte = fallbackByte;
+    };
+    std::vector<ChatEmojiUnit> spaces;
+    for (size_t index = 0; index < units.size();) {
+        if (units[index].newline) {
+            spaces.clear();
+            nextRow(units[index++].end);
+            continue;
+        }
+        if (units[index].space) {
+            spaces.push_back(units[index++]);
+            continue;
+        }
+        const size_t wordStart = index;
+        float wordWidth = 0.0f;
+        while (index < units.size() && !units[index].space && !units[index].newline)
+            wordWidth += units[index++].width;
+        float spacesWidth = 0.0f;
+        for (const ChatEmojiUnit& space : spaces) spacesWidth += space.width;
+        if (!layout.rows.back().units.empty() &&
+            layout.rows.back().width + spacesWidth + wordWidth > wrapWidth)
+            nextRow(units[wordStart].begin);
+        else if (!layout.rows.back().units.empty())
+            for (const ChatEmojiUnit& space : spaces) append(space);
+        spaces.clear();
+        for (size_t wordIndex = wordStart; wordIndex < index; ++wordIndex) {
+            if (!layout.rows.back().units.empty() &&
+                layout.rows.back().width + units[wordIndex].width > wrapWidth)
+                nextRow(units[wordIndex].begin);
+            append(units[wordIndex]);
+        }
+    }
+    return layout;
+}
+
+size_t chat_emoji_byte_at(const ChatEmojiLayout& layout, ImVec2 origin, ImVec2 mouse) {
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const size_t rowIndex = static_cast<size_t>(std::clamp(
+        static_cast<int>((mouse.y - origin.y) / lineHeight),
+        0, static_cast<int>(layout.rows.size()) - 1));
+    const ChatEmojiRow& row = layout.rows[rowIndex];
+    if (row.units.empty()) return row.fallbackByte;
+    const float x = mouse.x - origin.x;
+    for (const ChatEmojiUnit& unit : row.units) {
+        if (x < unit.x + unit.width * 0.5f) return unit.begin;
+    }
+    return row.units.back().end;
+}
+
+void draw_chat_emoji_message(const ChatLine& line, size_t index, float alpha,
+                             ImVec2 messagePos, float wrapWidth, float shadowOffset,
+                             ImTextureID emojiTexture) {
+    const ChatEmojiLayout layout = layout_chat_emojis(line.text, wrapWidth);
+    const float lineHeight = ImGui::GetTextLineHeight();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (sChatInputActive) {
+        const ImVec2 bottomRight(messagePos.x + wrapWidth,
+                                 messagePos.y + lineHeight * layout.rows.size());
+        const bool hovered = ImGui::IsWindowHovered(
+            ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+            ImGui::IsMouseHoveringRect(messagePos, bottomRight);
+        if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            sChatSelectionLine = index;
+            sChatSelectionAnchor = chat_emoji_byte_at(
+                layout, messagePos, ImGui::GetIO().MousePos);
+            sChatSelectionCaret = sChatSelectionAnchor;
+            sChatSelecting = true;
+        }
+        if (sChatSelecting && sChatSelectionLine == index) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                sChatSelectionCaret = chat_emoji_byte_at(
+                    layout, messagePos, ImGui::GetIO().MousePos);
+            else
+                sChatSelecting = false;
+        }
+        if (sChatSelectionLine == index && sChatSelectionAnchor != sChatSelectionCaret) {
+            const size_t first = std::min(sChatSelectionAnchor, sChatSelectionCaret);
+            const size_t last = std::max(sChatSelectionAnchor, sChatSelectionCaret);
+            const ImU32 highlight = ImGui::GetColorU32(ImGuiCol_TextSelectedBg);
+            for (size_t row = 0; row < layout.rows.size(); ++row) {
+                for (const ChatEmojiUnit& unit : layout.rows[row].units) {
+                    if (unit.end <= first || unit.begin >= last) continue;
+                    const float y = messagePos.y + lineHeight * row;
+                    draw->AddRectFilled(
+                        ImVec2(messagePos.x + unit.x, y),
+                        ImVec2(messagePos.x + unit.x + unit.width, y + lineHeight),
+                        highlight);
+                }
+            }
+        }
+    }
+
+    const ImU32 shadow = IM_COL32(0, 0, 0, static_cast<int>(210.0f * alpha));
+    const ImU32 foreground = IM_COL32(245, 247, 255, static_cast<int>(255.0f * alpha));
+    for (size_t row = 0; row < layout.rows.size(); ++row) {
+        const float y = messagePos.y + lineHeight * row;
+        const auto& units = layout.rows[row].units;
+        for (size_t unitIndex = 0; unitIndex < units.size();) {
+            const ChatEmojiUnit& first = units[unitIndex];
+            if (first.emoji != kChatEmojis.size()) {
+                const float size = first.width;
+                const float top = y + (lineHeight - size) * 0.5f;
+                draw->AddImage(emojiTexture,
+                    ImVec2(messagePos.x + first.x, top),
+                    ImVec2(messagePos.x + first.x + size, top + size),
+                    chat_emoji_uv_min(first.emoji), chat_emoji_uv_max(first.emoji),
+                    IM_COL32(255, 255, 255, static_cast<int>(255.0f * alpha)));
+                ++unitIndex;
+                continue;
+            }
+            size_t endIndex = unitIndex + 1;
+            while (endIndex < units.size() && units[endIndex].emoji == kChatEmojis.size() &&
+                   units[endIndex].begin == units[endIndex - 1].end) ++endIndex;
+            const char* begin = line.text.data() + first.begin;
+            const char* end = line.text.data() + units[endIndex - 1].end;
+            const ImVec2 pos(messagePos.x + first.x, y);
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                ImVec2(pos.x + shadowOffset, pos.y + shadowOffset), shadow, begin, end);
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), pos,
+                foreground, begin, end);
+            unitIndex = endIndex;
+        }
+    }
+    ImGui::Dummy(ImVec2(wrapWidth, lineHeight * layout.rows.size()));
+}
+
 void draw_chat_line(const ChatLine& line, size_t index, float alpha) {
     const PlayerColor color = line.playerColor;
     const std::string nameLabel = line.playerName + ":";
@@ -1237,6 +1431,13 @@ void draw_chat_line(const ChatLine& line, size_t index, float alpha) {
     ImGui::SameLine();
     const ImVec2 messagePos = ImGui::GetCursorScreenPos();
     const float messageWrapWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    if (chat_has_emoji(line.text)) {
+        if (ImTextureID emojiTexture = chat_emoji_atlas_texture()) {
+            draw_chat_emoji_message(line, index, alpha, messagePos,
+                                    messageWrapWidth, shadowOffset, emojiTexture);
+            return;
+        }
+    }
     if (sChatInputActive) {
         const auto spans = chat_visual_spans(line.text, messageWrapWidth);
         const float lineHeight = ImGui::GetTextLineHeight();
@@ -1307,8 +1508,10 @@ float chat_history_content_height(size_t firstVisible) {
         const float nameWidth = ImGui::CalcTextSize(nameLabel.c_str()).x;
         const float messageWidth = std::max(
             1.0f, contentWidth - nameWidth - ImGui::GetStyle().ItemSpacing.x);
-        const float messageHeight = ImGui::CalcTextSize(
-            line.text.c_str(), nullptr, false, messageWidth).y;
+        const float messageHeight = chat_has_emoji(line.text) &&
+                                    chat_emoji_atlas_texture() != 0 ?
+            layout_chat_emojis(line.text, messageWidth).rows.size() * singleLineHeight :
+            ImGui::CalcTextSize(line.text.c_str(), nullptr, false, messageWidth).y;
         if (index != firstVisible) totalHeight += ImGui::GetStyle().ItemSpacing.y;
         totalHeight += std::max(singleLineHeight, messageHeight);
     }
@@ -1327,11 +1530,16 @@ float measure_chat_input_width(std::string_view text) {
 
 int chat_composer_edit_callback(ImGuiInputTextCallbackData* data) {
     if (data == nullptr || data->EventFlag != ImGuiInputTextFlags_CallbackEdit) return 0;
-    const WrappedChatInput wrapped = reflow_chat_input(
+    WrappedChatInput wrapped = reflow_chat_input(
         std::string_view(data->Buf, static_cast<size_t>(data->BufTextLen)),
         static_cast<size_t>(std::max(0, data->CursorPos)),
         sChatWrappedInput, sChatAutoBreaks,
         sChatWrapWidth, &measure_chat_input_width);
+    const ChatEmojiReplacement replaced = replace_chat_emoji_unicode(
+        wrapped.text, wrapped.cursorByte);
+    if (replaced.changed && replaced.text.size() <= kMaxChatTextBytes)
+        wrapped = wrap_chat_input(replaced.text, replaced.cursorByte,
+                                  sChatWrapWidth, &measure_chat_input_width);
     sChatWrappedInput = wrapped.text;
     sChatAutoBreaks = wrapped.autoBreaks;
     if (wrapped.text.size() == static_cast<size_t>(data->BufTextLen) &&
@@ -1559,6 +1767,10 @@ void draw_imgui_chat() {
                 } else {
                     std::string normalized;
                     if (normalize_chat_text(sChatInput.data(), normalized)) {
+                        const ChatEmojiReplacement replaced = replace_chat_emoji_unicode(
+                            normalized, normalized.size());
+                        if (replaced.changed && replaced.text.size() <= kMaxChatTextBytes)
+                            normalized = replaced.text;
                         sPendingChatSubmission = std::move(normalized);
                     }
                     // Empty input and invalid/control-only input both close
