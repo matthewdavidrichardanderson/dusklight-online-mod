@@ -2379,8 +2379,9 @@ bool Transport::start_cloud_room(const CloudRoomConfig& config,
     if (!channel) return reject("Cloud room channel unavailable");
     if (!valid_room_name(config.room))
         return reject("Lobby name must be 1-64 letters, numbers, spaces, _ or - with no outer spaces");
-    if (config.password.size() < 6 || config.password.size() > 128)
-        return reject("Lobby password must be between 6 and 128 characters");
+    if ((config.password.size() != 0 && config.password.size() < 6) ||
+        config.password.size() > 128)
+        return reject("Lobby password must be blank or between 6 and 128 characters");
     std::string server = config.serverUrl;
     while (server.ends_with('/')) server.pop_back();
     if (!(server.starts_with("https://") || server.starts_with("wss://")))

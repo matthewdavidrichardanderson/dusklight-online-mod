@@ -13,6 +13,7 @@
 #include <mods/service.hpp>
 #include <mods/svc/config.h>
 #include <mods/svc/host.h>
+#include <mods/svc/http.h>
 #include <mods/svc/ui.hpp>
 
 #include <algorithm>
@@ -206,6 +207,18 @@ std::string rml_escape(std::string_view text) {
     return escaped;
 }
 
+bool valid_public_lobby_name(std::string_view name) {
+    if (name.empty() || name.size() > 64 || name.front() == ' ' || name.back() == ' ')
+        return false;
+    for (const char character : name) {
+        if (!((character >= 'A' && character <= 'Z') ||
+              (character >= 'a' && character <= 'z') ||
+              (character >= '0' && character <= '9') || character == ' ' ||
+              character == '_' || character == '-')) return false;
+    }
+    return true;
+}
+
 std::string trim_clipboard_text(std::string text) {
     const size_t first = text.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};
@@ -313,6 +326,82 @@ window content pane.online-lobby-choice-pane {
 }
 window content pane.online-lobby-choice-pane > select-button.group-button {
     align-self: stretch;
+}
+window content pane.online-public-browser-left,
+window content pane.online-public-browser-right {
+    flex-flow: column;
+    align-items: stretch;
+}
+window content pane.online-public-browser-left {
+    overflow: hidden;
+}
+window content pane.online-public-browser-left > select-button.online-form-field {
+    flex: 0 0 57dp;
+}
+.online-public-caption {
+    display: block;
+    margin: 4dp 0dp 10dp;
+    color: rgba(224, 219, 200, 66%);
+    font-size: 16dp;
+}
+window content pane.online-public-browser-left > ui-list.online-public-list {
+    flex: 1 1 0;
+    min-height: 0;
+    margin-left: 0;
+    margin-right: 0;
+    margin-top: 3dp;
+    margin-bottom: 10dp;
+}
+window content pane.online-public-browser-left > ui-list.online-public-list ui-list-viewport {
+    max-height: 112dp;
+}
+window content pane.online-public-browser-left > ui-list.online-public-list ui-list-content {
+    padding: 4dp 2dp;
+}
+ui-list.online-public-list ui-list-content > button.ui-list-row {
+    text-align: left;
+    padding: 12dp 16dp;
+}
+ui-list.online-public-list ui-list-empty {
+    display: none;
+}
+window content pane.online-public-browser-left > button.online-public-join,
+window content pane.online-public-browser-left > button.online-danger-action {
+    flex: 0 0 42dp;
+    height: 42dp;
+}
+window content pane.online-public-browser-left > button.online-primary-action:disabled {
+    display: block;
+}
+button.online-public-refresh {
+    flex: 0 0 42dp;
+    height: 42dp;
+    color: #d4b83f;
+    box-shadow: rgba(194, 164, 45, 48%) 0 0 0 1dp;
+}
+.online-public-card {
+    display: block;
+    padding: 17dp 18dp;
+    margin: 5dp 0dp 12dp;
+    border: 1dp rgba(194, 164, 45, 62%);
+    border-radius: 9dp;
+    background-color: rgba(194, 164, 45, 9%);
+}
+.online-public-card-title {
+    display: block;
+    color: #e0dbc8;
+    font-size: 24dp;
+    font-family: "Fira Sans Condensed";
+    font-weight: bold;
+}
+.online-public-card-detail {
+    display: block;
+    margin-top: 6dp;
+    color: rgba(224, 219, 200, 74%);
+    font-size: 17dp;
+}
+window content pane.online-public-browser-left > button.online-public-join.online-public-connected-hidden {
+    display: none;
 }
 .online-state {
     display: block;
@@ -1079,6 +1168,14 @@ void OnlineApp::shutdown() {
         svc_ui->window_close(mod_ctx, lobbyWindow_);
         lobbyWindow_ = 0;
     }
+    if (publicBrowserWindow_ != 0) {
+        svc_ui->window_close(mod_ctx, publicBrowserWindow_);
+        publicBrowserWindow_ = 0;
+    }
+    if (publicLobbyRequest_ != 0 && svc_http != nullptr) {
+        const HttpRequestHandle request = std::exchange(publicLobbyRequest_, 0);
+        svc_http->cancel(mod_ctx, request);
+    }
     if (window_ != 0) {
         svc_ui->window_close(mod_ctx, window_);
         window_ = 0;
@@ -1464,6 +1561,147 @@ void OnlineApp::open_lobby_window(ConnectionRole role) {
     svc_ui->window_push(mod_ctx, &desc, &lobbyWindow_);
 }
 
+void OnlineApp::open_public_browser() {
+    if (publicBrowserWindow_ != 0) return;
+    publicLobbies_.clear();
+    selectedPublicLobby_.clear();
+    publicLobbyError_.clear();
+    static UiTabDesc tab;
+    tab = UI_TAB_DESC_INIT;
+    tab.title = "Browse public lobbies";
+    tab.build = &OnlineApp::build_public_browser_tab;
+    tab.update = &OnlineApp::update_public_browser_window;
+    tab.user_data = this;
+    UiWindowDesc desc = UI_WINDOW_DESC_INIT;
+    desc.tabs = &tab;
+    desc.tab_count = 1;
+    desc.rcss = kOnlineWindowRcss;
+    desc.on_closed = &OnlineApp::public_browser_window_closed;
+    desc.user_data = this;
+    if (svc_ui->window_push(mod_ctx, &desc, &publicBrowserWindow_) == MOD_OK &&
+        publicBrowserWindow_ != 0) refresh_public_lobbies();
+}
+
+void OnlineApp::refresh_public_lobbies() {
+    if (publicBrowserWindow_ == 0 || publicLobbyRequest_ != 0) return;
+    publicLobbyError_.clear();
+    if (svc_http == nullptr) {
+        publicLobbyError_ = "Lobby browsing is unavailable in this Dusklight build.";
+        return;
+    }
+    HttpRequestDesc request = HTTP_REQUEST_DESC_INIT;
+    const std::string url = std::string(kCloudRoomServiceUrl) + "/public-lobbies";
+    request.method = HTTP_METHOD_GET;
+    request.url = url.c_str();
+    request.connect_timeout_ms = 5000;
+    request.idle_timeout_ms = 5000;
+    request.total_timeout_ms = 10000;
+    request.max_body_bytes = 256 * 1024;
+    HttpRequestHandle handle = 0;
+    if (svc_http->request(mod_ctx, &request, &OnlineApp::public_lobbies_complete,
+                          this, &handle) != MOD_OK || handle == 0) {
+        publicLobbyError_ = "Could not start the lobby search. Try Refresh.";
+        return;
+    }
+    publicLobbyRequest_ = handle;
+    publicLobbyLoading_ = true;
+}
+
+void OnlineApp::set_public_lobby_list_items() {
+    if (publicLobbyList_ == 0) return;
+    std::vector<std::string> labels;
+    labels.reserve(publicLobbies_.size());
+    for (const auto& lobby : publicLobbies_) {
+        labels.push_back(lobby.name + "   ·   " + std::to_string(lobby.players) + "/" +
+                         std::to_string(lobby.maxPlayers));
+    }
+    std::vector<UiListItem> items;
+    items.reserve(labels.size());
+    for (size_t index = 0; index < labels.size(); ++index) {
+        UiListItem item = UI_LIST_ITEM_INIT;
+        item.key = index + 1;
+        item.label = labels[index].c_str();
+        items.push_back(item);
+    }
+    if (svc_ui->list_set_items(mod_ctx, publicLobbyList_, items.data(), items.size()) != MOD_OK)
+        publicLobbyList_ = 0;
+}
+
+std::string OnlineApp::public_list_status_rml() const {
+    std::string message;
+    if (publicLobbyLoading_) message = "Finding public lobbies...";
+    else if (!publicLobbyError_.empty()) message = publicLobbyError_;
+    else if (publicLobbies_.empty()) message = "No public lobbies are open right now.";
+    else message = std::to_string(publicLobbies_.size()) +
+        (publicLobbies_.size() == 1 ? " lobby available" : " lobbies available");
+    return "<span class=\"online-public-caption\">" + rml_escape(message) + "</span>";
+}
+
+std::string OnlineApp::public_lobby_details_rml() const {
+    const auto selected = std::find_if(publicLobbies_.begin(), publicLobbies_.end(),
+        [this](const PublicLobby& lobby) { return lobby.name == selectedPublicLobby_; });
+    if (selected == publicLobbies_.end()) {
+        return "<div class=\"online-public-card\">"
+               "<span class=\"online-public-card-title\">Choose a lobby</span>"
+               "<span class=\"online-public-card-detail\">Select an open lobby on the left, "
+               "then use Join selected lobby.</span></div>";
+    }
+    const bool full = selected->players >= selected->maxPlayers;
+    return "<div class=\"online-public-card\">"
+           "<span class=\"online-public-card-title\">" + rml_escape(selected->name) +
+           "</span><span class=\"online-public-card-detail\">" +
+           std::to_string(selected->players) + " of " + std::to_string(selected->maxPlayers) +
+           " players · " + (full ? "Lobby full" : "Open to join · no password") +
+           "</span></div>";
+}
+
+void OnlineApp::public_lobbies_complete(ModContext*, HttpRequestHandle request,
+                                         const HttpResult* result, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (request != app.publicLobbyRequest_) return;
+    app.publicLobbyRequest_ = 0;
+    app.publicLobbyLoading_ = false;
+    const auto fail = [&app](const char* message) {
+        app.publicLobbies_.clear();
+        app.selectedPublicLobby_.clear();
+        app.publicLobbyError_ = message;
+        app.set_public_lobby_list_items();
+    };
+    if (result == nullptr || result->error != HTTP_ERROR_NONE || result->status_code != 200 ||
+        result->body == nullptr) {
+        fail("Could not refresh public lobbies. Try again.");
+        return;
+    }
+    const std::string body(static_cast<const char*>(result->body), result->body_size);
+    const auto response = nlohmann::json::parse(body, nullptr, false);
+    if (!response.is_object() || !response.contains("rooms") ||
+        !response["rooms"].is_array() || response["rooms"].size() > 512) {
+        fail("The lobby list response was invalid. Try again.");
+        return;
+    }
+    std::vector<PublicLobby> rooms;
+    for (const auto& entry : response["rooms"]) {
+        if (!entry.is_object() || !entry.contains("name") || !entry["name"].is_string() ||
+            !entry.contains("players") || !entry["players"].is_number_integer() ||
+            !entry.contains("max_players") || !entry["max_players"].is_number_integer() ||
+            entry["players"] < 1 || entry["players"] > 8 ||
+            entry["max_players"] < 1 || entry["max_players"] > 8 ||
+            entry["players"] > entry["max_players"]) continue;
+        PublicLobby room;
+        room.name = entry["name"].get<std::string>();
+        room.players = entry["players"].get<int>();
+        room.maxPlayers = entry["max_players"].get<int>();
+        if (!valid_public_lobby_name(room.name)) continue;
+        rooms.push_back(std::move(room));
+    }
+    app.publicLobbies_ = std::move(rooms);
+    if (std::none_of(app.publicLobbies_.begin(), app.publicLobbies_.end(),
+        [&app](const PublicLobby& room) { return room.name == app.selectedPublicLobby_; }))
+        app.selectedPublicLobby_.clear();
+    app.publicLobbyError_.clear();
+    app.set_public_lobby_list_items();
+}
+
 void OnlineApp::refresh_manual_peer_choices() {
     const std::string selectedId = selectedManualPeer_ >= 0 &&
         selectedManualPeer_ < static_cast<int64_t>(manualPeerIds_.size()) ?
@@ -1748,27 +1986,37 @@ void OnlineApp::host_relay() {
     }
 }
 
+void OnlineApp::join_cloud_room(const std::string& room, const std::string& password) {
+    relayHostIntent_ = false;
+    net::CloudRoomConfig cloud;
+    cloud.name = string_value(config_.playerName);
+    cloud.room = room;
+    cloud.password = password;
+    cloud.serverUrl = kCloudRoomServiceUrl;
+    cloud.createRoom = false;
+    cloud.settings = configured_settings();
+    cloud.wantPuppet = bool_value(config_.dummyModel, true);
+    std::string error;
+    if (!transport_.start_cloud_room(cloud, net::make_sdk_room_channel(), &error)) {
+        statusMessage_ = "Cloud room join failed: " + error;
+        game::push_online_notification(
+            failure_message("Could not join the NAT lobby", error), 5.0f, true);
+    } else {
+        begin_lobby_attempt("Could not join the NAT lobby");
+        activeCode_.clear();
+        statusMessage_ = "Joining NAT lobby via Cloudflare room service";
+    }
+}
+
+void OnlineApp::join_public_lobby() {
+    if (public_join_unavailable(nullptr, this)) return;
+    join_cloud_room(selectedPublicLobby_, "");
+}
+
 void OnlineApp::join_relay() {
     relayHostIntent_ = false;
     if (!bool_value(config_.relayManualHost)) {
-        net::CloudRoomConfig cloud;
-        cloud.name = string_value(config_.playerName);
-        cloud.room = string_value(config_.relayRoom);
-        cloud.password = string_value(config_.relayPassword);
-        cloud.serverUrl = kCloudRoomServiceUrl;
-        cloud.createRoom = false;
-        cloud.settings = configured_settings();
-        cloud.wantPuppet = bool_value(config_.dummyModel, true);
-        std::string error;
-        if (!transport_.start_cloud_room(cloud, net::make_sdk_room_channel(), &error)) {
-            statusMessage_ = "Cloud room join failed: " + error;
-            game::push_online_notification(
-                failure_message("Could not join the NAT lobby", error), 5.0f, true);
-        } else {
-            begin_lobby_attempt("Could not join the NAT lobby");
-            activeCode_.clear();
-            statusMessage_ = "Joining NAT lobby via Cloudflare room service";
-        }
+        join_cloud_room(string_value(config_.relayRoom), string_value(config_.relayPassword));
         return;
     }
     const std::string code = string_value(config_.relayCode);
@@ -2159,8 +2407,61 @@ ModResult OnlineApp::build_lobby_tab(ModContext*, UiWindowHandle, UiElementHandl
     relay.user_data = &app;
     svc_ui->pane_add_group(mod_ctx, left, right, &relay, nullptr);
 
+    if (app.connectionRole_ == ConnectionRole::Join) {
+        add_button(left, "Browse Public Lobbies", &OnlineApp::browse_public_pressed, &app);
+    }
+
     svc_ui->pane_add_section(mod_ctx, right, "Connection settings");
     svc_ui->pane_add_text(mod_ctx, right, "Select Direct or NAT/Relay to configure it.", nullptr);
+    return MOD_OK;
+}
+
+ModResult OnlineApp::build_public_browser_tab(ModContext*, UiWindowHandle,
+                                               UiElementHandle left, UiElementHandle right,
+                                               void* data, ModError*) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.publicLobbyList_ = 0;
+    app.publicListStatus_ = 0;
+    app.publicLobbyDetails_ = 0;
+    app.publicJoinButton_ = 0;
+    app.renderedPublicListStatus_.clear();
+    app.renderedPublicLobbyDetails_.clear();
+
+    svc_ui->elem_set_class(mod_ctx, left, "online-public-browser-left", true);
+    svc_ui->pane_add_section(mod_ctx, left, "Your identity");
+    add_form_string(left, "Player name", app.config_.playerName, 32);
+    svc_ui->pane_add_section(mod_ctx, left, "Public lobbies");
+    const std::string listStatus = app.public_list_status_rml();
+    svc_ui->pane_add_rml(mod_ctx, left, listStatus.c_str(), &app.publicListStatus_);
+    app.renderedPublicListStatus_ = listStatus;
+    UiListDesc list = UI_LIST_DESC_INIT;
+    list.on_pressed = &OnlineApp::public_lobby_selected;
+    list.is_selected = &OnlineApp::public_lobby_is_selected;
+    list.user_data = &app;
+    if (svc_ui->pane_add_list(mod_ctx, left, &list, &app.publicLobbyList_) == MOD_OK &&
+        app.publicLobbyList_ != 0) {
+        svc_ui->elem_set_class(mod_ctx, app.publicLobbyList_, "online-public-list", true);
+        app.set_public_lobby_list_items();
+    }
+    app.publicJoinButton_ = add_button(left, "Join selected lobby", &OnlineApp::join_public_pressed,
+        &app, &OnlineApp::public_join_unavailable, nullptr, "online-primary-action");
+    if (app.publicJoinButton_ != 0) {
+        svc_ui->elem_set_class(mod_ctx, app.publicJoinButton_, "online-public-join", true);
+        svc_ui->elem_set_class(mod_ctx, app.publicJoinButton_,
+            "online-public-connected-hidden", app.transport_.status().enabled);
+    }
+    add_button(left, "Stop hosting", &OnlineApp::stop_hosting_pressed, &app,
+               &OnlineApp::host_inactive, nullptr, "online-danger-action");
+    add_button(left, "Disconnect", &OnlineApp::disconnect_pressed, &app,
+               &OnlineApp::joiner_inactive, nullptr, "online-danger-action");
+    add_button(left, "Refresh list", &OnlineApp::refresh_public_pressed, &app,
+               nullptr, nullptr, "online-public-refresh");
+
+    svc_ui->elem_set_class(mod_ctx, right, "online-public-browser-right", true);
+    svc_ui->pane_add_section(mod_ctx, right, "Lobby details");
+    const std::string details = app.public_lobby_details_rml();
+    svc_ui->pane_add_rml(mod_ctx, right, details.c_str(), &app.publicLobbyDetails_);
+    app.renderedPublicLobbyDetails_ = details;
     return MOD_OK;
 }
 
@@ -2209,8 +2510,13 @@ ModResult OnlineApp::build_host_relay_settings(ModContext*, UiElementHandle pane
                     "<p>The name other players will see for you.</p>");
     add_form_string(pane, "Lobby name", app.config_.relayRoom, 64, "online-half-field",
                     "<p>The lobby name guests must enter to find your session.</p>");
-    add_form_string(pane, "Password", app.config_.relayPassword, 128, "online-half-field",
-                    "<p>Required: 6-128 characters. Guests enter the same password.</p>");
+    const bool manual = app.bool_value(app.config_.relayManualHost);
+    app.relayPasswordManualLabel_ = manual;
+    app.relayPasswordControl_ = add_form_string(
+        pane, manual ? "Password" : "Password (leave blank for public lobby)",
+        app.config_.relayPassword, 128, "online-half-field",
+        "<p>With Manual host off, leave this blank to list the lobby publicly. "
+        "A private or manually hosted lobby needs a 6-128 character password.</p>");
     add_bound_control(pane, UI_CONTROL_TOGGLE, "Manual host",
                       app.config_.relayManualHost, 0, 0, 1, 0, nullptr, nullptr,
                       "online-wide-control", nullptr,
@@ -2227,7 +2533,6 @@ ModResult OnlineApp::build_host_relay_settings(ModContext*, UiElementHandle pane
         pane, "Copy", &OnlineApp::copy_relay_code_pressed, &app, nullptr, nullptr,
         "online-copy-action", nullptr,
         "<p>Copy the manual relay code to the clipboard.</p>");
-    const bool manual = app.bool_value(app.config_.relayManualHost);
     for (auto handle : app.manualHostControls_)
         if (handle) svc_ui->elem_set_class(mod_ctx, handle, "online-manual-only-hidden", !manual);
     return MOD_OK;
@@ -2272,7 +2577,8 @@ ModResult OnlineApp::build_join_relay_settings(ModContext*, UiElementHandle pane
     add_form_string(pane, "Lobby name", app.config_.relayRoom, 64, "online-half-field",
                     "<p>The exact lobby name supplied by the host.</p>");
     add_form_string(pane, "Password", app.config_.relayPassword, 128, "online-half-field",
-                    "<p>The 6-128 character password supplied by the host.</p>");
+                    "<p>Leave blank for a public Cloudflare lobby. Private and manually hosted "
+                    "lobbies need the password supplied by the host.</p>");
     add_bound_control(pane, UI_CONTROL_TOGGLE, "Manual host",
                       app.config_.relayManualHost, 0, 0, 1, 0, nullptr, nullptr,
                       "online-wide-control", nullptr,
@@ -2794,9 +3100,35 @@ ModResult OnlineApp::update_window(ModContext*, void* data, ModError*) {
 ModResult OnlineApp::update_lobby_window(ModContext*, void* data, ModError*) {
     auto& app = *static_cast<OnlineApp*>(data);
     const bool manual = app.bool_value(app.config_.relayManualHost);
+    if (app.relayPasswordControl_ != 0 && manual != app.relayPasswordManualLabel_) {
+        if (svc_ui->control_set_label(mod_ctx, app.relayPasswordControl_,
+                manual ? "Password" : "Password (leave blank for public lobby)") == MOD_OK)
+            app.relayPasswordManualLabel_ = manual;
+        else app.relayPasswordControl_ = 0;
+    }
     for (auto& handle : app.manualHostControls_) {
         if (handle && svc_ui->elem_set_class(mod_ctx, handle,
             "online-manual-only-hidden", !manual) != MOD_OK) handle = 0;
+    }
+    return MOD_OK;
+}
+
+ModResult OnlineApp::update_public_browser_window(ModContext*, void* data, ModError*) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (app.publicJoinButton_ != 0 && svc_ui->elem_set_class(mod_ctx, app.publicJoinButton_,
+        "online-public-connected-hidden", app.transport_.status().enabled) != MOD_OK)
+        app.publicJoinButton_ = 0;
+    const std::string listStatus = app.public_list_status_rml();
+    if (app.publicListStatus_ != 0 && listStatus != app.renderedPublicListStatus_) {
+        if (svc_ui->elem_set_rml(mod_ctx, app.publicListStatus_, listStatus.c_str()) != MOD_OK)
+            app.publicListStatus_ = 0;
+        app.renderedPublicListStatus_ = listStatus;
+    }
+    const std::string details = app.public_lobby_details_rml();
+    if (app.publicLobbyDetails_ != 0 && details != app.renderedPublicLobbyDetails_) {
+        if (svc_ui->elem_set_rml(mod_ctx, app.publicLobbyDetails_, details.c_str()) != MOD_OK)
+            app.publicLobbyDetails_ = 0;
+        app.renderedPublicLobbyDetails_ = details;
     }
     return MOD_OK;
 }
@@ -2829,6 +3161,21 @@ void OnlineApp::lobby_window_closed(ModContext*, UiWindowHandle, void* data) {
     auto& app = *static_cast<OnlineApp*>(data);
     app.lobbyWindow_ = 0;
     app.manualHostControls_ = {};
+    app.relayPasswordControl_ = 0;
+}
+
+void OnlineApp::public_browser_window_closed(ModContext*, UiWindowHandle, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    app.publicBrowserWindow_ = 0;
+    app.publicLobbyList_ = 0;
+    app.publicListStatus_ = 0;
+    app.publicLobbyDetails_ = 0;
+    app.publicJoinButton_ = 0;
+    app.publicLobbyLoading_ = false;
+    if (app.publicLobbyRequest_ != 0 && svc_http != nullptr) {
+        const HttpRequestHandle request = std::exchange(app.publicLobbyRequest_, 0);
+        svc_http->cancel(mod_ctx, request);
+    }
 }
 
 bool OnlineApp::player_colour_locked(ModContext*, void* data) {
@@ -2868,6 +3215,32 @@ void OnlineApp::host_lobby_pressed(ModContext*, void* data) {
 }
 void OnlineApp::join_lobby_pressed(ModContext*, void* data) {
     static_cast<OnlineApp*>(data)->open_lobby_window(ConnectionRole::Join);
+}
+void OnlineApp::browse_public_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->open_public_browser();
+}
+void OnlineApp::refresh_public_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->refresh_public_lobbies();
+}
+void OnlineApp::join_public_pressed(ModContext*, void* data) {
+    static_cast<OnlineApp*>(data)->join_public_lobby();
+}
+void OnlineApp::public_lobby_selected(ModContext*, UiListHandle, uint64_t key, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (key == 0 || key > app.publicLobbies_.size()) return;
+    app.selectedPublicLobby_ = app.publicLobbies_[key - 1].name;
+}
+bool OnlineApp::public_lobby_is_selected(ModContext*, UiListHandle, uint64_t key, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    return key != 0 && key <= app.publicLobbies_.size() &&
+        app.publicLobbies_[key - 1].name == app.selectedPublicLobby_;
+}
+bool OnlineApp::public_join_unavailable(ModContext*, void* data) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    if (app.transport_.status().enabled || app.publicLobbyLoading_) return true;
+    const auto selected = std::find_if(app.publicLobbies_.begin(), app.publicLobbies_.end(),
+        [&app](const PublicLobby& room) { return room.name == app.selectedPublicLobby_; });
+    return selected == app.publicLobbies_.end() || selected->players >= selected->maxPlayers;
 }
 void OnlineApp::menu_selected(ModContext*, void* data) { static_cast<OnlineApp*>(data)->open_window(); }
 void OnlineApp::disconnect_pressed(ModContext*, void* data) { static_cast<OnlineApp*>(data)->disconnect(); }

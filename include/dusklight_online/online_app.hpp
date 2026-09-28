@@ -16,6 +16,7 @@
 
 #include <mods/api.h>
 #include <mods/svc/config.h>
+#include <mods/svc/http.h>
 #include <mods/svc/ui.h>
 
 namespace dusklight_online {
@@ -91,6 +92,25 @@ private:
     std::string renderedVoiceMuteHotkeyText_;
     UiWindowHandle syncWindow_ = 0;
     UiWindowHandle lobbyWindow_ = 0;
+    UiWindowHandle publicBrowserWindow_ = 0;
+    UiListHandle publicLobbyList_ = 0;
+    UiElementHandle publicListStatus_ = 0;
+    UiElementHandle publicLobbyDetails_ = 0;
+    UiElementHandle publicJoinButton_ = 0;
+    UiElementHandle relayPasswordControl_ = 0;
+    bool relayPasswordManualLabel_ = false;
+    HttpRequestHandle publicLobbyRequest_ = 0;
+    bool publicLobbyLoading_ = false;
+    std::string publicLobbyError_;
+    std::string selectedPublicLobby_;
+    std::string renderedPublicListStatus_;
+    std::string renderedPublicLobbyDetails_;
+    struct PublicLobby {
+        std::string name;
+        int players = 0;
+        int maxPlayers = 8;
+    };
+    std::vector<PublicLobby> publicLobbies_;
     UiMenuTabHandle menuTab_ = 0;
     UiStyleHandle overlayStyle_ = 0;
     UiStyleHandle hideActiveModsStyle_ = 0;
@@ -198,6 +218,13 @@ private:
     void open_voice_window();
     void open_sync_window();
     void open_lobby_window(ConnectionRole role);
+    void open_public_browser();
+    void refresh_public_lobbies();
+    void set_public_lobby_list_items();
+    std::string public_list_status_rml() const;
+    std::string public_lobby_details_rml() const;
+    void join_cloud_room(const std::string& room, const std::string& password);
+    void join_public_lobby();
     void host_direct();
     void join_direct();
     void host_relay();
@@ -244,7 +271,10 @@ public:
                                     UiElementHandle, void*, ModError*);
     static ModResult build_lobby_tab(ModContext*, UiWindowHandle, UiElementHandle,
                                      UiElementHandle, void*, ModError*);
+    static ModResult build_public_browser_tab(ModContext*, UiWindowHandle, UiElementHandle,
+                                              UiElementHandle, void*, ModError*);
     static ModResult update_lobby_window(ModContext*, void*, ModError*);
+    static ModResult update_public_browser_window(ModContext*, void*, ModError*);
     static ModResult build_host_direct_settings(ModContext*, UiElementHandle, void*, ModError*);
     static ModResult build_host_relay_settings(ModContext*, UiElementHandle, void*, ModError*);
     static ModResult build_join_direct_settings(ModContext*, UiElementHandle, void*, ModError*);
@@ -254,6 +284,7 @@ public:
     static void settings_window_closed(ModContext*, UiWindowHandle, void*);
     static void sync_window_closed(ModContext*, UiWindowHandle, void*);
     static void lobby_window_closed(ModContext*, UiWindowHandle, void*);
+    static void public_browser_window_closed(ModContext*, UiWindowHandle, void*);
     static void reset_player_options(ModContext*, void*);
     static bool player_colour_locked(ModContext*, void*);
     static bool voice_proximity_range_locked(ModContext*, void*);
@@ -264,6 +295,13 @@ public:
     static void sync_menu_pressed(ModContext*, void*);
     static void host_lobby_pressed(ModContext*, void*);
     static void join_lobby_pressed(ModContext*, void*);
+    static void browse_public_pressed(ModContext*, void*);
+    static void refresh_public_pressed(ModContext*, void*);
+    static void join_public_pressed(ModContext*, void*);
+    static void public_lobby_selected(ModContext*, UiListHandle, uint64_t, void*);
+    static bool public_lobby_is_selected(ModContext*, UiListHandle, uint64_t, void*);
+    static bool public_join_unavailable(ModContext*, void*);
+    static void public_lobbies_complete(ModContext*, HttpRequestHandle, const HttpResult*, void*);
     static void menu_selected(ModContext*, void*);
     static void disconnect_pressed(ModContext*, void*);
     static void stop_hosting_pressed(ModContext*, void*);
