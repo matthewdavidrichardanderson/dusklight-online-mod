@@ -919,6 +919,16 @@ bool is_eldin_gorge_bridge_completion(int stage, int flag, int actor, int room,
            params == 0xFFFFFFFF;
 }
 
+bool is_sacred_grove_block_switch(std::string_view stageName, int stage, int room,
+                                  int flag, int actor, uint32_t params, int angleX,
+                                  bool set) {
+    // This one-shot area trigger sets the block's saved path switch before
+    // the block reaches its lower point. The block's later write is a no-op.
+    return set && stageName == "F_SP117" && stage == dStage_SaveTbl_GROVE &&
+           room == 1 && flag == 4 && actor == fpcNm_SWC00_e &&
+           params == 0xFF00FF04 && angleX == 0x0FFF;
+}
+
 int twilight_completion_level_for_stage(std::string_view stage, int room) {
     if (stage == "F_SP108" || stage == "R_SP108" || stage == "D_SB10" ||
         stage == "F_SP105") return 0;
@@ -1738,13 +1748,16 @@ void memory_switch_on_post(ModContext*, void* args, void*, void*) {
         const bool caveMap = is_cave_map_reveal(actor == fpcNm_SWC00_e,
             stageName != nullptr ? stageName : "", stage, room, flag, params,
             angleX, wasSet, bits->isSwitch(flag));
+        const bool sacredBlock = is_sacred_grove_block_switch(
+            stageName != nullptr ? stageName : "", stage, room, flag, actor,
+            params, angleX, bits->isSwitch(flag));
         if (is_group2_lifecycle_actor(actor) &&
             !is_sewers_progression_switch(stage, flag) &&
             !is_eldin_gorge_bridge_completion(stage, flag, actor, room, params) &&
-            !caveMap) return;
+            !caveMap && !sacredBlock) return;
         message.update({{"source_actor", actor}, {"source_room", room},
                         {"source_params", params}});
-        if (caveMap) {
+        if (caveMap || sacredBlock) {
             message.update({{"source_stage", stageName}, {"source_angle_x", angleX}});
         }
     }
@@ -5113,7 +5126,11 @@ ApplyResult GameAdapter::apply_switch_bit(const nlohmann::json& message,
         const bool caveMap = is_cave_map_reveal(sourceActor == fpcNm_SWC00_e,
             message.value("source_stage", std::string()), stage, sourceRoom, flag,
             sourceParams, message.value("source_angle_x", -1), false, set);
-        if (!bridgeCompletion && !is_sewers_progression_switch(stage, flag) && !caveMap)
+        const bool sacredBlock = is_sacred_grove_block_switch(
+            message.value("source_stage", std::string()), stage, sourceRoom, flag,
+            sourceActor, sourceParams, message.value("source_angle_x", -1), set);
+        if (!bridgeCompletion && !is_sewers_progression_switch(stage, flag) &&
+            !caveMap && !sacredBlock)
             return ApplyResult::IgnoredByPolicy;
     }
 
