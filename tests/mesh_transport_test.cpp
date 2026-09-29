@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <deque>
 #include <iostream>
+#include <string_view>
 #include <thread>
 #if defined(_WIN32)
 #define NOMINMAX
@@ -38,6 +39,7 @@ uint16_t port() {
 }
 struct Network {
     static constexpr size_t count = 8;
+    static constexpr std::string_view inviteSecret = "manual-relay-test-endpoint-key-2026";
     std::array<UdpConnection, count> clients;
     UdpConnection relay;
     std::array<UdpConnection::Id, count> relayClients{}, clientRelay{};
@@ -90,9 +92,9 @@ struct Network {
     }
     Network() {
         const uint16_t p = port();
-        require(relay.open("127.0.0.1", p, 16, true, true), "relay open");
+        require(relay.open("127.0.0.1", p, 16, true, true, inviteSecret), "relay open");
         for (size_t i = 0; i < count; ++i) {
-            require(clients[i].open("0.0.0.0", 0, 1, false), "client open");
+            require(clients[i].open("0.0.0.0", 0, 1, false, false, inviteSecret), "client open");
             clientRelay[i] = clients[i].connect("127.0.0.1", p);
             const auto end = Clock::now() + std::chrono::seconds(4);
             UdpConnection::Id accepted = UdpConnection::invalid;

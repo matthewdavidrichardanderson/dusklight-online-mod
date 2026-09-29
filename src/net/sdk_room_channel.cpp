@@ -51,7 +51,8 @@ public:
                 connected_ = false;
                 event = {EventKind::Closed, incoming.closeReason.empty() ?
                     std::string(incoming.message.empty() ? "room connection closed" : incoming.message) :
-                    std::string(incoming.closeReason)};
+                    std::string(incoming.closeReason), incoming.closeCode,
+                    static_cast<int>(incoming.error)};
                 return true;
             default: break;
             }

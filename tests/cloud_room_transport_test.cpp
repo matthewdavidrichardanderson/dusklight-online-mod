@@ -1,4 +1,5 @@
 #include "dusklight_online/net/transport.hpp"
+#include "dusklight_online/net/auth_code.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -6,6 +7,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -24,9 +26,12 @@ struct Broker {
     bool voiceSettingsOnRoomChannel = false;
     int roomSettingsMessages = 0;
     bool forwardIce = true;
+    int kickRequests = 0;
     std::string dropJoinNotificationTo;
     RoomSettings roomSettings;
     std::string owner;
+    std::optional<auth::Digest> proofKey;
+    const std::string authSalt = "00112233445566778899aabbccddeeff";
     void accept(Channel& channel, const json& message);
     void leave(Channel& channel);
 };
@@ -38,6 +43,8 @@ public:
     bool open(std::string_view, std::string&) override {
         active = true;
         events.push_back({EventKind::Open, {}});
+        nonce = auth::random_nonce();
+        push({{"type", "auth_challenge"}, {"nonce", nonce}, {"salt", broker.authSalt}});
         return true;
     }
     bool send(std::string_view text) override {
@@ -61,6 +68,7 @@ public:
     Broker& broker;
     std::string id;
     std::string name;
+    std::string nonce;
     std::deque<Event> events;
     bool active = false;
 };
@@ -71,7 +79,16 @@ void Broker::accept(Channel& channel, const json& message) {
         if (message.value("settings", json::object()).contains("voice_proximity") ||
             message.value("settings", json::object()).contains("voice_proximity_range"))
             voiceSettingsOnRoomChannel = true;
-        if (message.value("protocol_version", 0) != 3) throw std::runtime_error("wrong cloud protocol");
+        if (message.value("protocol_version", 0) != 5 || message.contains("password"))
+            throw std::runtime_error("wrong cloud protocol");
+        if (!proofKey) {
+            const auto verifier = auth::unhex_digest(message.value("code_verifier", ""));
+            if (!verifier) throw std::runtime_error("missing code verifier");
+            proofKey = auth::room_proof_key(*verifier, authSalt);
+        }
+        if (!proofKey || !auth::equal(message.value("code_proof", ""),
+            auth::room_proof(*proofKey, channel.nonce)))
+            throw std::runtime_error("invalid lobby proof");
         channel.id = "client_" + std::to_string(nextId++);
         channel.name = message.value("name", "Player");
         if (owner.empty()) owner = channel.id;
@@ -79,7 +96,9 @@ void Broker::accept(Channel& channel, const json& message) {
         for (const auto& [id, other] : members)
             peers.push_back({{"client_id", id}, {"name", other->name}, {"want_puppet", true}});
         members[channel.id] = &channel;
-        channel.push({{"type", "welcome"}, {"client_id", channel.id},
+        channel.push({{"type", "welcome"}, {"protocol_version", 5},
+            {"mesh_key", "fe28b9c93a34c10c697a962e10c70bd32a491f83a6c42d85ef317789663340bf"},
+            {"client_id", channel.id},
             {"owner_client_id", owner}, {"peers", peers},
             {"settings", {{"dummy_model", true}, {"sync_flags", true},
                           {"sync_world", false}, {"remote_collision", true}, {"pvp", false}}},
@@ -96,7 +115,14 @@ void Broker::accept(Channel& channel, const json& message) {
         if (it != members.end()) it->second->push({{"type", "ice_signal"},
             {"client_id", channel.id}, {"kind", message.at("kind")},
             {"data", message.at("data")}, {"generation", message.at("generation")}});
-    } else if (type == "room_settings" || type == "settings_ready" || type == "kick") {
+    } else if (type == "kick") {
+        ++kickRequests;
+        auto it = members.find(message.value("target_client_id", ""));
+        if (it != members.end() && it->second != &channel) {
+            it->second->push({{"type", "kicked"}, {"reason", "removed_by_host"}});
+            it->second->close();
+        }
+    } else if (type == "room_settings" || type == "settings_ready") {
         if (type == "room_settings") ++roomSettingsMessages;
         if (type == "room_settings" &&
             (message.value("settings", json::object()).contains("voice_proximity") ||
@@ -136,7 +162,7 @@ int main() {
     CloudRoomConfig configuration;
     configuration.name = "Host";
     configuration.room = "Test Lobby";
-    configuration.password = "secret-password";
+    configuration.lobbyCode = "secret-code";
     configuration.serverUrl = "https://rooms.example.test";
     configuration.stunHost.clear(); // host candidates suffice on one machine
     configuration.stunPort = 0;
@@ -446,6 +472,80 @@ int main() {
         if (!std::all_of(rejoinReceived.begin(), rejoinReceived.end(), [](bool received) { return received; }))
             fail("returning cloud player's gameplay was not delivered to all existing peers");
         for (auto& player : players) player->disconnect();
+    }
+
+    // A stalled late joiner must be removed without disconnecting players who
+    // already have a healthy direct link to each other.
+    {
+        Broker admissionBroker;
+        Transport establishedHost;
+        Transport establishedGuest;
+        Transport stalledJoiner;
+        configuration.createRoom = true;
+        configuration.name = "Established Host";
+        if (!establishedHost.start_cloud_room(configuration,
+                                             std::make_unique<Channel>(admissionBroker), &error))
+            fail(error.c_str());
+        configuration.createRoom = false;
+        configuration.name = "Established Guest";
+        if (!establishedGuest.start_cloud_room(configuration,
+                                              std::make_unique<Channel>(admissionBroker), &error))
+            fail(error.c_str());
+        const auto stableDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+        while (std::chrono::steady_clock::now() < stableDeadline &&
+               (establishedHost.status().natPeerCount != 1 ||
+                establishedGuest.status().natPeerCount != 1)) {
+            establishedHost.tick(); establishedGuest.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (establishedHost.status().natPeerCount != 1 ||
+            establishedGuest.status().natPeerCount != 1)
+            fail("established cloud players did not connect before admission test");
+        const std::string hostId = establishedHost.status().clientId;
+        const std::string guestId = establishedGuest.status().clientId;
+
+        admissionBroker.forwardIce = false;
+        configuration.name = "Stalled Joiner";
+        if (!stalledJoiner.start_cloud_room(configuration,
+                                           std::make_unique<Channel>(admissionBroker), &error))
+            fail(error.c_str());
+        stalledJoiner.tick(); // Join the room, then stop servicing the newcomer's ICE.
+        const auto removalDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(24);
+        bool removed = false;
+        while (std::chrono::steady_clock::now() < removalDeadline) {
+            establishedHost.tick(); establishedGuest.tick();
+            if (!establishedHost.status().error.empty() ||
+                !establishedGuest.status().error.empty())
+                fail("unreachable newcomer disconnected an established cloud player");
+            removed = admissionBroker.kickRequests > 0 &&
+                establishedHost.peers().size() == 1 && establishedGuest.peers().size() == 1;
+            if (removed) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!removed || establishedHost.status().clientId != hostId ||
+            establishedGuest.status().clientId != guestId ||
+            establishedHost.status().natPeerCount != 1 ||
+            establishedGuest.status().natPeerCount != 1)
+            fail("unreachable newcomer was not removed while established peers stayed connected");
+        if (!establishedHost.send({{"type", "chat"}, {"text", "still connected"}}))
+            fail("established peer could not send after newcomer removal");
+        bool stillDelivered = false;
+        const auto messageDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < messageDeadline && !stillDelivered) {
+            establishedHost.tick(); establishedGuest.tick();
+            while (establishedGuest.has_events()) {
+                const auto event = establishedGuest.pop_event();
+                stillDelivered |= event.message.is_object() &&
+                    event.message.value("type", "") == "chat" &&
+                    event.message.value("text", "") == "still connected";
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!stillDelivered || admissionBroker.gameplayForwardingAttempt)
+            fail("established peer gameplay stopped after newcomer removal");
+        stalledJoiner.disconnect();
+        establishedGuest.disconnect();
+        establishedHost.disconnect();
     }
 
     // A room-service membership is not a peer connection. Without signaling,

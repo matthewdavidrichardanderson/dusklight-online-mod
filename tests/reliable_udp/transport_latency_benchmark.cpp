@@ -34,8 +34,10 @@ int main(int argc, char** argv) {
         if (bulk) { std::ifstream file(argv[1]); file >> save; }
         Transport host, client;
         DirectHostConfig hc; hc.bindHost = hc.publicHost = "127.0.0.1"; hc.port = 34197;
+        hc.sessionKey = "benchmark-invite-key";
         check(host.start_direct_host(hc), "host failed");
         DirectJoinConfig jc; jc.host = hc.publicHost; jc.port = hc.port;
+        jc.sessionKey = hc.sessionKey;
         check(client.start_direct_join(jc), "client failed");
         uint64_t handshake = ms();
         while (!client.status().welcomed || host.peers().empty()) {

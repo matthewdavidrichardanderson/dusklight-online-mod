@@ -6,7 +6,6 @@
 #include "mods/svc/hook.h"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/host.h"
-#include "mods/svc/http.h"
 #include "mods/svc/item.h"
 #include "mods/svc/log.h"
 #include "mods/svc/resource.h"
@@ -31,7 +30,6 @@ IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_SERVICE(TextureService, svc_texture);
 IMPORT_SERVICE(WebSocketService, svc_websocket);
-IMPORT_OPTIONAL_SERVICE(HttpService, svc_http);
 // ItemService's observer API has been stable since minor 0. Import that
 // prefix explicitly so this mod remains loadable on both the old combined
 // multiplayer host and current hosts with the expanded resolution API.

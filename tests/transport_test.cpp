@@ -140,6 +140,7 @@ int main() {
     hostConfig.bindHost = "127.0.0.1";
     hostConfig.publicHost = "127.0.0.1";
     hostConfig.port = port;
+    hostConfig.sessionKey = "exact-test-invite-key";
     hostConfig.settings.syncWorld = true;
     hostConfig.settings.pvp = true;
     hostConfig.settings.voiceProximity = false;
@@ -157,6 +158,7 @@ int main() {
         DirectJoinConfig unavailable;
         unavailable.host = "256.0.0.1";
         unavailable.port = port;
+        unavailable.sessionKey = hostConfig.sessionKey;
         if (failedJoin.start_direct_join(unavailable, &error) || failedJoin.status().enabled) {
             fail("synchronous join failure remained enabled");
         }
@@ -192,11 +194,26 @@ int main() {
         fail("host start: " + error);
     }
 
+    {
+        Transport intruder;
+        DirectJoinConfig wrongKey;
+        wrongKey.name = "Wrong key";
+        wrongKey.host = hostConfig.publicHost;
+        wrongKey.port = port;
+        wrongKey.sessionKey = "different-invite-key";
+        if (!intruder.start_direct_join(wrongKey, &error)) fail("wrong-key join start failed");
+        pump(host, intruder, alice, 5400);
+        if (intruder.status().welcomed || intruder.status().enabled ||
+            host.status().welcomed || !host.peers().empty())
+            fail("direct host admitted a wrong session key");
+    }
+
     DirectJoinConfig aliceConfig;
     aliceConfig.name = "Alice";
     aliceConfig.room = hostConfig.room;
     aliceConfig.host = hostConfig.publicHost;
     aliceConfig.port = port;
+    aliceConfig.sessionKey = hostConfig.sessionKey;
     if (!alice.start_direct_join(aliceConfig, &error)) {
         fail("Alice start: " + error);
     }

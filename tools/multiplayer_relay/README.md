@@ -1,7 +1,7 @@
 # Dusklight Online Relay
 
 The relay is maintained and released with Dusklight Online. It groups clients
-into password-protected lobbies and routes reliable gameplay messages through KCP over UDP, alongside independent
+into code-protected lobbies and routes reliable gameplay messages through KCP over UDP, alongside independent
 latency-sensitive visual datagrams on the same UDP port.
 
 The server does not require Dusklight, the game, the mod SDK, or a game
@@ -80,7 +80,7 @@ opens that location.
 
 The relay operator gives every player the same relay code. In Dusklight Online,
 use **Online → Relay** and enter that code. A host creates a named lobby and the
-other players join it with the same lobby name and password.
+other players join it with the same lobby name and lobby code.
 
 The lobby creator owns its settings. If that player leaves, the oldest remaining
 client becomes the owner. Nicknames are display labels and do not need to be
@@ -181,9 +181,11 @@ and [protocol maintenance checklist](SYNCING.md).
 
 ## Security
 
-Lobby passwords are sent without transport encryption. Use throwaway passwords and deploy on a
-trusted private network or behind an encrypted tunnel. Do not reuse account
-passwords.
+The relay endpoint code contains a random key. Native UDP connections use it to
+authenticate an ephemeral key exchange and encrypt reliable and visual packets.
+The raw lobby code is never sent to the relay; a creator sends a derived verifier
+inside the encrypted connection, and joiners answer a fresh challenge. Keep the
+endpoint code private and never reuse an account code as a lobby code.
 
 Project code is released under the repository's CC0 license. The packaged relay
 also includes [third-party notices](THIRD_PARTY_NOTICES.md) for its MIT-licensed

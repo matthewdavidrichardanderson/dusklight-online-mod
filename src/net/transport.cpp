@@ -1,4 +1,5 @@
 #include "dusklight_online/net/peer_delivery.hpp"
+#include "dusklight_online/net/auth_code.hpp"
 #include "dusklight_online/net/reliable_json.hpp"
 #include "dusklight_online/net/pose_ack_history.hpp"
 #include "dusklight_online/net/transport.hpp"
@@ -208,6 +209,8 @@ struct Transport::Impl {
         bool supportsSemanticVisuals = false;
         bool supportsSnapshotDeltas = false;
         bool kickPending = false;
+        std::string authNonce;
+        std::chrono::steady_clock::time_point acceptedAt = std::chrono::steady_clock::now();
     };
 
     struct PeerPresence {
@@ -234,8 +237,12 @@ struct Transport::Impl {
         std::chrono::steady_clock::time_point started;
         uint32_t nextLogSecond = 3;
         bool retried = false;
+        // The joiner times itself out at 15 seconds. Give its peer_left time
+        // to arrive before the established room asks the owner to remove it.
+        uint32_t nextEvictionSecond = 20;
     };
     std::map<std::string, CloudLinkAttempt> cloudLinkStarted;
+    std::map<std::string, std::chrono::steady_clock::time_point> cloudNewcomers;
     bool listening = false;
     bool udpOpen = false;
     sockaddr_in udpRemoteAddress{};
@@ -291,9 +298,12 @@ struct Transport::Impl {
     bool wantMidna = false;
     bool supportsSnapshotDeltas = true;
     bool visualWireDiagnostics = false;
-    std::string password;
+    std::string lobbyCode;
     std::string sessionId;
     std::string sessionKey;
+    std::string authNonce;
+    std::string authSalt;
+    std::chrono::steady_clock::time_point challengeStartedAt{};
     bool udpRemoteAddressKnown = false;
     udp::Decoder udpDecoder;
     Transport::PoseDeltaExpandCallback poseDeltaExpand = nullptr;
@@ -599,6 +609,7 @@ struct Transport::Impl {
         meshEnabled = false; meshPuppets.clear();
         meshRoutes.clear(); meshLinks.clear(); meshRx.clear();
         cloudLinkStarted.clear();
+        cloudNewcomers.clear();
         peerDelivery.clear();
         deferredSends.clear(); futureGameplay.clear(); barrierExpected.clear(); barrierSeen.clear(); futureBarrierSeen.clear();
         deliveryBytes = 0; settingsGeneration = 0; announcedStage.clear(); deliveryFailure = false;
@@ -623,6 +634,9 @@ struct Transport::Impl {
         reconnectTicks = 0;
         relayUdpRegisterTicks = 0;
         helloSent = false;
+        authNonce.clear();
+        authSalt.clear();
+        challengeStartedAt = {};
         handshakeRejected = false;
         udpRemoteAddressKnown = false;
         udpDecoder.reset();
@@ -635,7 +649,7 @@ struct Transport::Impl {
             relayMayRecreateRoom = false;
             wantPuppet = true;
             wantMidna = false;
-            password.clear();
+            lobbyCode.clear();
             sessionId.clear();
             sessionKey.clear();
             cloudChannel.reset();
@@ -811,7 +825,7 @@ struct Transport::Impl {
         const bool snapshotDeltasReady = direct_snapshot_deltas_ready(&peer);
         const json welcome = {
             {"type", "welcome"},
-            {"protocol_version", 1},
+            {"protocol_version", 3},
             {"room_id", status.room},
             {"client_id", peer.id},
             {"direct_peer_name", status.name},
@@ -836,16 +850,16 @@ struct Transport::Impl {
     }
 
     void send_hello() {
-        if (helloSent || (status.mode != Mode::CloudRoom && socket == kInvalidSocket)) {
+        if (helloSent || authNonce.empty() ||
+            (status.mode != Mode::CloudRoom && socket == kInvalidSocket)) {
             return;
         }
         json hello = {
             {"type", "hello"},
-            {"protocol_version", status.mode == Mode::CloudRoom ? 3 :
-                                 (status.mode == Mode::Relay ? 2 : 1)},
+            {"protocol_version", status.mode == Mode::CloudRoom ? 5 :
+                                 (status.mode == Mode::Relay ? 4 : 3)},
             {"room_id", status.room},
             {"session_id", sessionId},
-            {"password", password},
             {"name", status.name},
             {"want_puppet", wantPuppet},
             {"want_midna", wantMidna},
@@ -855,10 +869,18 @@ struct Transport::Impl {
             }},
         };
         if (is_room_mode(status.mode)) {
+            const auto verifier = auth::lobby_verifier(lobbyCode, status.room,
+                status.mode == Mode::Relay ? sessionKey : std::string{});
+            const auto key = auth::room_proof_key(verifier, authSalt);
+            if (!key) { fail("Invalid lobby authentication challenge", false); return; }
+            hello["code_proof"] = auth::room_proof(*key, authNonce);
+            if (relayCreateRoom) hello["code_verifier"] = auth::hex(verifier);
             hello["action"] = relayCreateRoom ? "create" : "join";
             if (relayCreateRoom) {
                 hello["settings"] = settings_json(status.settings);
             }
+        } else {
+            hello["session_proof"] = auth::direct_proof(sessionKey, authNonce);
         }
         helloSent = queue_primary(hello);
     }
@@ -890,7 +912,7 @@ struct Transport::Impl {
         connections.close();
         socket = kInvalidSocket;
         udpOpen = false;
-        if (!connections.open("0.0.0.0", 0, 1, false)) {
+        if (!connections.open("0.0.0.0", 0, 1, false, false, sessionKey)) {
             fail("UDP connection open failed", false);
             return false;
         }
@@ -907,7 +929,8 @@ struct Transport::Impl {
         events.clear();
         ++connectionEpoch;
         stop_udp_tx_pacer();
-        if (!connections.open(status.bindHost, status.port, kMaxDirectPeers, true)) {
+        if (!connections.open(status.bindHost, status.port, kMaxDirectPeers,
+                              true, false, sessionKey)) {
             fail("UDP listen failed", false);
             return false;
         }
@@ -1349,7 +1372,12 @@ struct Transport::Impl {
         if (!connections.connected(socket)) return;
         status.state = State::Connected;
         status.error.clear();
-        send_hello();
+        challengeStartedAt = std::chrono::steady_clock::now();
+        if (status.mode == Mode::Relay) {
+            queue_primary({{"type", "auth_begin"}, {"protocol_version", 4},
+                {"room_id", status.room},
+                {"action", relayCreateRoom ? "create" : "join"}});
+        }
     }
 
     void accept_peers() {
@@ -1361,6 +1389,8 @@ struct Transport::Impl {
             Peer peer;
             peer.socket = static_cast<socket_t>(accepted);
             peer.id = "direct" + std::to_string(nextDirectPeerId++);
+            peer.authNonce = auth::random_nonce();
+            queue_peer(peer, {{"type", "auth_challenge"}, {"nonce", peer.authNonce}});
             directPeers.emplace(peer.id, std::move(peer));
             status.state = State::Connected;
         }
@@ -1373,6 +1403,15 @@ struct Transport::Impl {
         }
         const std::string type = input.value("type", "");
         if (type == "hello") {
+            const std::string proof = input.value("session_proof", "");
+            if (sender.authNonce.empty() || sender.welcomed ||
+                input.value("protocol_version", 0) != 3 ||
+                !auth::equal(proof, auth::direct_proof(sessionKey, sender.authNonce))) {
+                queue_peer(sender, {{"type", "error"}, {"error", "Invalid direct invite code"}});
+                sender.kickPending = true;
+                return;
+            }
+            sender.authNonce.clear();
             sender.name = input.value("name", sender.name);
             sender.wantPuppet = input.value("want_puppet", sender.wantPuppet);
             sender.wantMidna = false;
@@ -1596,18 +1635,36 @@ struct Transport::Impl {
         const auto type = message.value("type", "");
         const bool cloudPeerControl = status.mode == Mode::CloudRoom &&
             (type == "ping" || type == "pong" || type == "presence" ||
-             type == "puppet_preference");
+             type == "puppet_preference" || type == "cloud_join_failure");
         if (!message.is_object() || message.dump().size() > reliableJsonLimit ||
             !(peer_delivery_type(type) || cloudPeerControl) ||
             (!message.value("target_client_id", "").empty() && message.value("target_client_id", "") != status.clientId)) {
             deliveryFailure = true; return;
+        }
+        if (type == "cloud_join_failure") {
+            const auto targetValue = message.find("unreachable_client_id");
+            if (status.isOwner && targetValue != message.end() && targetValue->is_string()) {
+                const std::string target = targetValue->get<std::string>();
+                const auto arrival = cloudNewcomers.find(target);
+                const bool reporterWasHereFirst = !cloudNewcomers.contains(name) ||
+                    (arrival != cloudNewcomers.end() && cloudNewcomers.at(name) < arrival->second);
+                if (target != name && arrival != cloudNewcomers.end() &&
+                    reporterWasHereFirst && meshRoutes.contains(name) && meshRoutes.at(name) &&
+                    meshLinks.contains(target) &&
+                    std::chrono::steady_clock::now() - arrival->second < std::chrono::seconds(60) &&
+                    queue_primary({{"type", "kick"}, {"target_client_id", target}})) {
+                    emit(EventKind::Diagnostic, target,
+                         "unreachable_newcomer_kick_requested_by=" + name);
+                }
+            }
+            return;
         }
         message["client_id"] = name;
         handle_primary_message(message);
     }
     void receive_primary(const json& message) {
         const auto type = message.value("type", "");
-        if (status.mode == Mode::CloudRoom && type != "welcome" &&
+        if (status.mode == Mode::CloudRoom && type != "auth_challenge" && type != "welcome" &&
             type != "peer_joined" && type != "peer_left" &&
             type != "owner_changed" && type != "room_settings" &&
             type != "settings_prepare" && type != "ice_signal" &&
@@ -1686,7 +1743,7 @@ struct Transport::Impl {
         }
 
     }
-    void drain_peer_gameplay(const std::string& name, socket_t link) {
+    void drain_peer_gameplay(const std::string& name, socket_t link, bool departing = false) {
         auto& pending = futureGameplay[name];
         // A remote peer can receive the commit before this peer does.
         // Retain its next-generation data until our authoritative commit.
@@ -1694,7 +1751,10 @@ struct Transport::Impl {
             auto item = std::move(pending.front()); pending.pop_front(); deliveryBytes -= item.bytes;
             apply_peer_gameplay(name,item.value.at("payload"));
         }
-        if (!receive(link,meshRx[name],[&](const json& frame) { receive_delivery(name,frame); },true)) deliveryFailure = true;
+        // A departed peer may close its direct link before peer_left arrives.
+        if (!receive(link,meshRx[name],[&](const json& frame) { receive_delivery(name,frame); },true) &&
+            !departing && !(status.mode == Mode::CloudRoom && cloudNewcomers.contains(name) &&
+                            !connections.connected(link))) deliveryFailure = true;
     }
     void pump_deliveries() {
         for (const auto& [name,link] : meshLinks) drain_peer_gameplay(name,link);
@@ -1726,7 +1786,36 @@ struct Transport::Impl {
             return;
         }
         const std::string type = message.value("type", "");
+        if (type == "auth_challenge" && !status.welcomed && !helloSent) {
+            const std::string nonce = message.value("nonce", "");
+            const std::string salt = message.value("salt", "");
+            if (nonce.size() != 32 || auth::direct_proof("check", nonce).empty() ||
+                (is_room_mode(status.mode) &&
+                 (!auth::room_proof_key(auth::hmac_sha256("", ""), salt)))) {
+                status.error = "Invalid authentication challenge";
+                handshakeRejected = true;
+                return;
+            }
+            authNonce = nonce;
+            authSalt = salt;
+            send_hello();
+            return;
+        }
         if (type == "welcome") {
+            const int expectedVersion = status.mode == Mode::CloudRoom ? 5 :
+                (status.mode == Mode::Relay ? 4 : 3);
+            if (message.value("protocol_version", 0) != expectedVersion) {
+                fail("Lobby transport protocol version mismatch", false);
+                return;
+            }
+            if (status.mode == Mode::CloudRoom) {
+                const std::string meshKey = message.value("mesh_key", "");
+                if (!auth::unhex_digest(meshKey) ||
+                    !connections.set_mesh_secret(meshKey)) {
+                    fail("Cloud room service needs the secure peer update", false);
+                    return;
+                }
+            }
             status.welcomed = true;
             if (is_room_mode(status.mode)) {
                 settingsGeneration = message.value("settings_generation",uint64_t(0));
@@ -1828,6 +1917,8 @@ struct Transport::Impl {
             if (!id.empty()) {
                 cloudDepartedPeers.erase(id);
                 const bool alreadyKnown = peerNames.contains(id);
+                if (status.mode == Mode::CloudRoom && !alreadyKnown)
+                    cloudNewcomers[id] = std::chrono::steady_clock::now();
                 peerNames[id] = message.value("name", id);
                 if (meshEnabled) {
                     admit_mesh(id);
@@ -1856,10 +1947,11 @@ struct Transport::Impl {
             if (status.mode == Mode::CloudRoom)
                 emit(EventKind::Diagnostic, id,
                      "room_peer_left peers_before=" + std::to_string(meshLinks.size()));
-            if (meshLinks.contains(id)) drain_peer_gameplay(id,meshLinks.at(id));
+            if (meshLinks.contains(id)) drain_peer_gameplay(id,meshLinks.at(id),true);
             peerNames.erase(id);
             connections.mesh_remove(id);
             cloudLinkStarted.erase(id);
+            cloudNewcomers.erase(id);
             meshRoutes.erase(id); meshLinks.erase(id); meshRx.erase(id);
             if (auto it = peerDelivery.find(id); it != peerDelivery.end()) {
                 for (const auto& [sequence,item] : it->second.sent) deliveryBytes -= item.bytes;
@@ -2026,7 +2118,7 @@ struct Transport::Impl {
         } else if (type == "error") {
             const std::string reason = message.value("error", "remote error");
             emit(EventKind::Error, {}, reason, message);
-            if (is_room_mode(status.mode) && !status.welcomed) {
+            if ((is_room_mode(status.mode) || status.mode == Mode::DirectJoin) && !status.welcomed) {
                 const bool recreate = reason == "lobby_not_found" && relayMayRecreateRoom;
                 relayCreateRoom = recreate;
                 automaticReconnect = recreate;
@@ -2113,9 +2205,9 @@ struct Transport::Impl {
             if (event.kind == RoomChannel::EventKind::Open) {
                 status.state = State::Connected;
                 status.error.clear();
+                challengeStartedAt = std::chrono::steady_clock::now();
                 emit(EventKind::Diagnostic, {}, "room_websocket_open");
-                send_hello();
-                if (!helloSent) { fail("Cloud room handshake send failed"); return; }
+                // The room sends a fresh challenge after opening.
             } else if (event.kind == RoomChannel::EventKind::Message) {
                 if (event.text.size() > 16 * 1024) {
                     fail("Cloud room message exceeds limit", false); return;
@@ -2137,6 +2229,10 @@ struct Transport::Impl {
                     return;
                 }
             } else if (event.kind == RoomChannel::EventKind::Closed) {
+                emit(EventKind::Diagnostic, {},
+                     "room_websocket_closed code=" + std::to_string(event.closeCode) +
+                     " error=" + std::to_string(event.closeError) +
+                     " reason=" + event.text);
                 fail(event.text.empty() ? "Cloud room connection closed" : event.text);
                 return;
             } else if (event.kind == RoomChannel::EventKind::Diagnostic) {
@@ -2149,12 +2245,21 @@ struct Transport::Impl {
     void pump_direct_peers() {
         std::vector<std::pair<std::string, std::string>> failed;
         for (auto& [id, peer] : directPeers) {
+            if (!peer.welcomed && !peer.kickPending &&
+                std::chrono::steady_clock::now() - peer.acceptedAt > std::chrono::seconds(10)) {
+                failed.emplace_back(id, "direct invite authentication timed out");
+                continue;
+            }
             if (peer.kickPending) {
+                if (!flush(peer.socket, peer.tx)) {
+                    failed.emplace_back(id, "invalid direct invite code");
+                    continue;
+                }
                 // UdpConnection::drained means the reliable kick notice was
                 // acknowledged. Old clients that do not understand the notice
                 // are still removed after acknowledging it.
                 if (!connections.alive(peer.socket) || connections.drained(peer.socket)) {
-                    failed.emplace_back(id, "removed by lobby host");
+                    failed.emplace_back(id, "invalid direct invite code");
                 }
                 continue;
             }
@@ -2177,6 +2282,12 @@ struct Transport::Impl {
             return;
         }
         connections.poll();
+        if (status.state == State::Connected && status.mode != Mode::DirectHost &&
+            !helloSent && challengeStartedAt != std::chrono::steady_clock::time_point{} &&
+            std::chrono::steady_clock::now() - challengeStartedAt > std::chrono::seconds(12)) {
+            fail("Authentication challenge timed out; host or room service needs updating", false);
+            return;
+        }
         for (auto it = peerStages.begin(); it != peerStages.end();) {
             if (++it->second.ageTicks > 180) {
                 it = peerStages.erase(it);
@@ -2216,7 +2327,7 @@ struct Transport::Impl {
         }
         if (status.state == State::Connected) {
             if (status.mode == Mode::CloudRoom) pump_cloud();
-            else { send_hello(); pump_primary(); }
+            else { pump_primary(); }
             if (status.state == State::Disconnected) return;
             if (meshEnabled) {
 #if defined(DUSKLIGHT_TRANSPORT_TESTING)
@@ -2260,6 +2371,31 @@ struct Transport::Impl {
                                     emit(EventKind::Diagnostic, id, "ice_retry " + connections.mesh_diagnostics(id));
                             }
                             if (elapsed >= std::chrono::seconds(15)) {
+                                const auto newcomer = cloudNewcomers.find(id);
+                                if (newcomer != cloudNewcomers.end() &&
+                                    std::chrono::steady_clock::now() - newcomer->second <
+                                        std::chrono::seconds(60)) {
+                                    if (elapsedSeconds >= attempt.nextEvictionSecond) {
+                                        bool requested = false;
+                                        if (status.isOwner) {
+                                            requested = queue_primary({{"type", "kick"},
+                                                {"target_client_id", id}});
+                                        } else if (meshLinks.contains(status.ownerClientId) &&
+                                                   delivery_direct(status.ownerClientId)) {
+                                            requested = send_peer_gameplay({
+                                                {"type", "cloud_join_failure"},
+                                                {"target_client_id", status.ownerClientId},
+                                                {"unreachable_client_id", id}});
+                                        }
+                                        emit(EventKind::Diagnostic, id,
+                                             "unreachable_newcomer_removal_requested=" +
+                                             std::string(requested ? "yes " : "no ") +
+                                             connections.mesh_diagnostics(id));
+                                        attempt.nextEvictionSecond =
+                                            static_cast<uint32_t>(elapsedSeconds + 5);
+                                    }
+                                    continue;
+                                }
                                 emit(EventKind::Diagnostic, id,
                                      "ice_timeout elapsed_s=" + std::to_string(elapsedSeconds) +
                                      " " + connections.mesh_diagnostics(id));
@@ -2309,6 +2445,10 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
         }
         return false;
     }
+    if (config.sessionKey.empty()) {
+        if (error) *error = "Direct host requires an invite session key";
+        return false;
+    }
     if (!acquire_network_stack(impl_->networkStackOwned, error)) {
         return false;
     }
@@ -2348,6 +2488,10 @@ bool Transport::start_direct_join(const DirectJoinConfig& config, std::string* e
         }
         return false;
     }
+    if (config.sessionKey.empty()) {
+        if (error) *error = "Direct invite is missing its session key";
+        return false;
+    }
     if (!acquire_network_stack(impl_->networkStackOwned, error)) {
         return false;
     }
@@ -2383,10 +2527,14 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
         }
         return false;
     }
-    if (config.password.size() < 6 || config.password.size() > 128) {
+    if (config.lobbyCode.size() < 6 || config.lobbyCode.size() > 128) {
         if (error != nullptr) {
-            *error = "Relay password must be between 6 and 128 characters";
+            *error = "Lobby code must be between 6 and 128 characters";
         }
+        return false;
+    }
+    if (config.sessionKey.size() < 16) {
+        if (error) *error = "Manual relay code is outdated; restart the updated relay";
         return false;
     }
     if (!acquire_network_stack(impl_->networkStackOwned, error)) {
@@ -2402,7 +2550,7 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
     impl_->status.settings = config.settings;
     impl_->preferredSaveRecovery = config.settings.saveRecovery;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
-    impl_->password = config.password;
+    impl_->lobbyCode = config.lobbyCode;
     impl_->sessionId = config.sessionId;
     impl_->sessionKey = config.sessionKey;
     impl_->relayCreateRoom = config.createRoom;
@@ -2430,9 +2578,8 @@ bool Transport::start_cloud_room(const CloudRoomConfig& config,
     if (!channel) return reject("Cloud room channel unavailable");
     if (!valid_room_name(config.room))
         return reject("Lobby name must be 1-64 letters, numbers, spaces, _ or - with no outer spaces");
-    if ((config.password.size() != 0 && config.password.size() < 6) ||
-        config.password.size() > 128)
-        return reject("Lobby password must be blank or between 6 and 128 characters");
+    if (config.lobbyCode.size() < 6 || config.lobbyCode.size() > 128)
+        return reject("Lobby code must be between 6 and 128 characters");
     std::string server = config.serverUrl;
     while (server.ends_with('/')) server.pop_back();
     if (!(server.starts_with("https://") || server.starts_with("wss://")))
@@ -2450,7 +2597,7 @@ bool Transport::start_cloud_room(const CloudRoomConfig& config,
     impl_->status.settings = config.settings;
     impl_->preferredSaveRecovery = config.settings.saveRecovery;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
-    impl_->password = config.password;
+    impl_->lobbyCode = config.lobbyCode;
     impl_->relayCreateRoom = config.createRoom;
     impl_->wantPuppet = config.wantPuppet;
     impl_->supportsSnapshotDeltas = config.supportsSnapshotDeltas;

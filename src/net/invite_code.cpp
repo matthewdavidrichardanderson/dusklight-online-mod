@@ -1,11 +1,12 @@
 #include "dusk/multiplayer/invite_code.hpp"
+#include "dusklight_online/net/secure_random.hpp"
 
 #include "nlohmann/json.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <random>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -244,10 +245,8 @@ void set_error(std::string* errorOut, const char* error) {
 
 std::string make_session_token(int bytes) {
     std::vector<uint8_t> data(static_cast<size_t>(bytes));
-    std::random_device random;
-    for (uint8_t& byte : data) {
-        byte = static_cast<uint8_t>(random());
-    }
+    if (!dusklight_online::net::secure_random_bytes(data))
+        throw std::runtime_error("secure random unavailable");
     return base64url_encode(data.data(), data.size());
 }
 

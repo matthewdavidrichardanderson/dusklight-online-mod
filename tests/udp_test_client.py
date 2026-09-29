@@ -11,11 +11,13 @@ class ReliableSocket:
         cls.library = ctypes.CDLL(str(path))
         signatures = {
             'decode': ([ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
-            'create': ([ctypes.c_int], ctypes.c_void_p),
+            'create': ([ctypes.c_int, ctypes.c_char_p], ctypes.c_void_p),
             'destroy': ([ctypes.c_void_p], None),
             'poll': ([ctypes.c_void_p], ctypes.c_int),
             'send': ([ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int], ctypes.c_int),
             'receive': ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
+            'send_realtime': ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
+            'receive_realtime': ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
         }
         for name, (args, result) in signatures.items():
             fn = getattr(cls.library, 'udp_test_' + name)
@@ -34,9 +36,9 @@ class ReliableSocket:
         for instance in tuple(cls.instances):
             instance.state = cls.library.udp_test_poll(instance.handle)
 
-    def __init__(self, port, timeout=2.0):
+    def __init__(self, port, timeout=2.0, invite_secret='relay-test-endpoint-key'):
         self.timeout = timeout
-        self.handle = self.library.udp_test_create(port)
+        self.handle = self.library.udp_test_create(port, invite_secret.encode())
         if not self.handle:
             raise ConnectionError('could not create UDP session')
         self.instances.add(self)
@@ -73,6 +75,23 @@ class ReliableSocket:
                 return buffer.raw[:count]
             time.sleep(0.001)
         raise TimeoutError('reliable UDP receive timed out')
+
+    def sendto(self, data, address):
+        data = bytes(data)
+        result = self.library.udp_test_send_realtime(self.handle, data, len(data))
+        self.pump()
+        return result
+
+    def recvfrom(self, size):
+        deadline = time.monotonic() + min(self.timeout, 0.3)
+        buffer = ctypes.create_string_buffer(size)
+        while time.monotonic() < deadline:
+            self.pump()
+            count = self.library.udp_test_receive_realtime(self.handle, buffer, size)
+            if count >= 0:
+                return buffer.raw[:count], ('127.0.0.1', 0)
+            time.sleep(0.001)
+        raise TimeoutError('realtime UDP receive timed out')
 
     def __enter__(self):
         return self

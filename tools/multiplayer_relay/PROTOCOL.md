@@ -31,11 +31,13 @@ one original visual datagram. The relay expands a grouped upload into validated
 DPF1 deliveries without sending it to omitted peers. Nested wrappers are rejected.
 Maximum sizes are 1220 bytes for DPF1 and 1227 bytes for DPG1.
 
-Direct ICE carries the original DMPU datagrams. The admitted agent supplies peer
-identity; it must match the inner sender before reassembly. Native fallback is
-accepted only from the relay endpoint with matching local recipient and admitted
-sender. Both paths enter the same decoder/ACK history. Peer KCP uses a stable
-logical session across direct/fallback switches and never handles sockets or ICE.
+Direct ICE carries DSE1-encrypted DMPU and KCP datagrams after a peer key
+exchange authenticated by the relay endpoint key. The admitted agent supplies
+peer identity; it must match the inner sender before reassembly. Native fallback
+is accepted only from the relay endpoint with matching local recipient and
+admitted sender, inside that client's encrypted relay connection. Both paths
+enter the same decoder/ACK history. Peer KCP uses a stable logical session
+across direct/fallback switches and never handles sockets or ICE.
 
 Direct readiness uses a 13-byte `DPI1` probe: type byte (1 ping, 2 echo) and a
 little-endian uint64 monotonic millisecond value. The native worker probes every
@@ -105,20 +107,22 @@ finishes; duplicate application is prevented by the delivery sequence.
 
 ## Framing and limits
 
-- Reliable transport: KCP over UDP; no transport encryption.
+- Reliable transport: KCP over authenticated, encrypted UDP.
 - Encoding: one UTF-8 JSON object per line.
-- Current wire version: `2`.
+- Current wire version: `3`.
 - Maximum encoded input line: 512 KiB, excluding the newline.
 - Maximum queued output per client: 8 MiB.
 - Maximum clients in one room: 8.
 - Maximum room name: 64 bytes.
 - Maximum nickname: 32 bytes.
-- Minimum password: 6 bytes.
-- Maximum password: 128 bytes.
+- Minimum lobby code: 6 bytes.
+- Maximum lobby code: 128 bytes.
 - A client must complete `hello` within 10 seconds.
 
-The UDP transport does not encrypt the room password. Internet deployment requires a
-trusted private network or a later encrypted transport phase.
+The relay endpoint code supplies a random pre-shared key. Native UDP admission
+uses ephemeral X25519 and authenticated key confirmation. XChaCha20-Poly1305
+encrypts reliable and visual datagrams, including the creator's code verifier.
+The raw lobby code is not transmitted. Keep the relay endpoint code private.
 
 ## Transport framing and ownership
 
@@ -135,11 +139,17 @@ existing game-update hook. The worker is joined before socket/mod teardown.
 
 - `DUC1`: fixed 21-byte native session control (type byte, little-endian 64-bit
   client nonce and server session generation). Open/challenge/confirm/ready
-  establish return routability; keepalive and close maintain the session.
-  This handshake is not cryptographic authentication. Existing lobby/password
-  checks still run in `hello` after establishment.
+  establish return routability. This preliminary handshake does not admit a
+  player. Encrypted keepalive and close maintain an established session.
+- `DSH1`: authenticated ephemeral X25519 exchange using the random key in the
+  endpoint code. Client hello, server hello, and client finish confirm possession
+  of that key before the relay admits the connection.
+- `DSE1`: connection generation, 64-bit packet counter, authentication tag and
+  XChaCha20-Poly1305 ciphertext. A 64-packet receive window rejects replays.
+  The generation and counter are authenticated associated data.
 - `DUR1`: reliable datagram, followed by a little-endian 64-bit generation,
-  16-bit ordered group and KCP bytes. Maximum datagram size is 1200 bytes.
+  16-bit ordered group and KCP bytes inside `DSE1`. Maximum inner datagram size
+  is 1200 bytes.
   Stale generations and unknown peers/groups are rejected before KCP input.
 - `DMPU`: existing visual framing. It is dispatched separately, never fed into
   KCP. The existing token validator controls visual endpoint rebinding.
@@ -164,7 +174,8 @@ The shared rate/burst budgets and receiver flow control apply in either mode.
 Native handshake/keepalive control is fixed-size and independently rate-limited.
 Reliable send queues are bounded; 30 seconds without ACK progress reports failure
 rather than silently skipping events. Native sessions time out after 15 seconds
-without valid receive activity; handshakes time out after 10 seconds.
+without valid receive activity; preliminary handshakes time out after 10 seconds
+and authenticated key exchange after 5 seconds.
 
 The relay and clients must be upgraded together. No old TCP fallback exists.
 
@@ -172,9 +183,9 @@ The relay and clients must be upgraded together. No old TCP fallback exists.
 
 The standalone relay prints a relay code at startup. This is a client-side
 bootstrap code containing the operator's advertised public host and port; it is
-not a room identifier and contains no lobby password. The operator gives the
-same code to lobby creators and joiners. Room name, password, nickname, and
-host/join intent are supplied separately in `hello`.
+not a room identifier and contains no lobby code. It includes a random endpoint
+key used to derive the lobby verifier. Keep this code within the intended group.
+Room name, nickname, and host/join intent are supplied separately.
 
 ## UDP visual channel
 
@@ -199,22 +210,25 @@ the receiving client applies them to voice playback.
 
 Clients explicitly create or join rooms. A successful connection is:
 
-1. Client sends `hello` with `action` set to `create` or `join`.
-2. Relay sends `welcome` containing the assigned `client_id`, room owner,
+1. Client sends `auth_begin` with protocol version `4`, room ID, and `create` or `join`.
+2. Relay sends `auth_challenge` with a 16-byte random nonce and room salt, both hex encoded.
+3. Client sends `hello` with a nonce proof. A creator also sends a code verifier;
+   a joiner sends no verifier. The raw lobby code is never sent.
+4. Relay sends `welcome` containing the assigned `client_id`, room owner,
    current room settings, and existing peers.
-3. Relay sends `peer_joined` to the existing peers.
-4. Gameplay messages can be routed.
-5. Relay sends `peer_left` when a joined client disconnects.
+5. Relay sends `peer_joined` to the existing peers. Gameplay can then be routed.
+6. Relay sends `peer_left` when a joined client disconnects.
 
 `hello` fields:
 
 | Field | Type | Required |
 | --- | --- | --- |
 | `type` | string (`hello`) | yes |
-| `protocol_version` | integer (`2`) | yes |
+| `protocol_version` | integer (`4`) | yes |
 | `action` | string (`create` or `join`) | yes |
 | `room_id` | string | yes |
-| `password` | string (at least 6 bytes) | yes |
+| `code_proof` | 64-character hex HMAC-SHA-256 | yes |
+| `code_verifier` | 64-character hex PBKDF2 output | only for `create` |
 | `name` | string | yes |
 | `settings` | object | required for `create` |
 | `session_id` | string | no; currently client metadata |
@@ -235,8 +249,8 @@ Nicknames are not connection identities and may be duplicated. Every joined
 socket receives a unique opaque `client_id`, which is used for routing.
 
 Creating an existing room returns `lobby_exists`. Joining a missing room
-returns `lobby_not_found`; joining with a different password returns
-`bad_password`.
+returns `lobby_not_found`; joining with a different lobby code returns
+`bad_lobby_code`.
 
 The creator is the logical room owner. If the owner disconnects, ownership
 passes to the oldest remaining connection and the relay broadcasts

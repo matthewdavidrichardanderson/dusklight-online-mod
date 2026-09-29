@@ -21,12 +21,6 @@
       "optional": false
     },
     {
-      "service_id": "dev.twilitrealm.dusklight.http",
-      "major": 1,
-      "min_minor": 0,
-      "optional": true
-    },
-    {
       "service_id": "dev.twilitrealm.dusklight.item",
       "major": 2,
       "min_minor": 0,

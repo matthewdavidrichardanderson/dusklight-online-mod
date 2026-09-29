@@ -307,21 +307,30 @@ set(ONLINE_INVITE_SOURCES
 )
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/LIBJUICE_LICENSE.txt"
     "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/LIBJUICE_LICENSE.txt" COPYONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/vendor/monocypher/LICENCE.md"
+    "${DUSKLIGHT_ONLINE_GENERATED_RES_DIR}/MONOCYPHER_LICENSE.txt" COPYONLY)
 
 set(ONLINE_CONNECTION_SOURCES
     src/net/ice_agent.cpp
     src/net/reliable_udp.cpp
     src/net/datagram_scheduler.cpp
+    src/net/secure_datagram.cpp
     src/net/udp_connection.cpp
     vendor/kcp/ikcp.c
+    vendor/monocypher/monocypher.c
 )
 link_libraries(juice-static)
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/vendor/kcp")
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/vendor/monocypher")
+if (WIN32)
+    link_libraries(bcrypt)
+endif ()
 
 set(ONLINE_CORE_SOURCES
     ${ONLINE_CONNECTION_SOURCES}
     ${ONLINE_INVITE_SOURCES}
     src/net/transport.cpp
+    src/net/auth_code.cpp
     src/net/udp_codec.cpp
 )
 
@@ -400,6 +409,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/tools/multiplayer_relay/version.cmake")
 if (DUSKLIGHT_ONLINE_BUILD_RELAY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(dusklight_online_relay
         tools/multiplayer_relay/relay.cpp
+        src/net/auth_code.cpp
         ${ONLINE_CONNECTION_SOURCES}
         ${ONLINE_INVITE_SOURCES}
     )
@@ -527,6 +537,30 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_invite_code_test PRIVATE include src)
     target_link_libraries(dusklight_online_invite_code_test PRIVATE nlohmann_json::nlohmann_json)
     add_test(NAME dusklight_online_invite_code COMMAND dusklight_online_invite_code_test)
+
+    add_executable(dusklight_online_auth_code_test
+        tests/auth_code_test.cpp src/net/auth_code.cpp)
+    target_compile_features(dusklight_online_auth_code_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_auth_code_test PRIVATE include)
+    add_test(NAME dusklight_online_auth_code COMMAND dusklight_online_auth_code_test)
+
+    add_executable(dusklight_online_secure_datagram_test
+        tests/secure_datagram_test.cpp src/net/secure_datagram.cpp
+        vendor/monocypher/monocypher.c)
+    target_compile_features(dusklight_online_secure_datagram_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_secure_datagram_test PRIVATE include)
+    add_test(NAME dusklight_online_secure_datagram
+             COMMAND dusklight_online_secure_datagram_test)
+
+    add_executable(dusklight_online_secure_udp_connection_test
+        tests/secure_udp_connection_test.cpp ${ONLINE_CONNECTION_SOURCES})
+    target_compile_features(dusklight_online_secure_udp_connection_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_secure_udp_connection_test PRIVATE include)
+    if (WIN32)
+        target_link_libraries(dusklight_online_secure_udp_connection_test PRIVATE ws2_32)
+    endif ()
+    add_test(NAME dusklight_online_secure_udp_connection
+             COMMAND dusklight_online_secure_udp_connection_test)
 
     add_executable(dusklight_online_transport_test
         tests/transport_test.cpp
@@ -675,6 +709,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     add_library(dusklight_online_udp_test_client SHARED
         tests/udp_test_client.cpp ${ONLINE_CONNECTION_SOURCES})
     target_compile_features(dusklight_online_udp_test_client PRIVATE cxx_std_20)
+    target_compile_definitions(dusklight_online_udp_test_client PRIVATE DUSKLIGHT_TRANSPORT_TESTING=1)
     target_include_directories(dusklight_online_udp_test_client PRIVATE include)
     target_link_libraries(dusklight_online_udp_test_client PRIVATE nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})
     if(WIN32)

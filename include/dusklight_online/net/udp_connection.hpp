@@ -15,7 +15,8 @@ public:
     struct Address { uint32_t ipv4 = 0; uint16_t port = 0; };
     UdpConnection();
     ~UdpConnection();
-    bool open(std::string_view host, uint16_t port, size_t capacity, bool server, bool stun = false);
+    bool open(std::string_view host, uint16_t port, size_t capacity, bool server,
+              bool stun = false, std::string_view inviteSecret = {});
     void close();
     Id connect(std::string_view host, uint16_t port);
     Id accept(Address& address);
@@ -37,6 +38,7 @@ public:
     // Does not service game callbacks or bypass the shared datagram budget.
     void wait_for_activity(uint32_t timeoutMs);
     // Logical ICE links. An invalid relay ID forbids gameplay fallback.
+    bool set_mesh_secret(std::string_view roomSecret);
     bool mesh_open(std::string_view localId, Id relay, std::string_view stunHost, uint16_t stunPort);
     Id mesh_admit(std::string_view peerId, bool reliable = false);
     void mesh_remove(std::string_view peerId);
@@ -52,6 +54,9 @@ public:
     std::string mesh_diagnostics(std::string_view peerId) const;
     // Explicit ICE retry retains the logical session and reliable queues.
     bool mesh_retry(std::string_view peerId);
+#ifdef DUSKLIGHT_TRANSPORT_TESTING
+    void test_raw_tunnels(bool enabled);
+#endif
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

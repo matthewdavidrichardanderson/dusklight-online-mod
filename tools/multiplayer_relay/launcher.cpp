@@ -209,14 +209,15 @@ void start_relay() {
     endpoint.port = port;
     endpoint.room = "relay-endpoint";
     endpoint.sessionId = "relay";
-    endpoint.sessionKey = "endpoint";
+    endpoint.sessionKey = dusk::multiplayer::make_session_token(16);
     const std::wstring relayCode =
         from_utf8(dusk::multiplayer::create_invite_code(endpoint));
 
     std::wstring command =
         L"\"" + relayPath.wstring() + L"\" --host 0.0.0.0 --port " +
         std::to_wstring(port) + L" --public-host \"" + publicHostWide +
-        L"\" --public-port " + std::to_wstring(port) + L" --verbose";
+        L"\" --public-port " + std::to_wstring(port) + L" --endpoint-key " +
+        from_utf8(endpoint.sessionKey) + L" --verbose";
     std::vector<wchar_t> commandBuffer(command.begin(), command.end());
     commandBuffer.push_back(L'\0');
 

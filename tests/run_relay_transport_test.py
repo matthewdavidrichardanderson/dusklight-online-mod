@@ -95,6 +95,7 @@ def main() -> int:
             "--port", str(port),
             "--public-host", "127.0.0.1",
             "--public-port", str(port),
+            "--endpoint-key", "integration-endpoint-key",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

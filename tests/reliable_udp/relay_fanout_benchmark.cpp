@@ -28,7 +28,7 @@ int main(int argc,char**argv){try{
 #endif
  check(argc>=2,"usage: relay_fanout_benchmark FIXTURE [random]");
  std::array<Transport,8> c;
- RelayConfig cfg;cfg.host="127.0.0.1";cfg.port=34197;cfg.room="fanout";cfg.password="benchmark";cfg.settings.syncWorld=true;cfg.settings.pvp=true;
+ RelayConfig cfg;cfg.host="127.0.0.1";cfg.port=34197;cfg.room="fanout";cfg.lobbyCode="benchmark";cfg.sessionKey="benchmark-endpoint-key";cfg.settings.syncWorld=true;cfg.settings.pvp=true;
  auto tick=[&]{for(auto&t:c)t.tick();std::this_thread::sleep_for(std::chrono::milliseconds(33));};
  for(int i=0;i<8;i++){
   cfg.createRoom=i==0;cfg.name="bench"+std::to_string(i);check(c[i].start_relay(cfg),"start failed");

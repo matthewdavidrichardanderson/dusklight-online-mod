@@ -10,9 +10,8 @@ assets are included.
 2. Put it in Dusklight's `mods` folder and enable **MFB Multiplayer** in the Mods menu.
 3. Open the Online menu to host or join. Players should use the same mod version.
 
-With **Manual host** off, NAT/Relay uses a lobby name and optional password.
-Leave it blank to appear under **Browse Public Lobbies**. Direct uses an invite
-code; **Manual host** uses a self-hosted relay and requires a password.
+NAT/Relay uses a lobby name and code by default. Direct connections use an
+invite code; **Manual host** is for a self-hosted relay.
 
 Online does not synchronize save files. Back up saves before playing.
 

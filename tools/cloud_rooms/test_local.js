@@ -1,16 +1,12 @@
 // Run this against `wrangler dev --local` in another terminal. It exercises
 // the actual Worker/Durable Object runtime, not just the protocol class.
 import assert from "assert";
+import { createHmac, pbkdf2Sync } from "node:crypto";
 
 const base = process.env.ROOMS_TEST_URL ?? "http://127.0.0.1:8787";
 const response = await fetch(`${base}/health`);
 assert.equal(response.status, 200);
 assert.equal((await response.json()).service, "dusklight-rooms");
-const publicLobbies = async () => {
-  const result = await fetch(`${base}/public-lobbies`);
-  assert.equal(result.status, 200);
-  return (await result.json()).rooms;
-};
 
 class Client {
   constructor(socket) {
@@ -42,30 +38,43 @@ class Client {
 
 async function connect(room) {
   const socket = new WebSocket(`${base.replace(/^http/, "ws")}/room/${encodeURIComponent(room)}`);
+  const client = new Client(socket);
   await new Promise((resolve, reject) => {
     socket.addEventListener("open", resolve, { once: true });
     socket.addEventListener("error", reject, { once: true });
   });
-  return new Client(socket);
+  return client;
 }
 
 const settings = { dummy_model: true, sync_flags: true, sync_world: false,
   remote_collision: true, pvp: false };
 const room = `Local Test ${Date.now()}`;
-const password = "local-secret-password";
-const hello = (action, name) => ({ type: "hello", protocol_version: 3,
-  action, name, room_id: room, password, settings, want_puppet: true,
-  capabilities: { semantic_visual_v1: true, semantic_snapshot_delta_v1: true } });
+const code = "local-secret-code";
+async function sendHello(client, action, name) {
+  const { nonce, salt } = await client.next("auth_challenge");
+  const verifier = pbkdf2Sync(code, Buffer.from(
+    `dusklight-lobby-code-v1:${room.toLowerCase()}\0`), 100_000, 32, "sha256");
+  const key = createHmac("sha256", verifier).update(Buffer.concat([
+    Buffer.from("dusklight-room-key-v1:"), Buffer.from(salt, "hex")])).digest();
+  const proof = createHmac("sha256", key)
+    .update("dusklight-room-auth-v1:" + nonce).digest("hex");
+  client.send({ type: "hello", protocol_version: 5,
+    action, name, room_id: room, code_proof: proof,
+    ...(action === "create" ? { code_verifier: verifier.toString("hex") } : {}),
+    settings, want_puppet: true,
+    capabilities: { semantic_visual_v1: true, semantic_snapshot_delta_v1: true } });
+}
 
 const host = await connect(room);
-host.send(hello("create", "Host"));
+await sendHello(host, "create", "Host");
 const hostWelcome = await host.next("welcome");
 assert.equal(hostWelcome.owner_client_id, hostWelcome.client_id);
-assert.equal((await publicLobbies()).some(entry => entry.name === room), false);
+assert.match(hostWelcome.mesh_key, /^[0-9a-f]{64}$/);
 
 const guest = await connect(room);
-guest.send(hello("join", "Guest"));
+await sendHello(guest, "join", "Guest");
 const guestWelcome = await guest.next("welcome");
+assert.equal(guestWelcome.mesh_key, hostWelcome.mesh_key);
 assert.equal(guestWelcome.peers[0].client_id, hostWelcome.client_id);
 assert.equal((await host.next("peer_joined")).client_id, guestWelcome.client_id);
 
@@ -90,23 +99,4 @@ await host.next("peer_left");
 assert.equal(host.messages.some(value => value.type === "peer_reliable"), false);
 host.close();
 guest.close();
-
-const openRoom = `Public Test ${Date.now()}`;
-const openHello = (action, name) => ({ ...hello(action, name), room_id: openRoom, password: "" });
-const openHost = await connect(openRoom);
-openHost.send(openHello("create", "Host"));
-await openHost.next("welcome");
-assert.deepEqual((await publicLobbies()).find(entry => entry.name === openRoom),
-  { name: openRoom, players: 1, max_players: 8 });
-const openGuest = await connect(openRoom);
-openGuest.send(openHello("join", "Guest"));
-await openGuest.next("welcome");
-assert.equal((await publicLobbies()).find(entry => entry.name === openRoom)?.players, 2);
-openGuest.close();
-openHost.close();
-for (let attempt = 0; attempt < 40; attempt++) {
-  if (!(await publicLobbies()).some(entry => entry.name === openRoom)) break;
-  await new Promise(resolve => setTimeout(resolve, 50));
-}
-assert.equal((await publicLobbies()).some(entry => entry.name === openRoom), false);
 console.log("Local Cloudflare Worker integration passed");

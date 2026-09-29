@@ -83,7 +83,7 @@ struct DirectJoinConfig {
 struct RelayConfig {
     std::string name = "Player";
     std::string room = "Lobby";
-    std::string password;
+    std::string lobbyCode;
     std::string host = "127.0.0.1";
     std::string sessionId;
     std::string sessionKey;
@@ -98,7 +98,7 @@ struct RelayConfig {
 struct CloudRoomConfig {
     std::string name = "Player";
     std::string room = "Lobby";
-    std::string password;
+    std::string lobbyCode;
     std::string serverUrl;
     std::string stunHost = "stun.cloudflare.com";
     uint16_t stunPort = 3478;
@@ -114,7 +114,12 @@ struct CloudRoomConfig {
 class RoomChannel {
 public:
     enum class EventKind { Open, Message, Closed, Diagnostic };
-    struct Event { EventKind kind; std::string text; };
+    struct Event {
+        EventKind kind;
+        std::string text;
+        uint16_t closeCode = 0;
+        int closeError = 0;
+    };
     virtual ~RoomChannel() = default;
     virtual bool open(std::string_view url, std::string& error) = 0;
     virtual bool send(std::string_view text) = 0;

@@ -7,6 +7,12 @@ see `licenses/LIBJUICE_LICENSE.txt`. Built from unmodified source at
 https://github.com/paullouisageneau/libjuice/tree/85efaa9b5e1cb3d4d534fc85d69cc9f7b76a66d7
 Source archive: https://github.com/paullouisageneau/libjuice/archive/85efaa9b5e1cb3d4d534fc85d69cc9f7b76a66d7.tar.gz
 
+## Monocypher v4.0.3
+
+Copyright (c) Loup Vaillant and contributors. Dual licensed under 2-clause BSD
+or CC0; see `licenses/MONOCYPHER_LICENSE.txt`.
+Source: https://github.com/LoupVaillant/Monocypher/tree/4.0.3
+
 Dusklight Online Relay uses
 [JSON for Modern C++](https://github.com/nlohmann/json), version 3.12.0, under
 the MIT License.

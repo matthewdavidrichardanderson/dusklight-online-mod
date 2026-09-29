@@ -71,13 +71,38 @@ function broadcast(members, value, exclude) {
   for (const ws of members) if (ws !== exclude) send(ws, value);
 }
 
-async function passwordHash(password, salt) {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password),
-    "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({
-    name: "PBKDF2", salt: Uint8Array.from(salt), iterations: 100_000, hash: "SHA-256",
-  }, key, 256);
-  return Array.from(new Uint8Array(bits));
+function hexBytes(hex, length) {
+  if (typeof hex !== "string" || hex.length !== length * 2 ||
+      !/^[0-9a-f]+$/.test(hex)) return null;
+  return Uint8Array.from(hex.match(/../g), byte => parseInt(byte, 16));
+}
+
+function randomHex() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function randomMeshKey() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)),
+    byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function hmac(keyBytes, messageBytes) {
+  const key = await crypto.subtle.importKey("raw", keyBytes,
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, messageBytes));
+}
+
+async function roomProofKey(verifier, saltHex) {
+  const salt = hexBytes(saltHex, 16);
+  if (!salt) return null;
+  const prefix = new TextEncoder().encode("dusklight-room-key-v1:");
+  return hmac(verifier, Uint8Array.from([...prefix, ...salt]));
+}
+
+async function roomProof(key, nonceHex) {
+  if (!hexBytes(nonceHex, 16)) return null;
+  return hmac(key, new TextEncoder().encode("dusklight-room-auth-v1:" + nonceHex));
 }
 
 function equalHash(a, b) {
@@ -101,19 +126,10 @@ function error(ws, reason, fatal = false) {
   if (fatal) close(ws, 4000, reason);
 }
 
-function directory(env) {
-  return env.PUBLIC_LOBBIES.get(env.PUBLIC_LOBBIES.idFromName("public-lobbies"));
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health") return Response.json({ service: "dusklight-rooms", version: 1 });
-    if (url.pathname === "/public-lobbies") {
-      if (request.method !== "GET" || url.search)
-        return new Response("Not found", { status: 404 });
-      return directory(env).fetch("https://public-lobbies.internal/list");
-    }
     if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       return new Response("WebSocket upgrade required", { status: 426 });
     if (!url.pathname.startsWith("/room/")) return new Response("Not found", { status: 404 });
@@ -126,35 +142,6 @@ export default {
     return env.ROOMS.get(id).fetch(request);
   },
 };
-
-export class PublicLobbies {
-  constructor(state) {
-    this.state = state;
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/list") {
-      const entries = await this.state.storage.list({ prefix: "room:" });
-      const rooms = [...entries.values()].sort((a, b) => a.name.localeCompare(b.name));
-      return Response.json({ rooms }, { headers: { "Cache-Control": "no-store" } });
-    }
-    if (request.method !== "POST" || url.pathname !== "/update")
-      return new Response("Not found", { status: 404 });
-    let entry;
-    try { entry = await request.json(); }
-    catch { return new Response("Invalid update", { status: 400 }); }
-    const key = normalizedRoom(entry?.name);
-    if (!key || !Number.isInteger(entry.players) ||
-        entry.players < 0 || entry.players > MAX_PLAYERS)
-      return new Response("Invalid update", { status: 400 });
-    if (entry.players === 0) await this.state.storage.delete(`room:${key}`);
-    else await this.state.storage.put(`room:${key}`, {
-      name: entry.name, players: entry.players, max_players: MAX_PLAYERS,
-    });
-    return new Response(null, { status: 204 });
-  }
-}
 
 export class Room {
   constructor(state, env) {
@@ -179,8 +166,6 @@ export class Room {
   async fetch(request) {
     await this.ready;
     return this.exclusive(async () => {
-      const roomKey = normalizedRoom(decodeURIComponent(new URL(request.url).pathname.slice(6)));
-      if (!roomKey) return new Response("Invalid room name", { status: 400 });
       const sockets = this.state.getWebSockets();
       if (sockets.length >= MAX_PLAYERS + MAX_PENDING ||
           sockets.filter(ws => !attachment(ws).joined).length >= MAX_PENDING)
@@ -188,8 +173,12 @@ export class Room {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
-      server.serializeAttachment({ joined: false, roomKey,
-        deadline: Date.now() + HELLO_TIMEOUT_MS });
+      const nonce = randomHex();
+      const salt = joined(this.state).length && typeof this.room?.salt === "string" ?
+        this.room.salt : randomHex();
+      server.serializeAttachment({ joined: false, deadline: Date.now() + HELLO_TIMEOUT_MS,
+        nonce, salt });
+      send(server, { type: "auth_challenge", nonce, salt });
       await this.armAlarm();
       return new Response(null, { status: 101, webSocket: client });
     });
@@ -259,20 +248,19 @@ export class Room {
 
   async hello(ws, message) {
     const name = message.name;
-    const password = message.password;
     const action = message.action;
-    if (message.protocol_version !== 3 || typeof name !== "string" ||
+    const pending = attachment(ws);
+    const proof = hexBytes(message.code_proof, 32);
+    if (message.protocol_version !== 5 || typeof name !== "string" ||
         !CLIENT_NAME.test(name) ||
-        typeof password !== "string" ||
-        (password.length !== 0 && password.length < 6) || password.length > 128 ||
-        normalizedRoom(message.room_id) !== attachment(ws).roomKey ||
+        !proof || !hexBytes(pending.nonce, 16) || !hexBytes(pending.salt, 16) ||
         (action !== "create" && action !== "join")) {
       error(ws, "invalid_hello", true); return;
     }
     const members = joined(this.state);
-    // An interrupted close/hibernation must not strand an empty room.
+    // An interrupted close/hibernation must not strand a code-protected
+    // room with no live members. Only a new host can recreate an empty room.
     if (this.room && !members.length) {
-      await this.updateListing(this.room, 0);
       this.room = null;
       await this.state.storage.delete("room");
     }
@@ -281,17 +269,27 @@ export class Room {
       if (action !== "create") { error(ws, "lobby_not_found", true); return; }
       const configured = settings(message.settings);
       if (!configured) { error(ws, "invalid_settings", true); return; }
-      const salt = Array.from(crypto.getRandomValues(new Uint8Array(16)));
-      this.room = { salt, hash: await passwordHash(password, salt), owner: "",
-        name: message.room_id, public: password.length === 0,
+      const verifier = hexBytes(message.code_verifier, 32);
+      if (!verifier) { error(ws, "invalid_hello", true); return; }
+      const key = await roomProofKey(verifier, pending.salt);
+      if (!equalHash(Array.from(proof), Array.from(await roomProof(key, pending.nonce)))) {
+        error(ws, "invalid_lobby_code_proof", true); return;
+      }
+      this.room = { salt: pending.salt, proofKey: Array.from(key),
+        meshKey: randomMeshKey(), owner: "",
         settings: configured, generation: 0, pending: null };
     } else {
-      const hash = await passwordHash(password, this.room.salt);
-      if (!equalHash(hash, this.room.hash)) { error(ws, "invalid_password", true); return; }
-      if (action === "create" && members.length) {
-        // A reconnecting host may have lost its old socket. Joining an extant
-        // room must not silently steal ownership from current members.
-        if (member(this.state, this.room.owner)) { error(ws, "lobby_exists", true); return; }
+      if (action === "create" && member(this.state, this.room.owner)) {
+        error(ws, "lobby_exists", true); return;
+      }
+      if (typeof this.room.salt !== "string" || !Array.isArray(this.room.proofKey) ||
+          !hexBytes(this.room.meshKey, 32)) {
+        error(ws, "protocol_version", true); return;
+      }
+      if (pending.salt !== this.room.salt ||
+          !equalHash(Array.from(proof),
+            Array.from(await roomProof(Uint8Array.from(this.room.proofKey), pending.nonce)))) {
+        error(ws, "bad_lobby_code", true); return;
       }
     }
     const id = newClientId(this.state);
@@ -301,9 +299,9 @@ export class Room {
     if (!member(this.state, this.room.owner)) this.room.owner = id;
     await this.state.storage.put("room", this.room);
     const all = joined(this.state);
-    await this.updateListing(this.room, all.length);
     const ready = readiness(all);
-    send(ws, { type: "welcome", protocol_version: 3, room_id: message.room_id,
+    send(ws, { type: "welcome", protocol_version: 5, room_id: message.room_id,
+      mesh_key: this.room.meshKey,
       client_id: id, owner_client_id: this.room.owner, peers: members.map(other => ({
         client_id: attachment(other).id, name: attachment(other).name,
         want_puppet: attachment(other).want_puppet,
@@ -312,20 +310,6 @@ export class Room {
     broadcast(members, { type: "peer_joined", client_id: id, name,
       want_puppet: info.want_puppet, ...ready });
     await this.armAlarm();
-  }
-
-  async updateListing(room, players) {
-    if (!room?.public) return;
-    try {
-      const response = await directory(this.env).fetch("https://public-lobbies.internal/update", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: room.name, players }),
-      });
-      if (!response.ok) console.error("Public lobby directory update failed", response.status);
-    } catch (error) {
-      // A directory outage must not prevent players from connecting or leaving.
-      console.error("Public lobby directory unavailable", error);
-    }
   }
 
   async changeSettings(ws, message) {
@@ -384,10 +368,8 @@ export class Room {
     ws.serializeAttachment({ joined: false });
     const members = joined(this.state);
     if (!members.length) {
-      const departedRoom = this.room;
       this.room = null;
       await this.state.storage.delete("room");
-      await this.updateListing(departedRoom, 0);
       await this.armAlarm();
       return;
     }
@@ -402,7 +384,6 @@ export class Room {
     const previousOwner = this.room.owner;
     if (previousOwner === own.id) this.room.owner = attachment(members[0]).id;
     await this.state.storage.put("room", this.room);
-    await this.updateListing(this.room, members.length);
     broadcast(members, { type: "peer_left", client_id: own.id, ...readiness(members) });
     if (previousOwner !== this.room.owner)
       broadcast(members, { type: "owner_changed", owner_client_id: this.room.owner });

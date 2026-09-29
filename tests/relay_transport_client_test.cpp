@@ -76,7 +76,8 @@ int main(int argc, char** argv) {
     RelayConfig ownerConfig;
     ownerConfig.name = "Owner";
     ownerConfig.room = "transport-client-test";
-    ownerConfig.password = "testing-only";
+    ownerConfig.lobbyCode = "testing-only";
+    ownerConfig.sessionKey = "integration-endpoint-key";
     ownerConfig.host = "127.0.0.1";
     ownerConfig.port = static_cast<uint16_t>(parsedPort);
     ownerConfig.createRoom = true;
@@ -99,7 +100,7 @@ int main(int argc, char** argv) {
     joinConfig.settings.voiceProximity = true;
     joinConfig.settings.voiceProximityRange = 50;
     auto rejectedConfig = joinConfig;
-    rejectedConfig.password = "incorrect-password";
+    rejectedConfig.lobbyCode = "incorrect-code";
     if (!joiner.start_relay(rejectedConfig, &error) ||
         !wait_until(owner, joiner, [&] { return !joiner.status().enabled; })) {
         fail("rejected lobby join remained enabled");

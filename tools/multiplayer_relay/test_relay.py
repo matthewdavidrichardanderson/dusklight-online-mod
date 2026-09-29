@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import hmac
 import os
 import socket
 import struct
@@ -121,20 +123,50 @@ class RelayClient:
         self.inbox = deque()
         self.closed = False
         self.auto_barriers = True
+        self.authenticated = False
         self.instances.add(self)
         self.port = port
-        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp.bind(("127.0.0.1", 0))
-        self.udp.settimeout(0.3)
+        self.udp = self.sock
 
     def close(self) -> None:
         self.instances.discard(self)
         self.sock.close()
-        self.udp.close()
 
     def send(self, message: dict[str, Any]) -> None:
+        if message.get("type") == "hello":
+            message = self.prepare_hello(message)
+            if message is None:
+                return
         payload = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
         self.sock.sendall(payload)
+
+    def prepare_hello(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        message = dict(message)
+        code = message.pop("lobby_code", "")
+        if self.authenticated:
+            return message
+        if not 6 <= len(code) <= 128:
+            raise ValueError("lobby code must be 6-128 characters")
+        room = message["room_id"]
+        action = message["action"]
+        self.sock.sendall((json.dumps({"type": "auth_begin", "protocol_version": 4,
+            "room_id": room, "action": action}) + "\n").encode("utf-8"))
+        challenge = self.receive()
+        if challenge["type"] != "auth_challenge":
+            self.inbox.appendleft(challenge)
+            return None
+        verifier = hashlib.pbkdf2_hmac("sha256", code.encode(),
+            b"dusklight-lobby-code-v1:" + room.lower().encode() + b"\0" +
+            b"relay-test-endpoint-key", 100_000)
+        key = hmac.new(verifier, b"dusklight-room-key-v1:" +
+            bytes.fromhex(challenge["salt"]), "sha256").digest()
+        message["code_proof"] = hmac.new(key,
+            ("dusklight-room-auth-v1:" + challenge["nonce"]).encode(),
+            "sha256").hexdigest()
+        if action == "create":
+            message["code_verifier"] = verifier.hex()
+        self.authenticated = True
+        return message
 
     def send_bytes(self, payload: bytes) -> None:
         self.sock.sendall(payload)
@@ -205,6 +237,8 @@ class RelayProcess:
                 str(self.port),
                 "--hello-timeout-ms",
                 "2000",
+                "--endpoint-key",
+                "relay-test-endpoint-key",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -244,7 +278,7 @@ class RelayProcess:
 def hello(
     name: str,
     room: str = "phase12",
-    password: str = "secret",
+    lobby_code: str = "secret",
     action: str = "join",
     settings: dict[str, bool] | None = None,
     semantic_visuals: bool | None = True,
@@ -252,10 +286,10 @@ def hello(
 ) -> dict[str, Any]:
     message: dict[str, Any] = {
         "type": "hello",
-        "protocol_version": 2,
+        "protocol_version": 4,
         "action": action,
         "room_id": room,
-        "password": password,
+        "lobby_code": lobby_code,
         "name": name,
         "session_id": f"session-{name}",
         "want_puppet": True,
@@ -473,7 +507,7 @@ class RelayTests(unittest.TestCase):
         with self.assertRaises(socket.timeout):
             receiver.udp.recvfrom(2048)
 
-    def test_udp_ack_routing_and_authenticated_rebind(self) -> None:
+    def test_udp_ack_routing_and_plaintext_rebind_rejection(self) -> None:
         sender, sender_welcome = self.join("UdpAckSender", "udp-ack-rebind")
         receiver, receiver_welcome = self.join("UdpAckReceiver", "udp-ack-rebind")
         sender.expect_type("peer_joined")
@@ -512,15 +546,14 @@ class RelayTests(unittest.TestCase):
                 2, sender_welcome["client_id"], b"rebound-pose", 18
             )
             rebound.sendto(rebound_pose, ("127.0.0.1", self.relay.port))
-            routed_pose, _ = receiver.udp.recvfrom(2048)
-            self.assertEqual(routed_pose, rebound_pose)
-
-            sender.udp.sendto(
-                udp_packet(2, sender_welcome["client_id"], b"old-endpoint", 19),
-                ("127.0.0.1", self.relay.port),
-            )
             with self.assertRaises(socket.timeout):
                 receiver.udp.recvfrom(2048)
+
+            valid_pose = udp_packet(2, sender_welcome["client_id"], b"encrypted", 19)
+            sender.udp.sendto(valid_pose,
+                ("127.0.0.1", self.relay.port),
+            )
+            self.assertEqual(receiver.udp.recvfrom(2048)[0], valid_pose)
         finally:
             rebound.close()
 
@@ -619,7 +652,8 @@ class RelayTests(unittest.TestCase):
 
     def test_fragmented_and_coalesced_input(self) -> None:
         client = self.client()
-        encoded = json.dumps(hello("Fragmented", "framing", action="create")).encode("utf-8") + b"\n"
+        prepared = client.prepare_hello(hello("Fragmented", "framing", action="create"))
+        encoded = json.dumps(prepared).encode("utf-8") + b"\n"
         for byte in encoded:
             client.send_bytes(bytes([byte]))
         client.expect_type("welcome")
@@ -628,12 +662,12 @@ class RelayTests(unittest.TestCase):
         client.expect_type("pong")
         client.expect_type("pong")
 
-    def test_password_duplicate_name_and_repeated_hello(self) -> None:
+    def test_lobby_code_duplicate_name_and_repeated_hello(self) -> None:
         first, first_welcome = self.join("SameName", "validation")
 
         wrong = self.client()
-        wrong.send(hello("Other", "validation", "wrong-password"))
-        wrong.expect_error("bad_password")
+        wrong.send(hello("Other", "validation", "wrong-code"))
+        wrong.expect_error("bad_lobby_code")
 
         duplicate = self.client()
         duplicate.send(hello("samename", "validation"))
@@ -645,6 +679,17 @@ class RelayTests(unittest.TestCase):
 
         first.send(hello("Moved", "other-room"))
         first.expect_error("already_joined")
+
+    def test_lobby_proof_cannot_be_replayed(self) -> None:
+        host = self.client()
+        created = host.prepare_hello(hello("Host", "replay-test", action="create"))
+        host.send(created)
+        host.expect_type("welcome")
+        replay = self.client()
+        attempted = replay.prepare_hello(hello("Replay", "replay-test"))
+        attempted["code_proof"] = created["code_proof"]
+        replay.send(attempted)
+        replay.expect_error("bad_lobby_code")
 
     def test_routing_and_sender_identity(self) -> None:
         first, first_welcome = self.join("Sender", "routing")
@@ -688,7 +733,7 @@ class RelayTests(unittest.TestCase):
             first.send({"type": message_type, "enabled": True})
             first.expect_error("unknown_message")
 
-    def test_complete_protocol_2_gameplay_inventory_routes(self) -> None:
+    def test_complete_protocol_4_gameplay_inventory_routes(self) -> None:
         sender, sender_welcome = self.join("InventorySender", "inventory")
         receiver, _ = self.join("InventoryReceiver", "inventory")
         sender.expect_type("peer_joined")
@@ -800,14 +845,14 @@ class RelayTests(unittest.TestCase):
         client.send(hello("Recovered", "validation-recovery", action="create"))
         client.expect_type("welcome")
 
-    def test_explicit_create_join_and_password_rules(self) -> None:
+    def test_explicit_create_join_and_code_rules(self) -> None:
         missing = self.client()
         missing.send(hello("Missing", "does-not-exist"))
         missing.expect_error("lobby_not_found")
 
         short = self.client()
-        short.send(hello("Short", "short-password", "12345", action="create"))
-        short.expect_error("password_too_short")
+        with self.assertRaises(ValueError):
+            short.send(hello("Short", "short-password", "12345", action="create"))
 
         owner = self.client()
         owner.send(hello("Owner", "explicit-room", action="create"))

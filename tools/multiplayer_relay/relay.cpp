@@ -1,4 +1,5 @@
 #include "dusklight_online/net/peer_delivery.hpp"
+#include "dusklight_online/net/auth_code.hpp"
 #include "dusklight_online/net/reliable_json.hpp"
 #include "dusk/multiplayer/invite_code.hpp"
 #include "dusklight_online/net/udp_connection.hpp"
@@ -64,18 +65,16 @@ namespace {
 using json = nlohmann::json;
 using dusklight_online::net::UdpConnection;
 
-constexpr int kProtocolVersion = 2;
+constexpr int kProtocolVersion = 4;
 constexpr const char* kSemanticVisualCapability = "semantic_visual_v1";
 constexpr const char* kSnapshotDeltaCapability = "semantic_snapshot_delta_v1";
 constexpr size_t kMaxLineBytes = dusklight_online::net::reliablePeerFrameLimit;
 constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxRoomClients = 8;
 constexpr size_t kMaxRoomIdBytes = 64;
-constexpr size_t kMaxPasswordBytes = 128;
 constexpr size_t kMaxUsernameBytes = 32;
 constexpr size_t kMaxReliableSequences = 4096;
 constexpr size_t kMaxReadBytesPerTick = 256 * 1024;
-constexpr size_t kMinPasswordBytes = 6;
 constexpr double kHelloTimeoutSeconds = 10.0;
 constexpr size_t kUdpSenderIdBytes = 32;
 constexpr size_t kMaxUdpDatagramBytes = 2048;
@@ -298,6 +297,10 @@ struct Client {
     std::string id;
     std::string peerEndpoint;
     std::string roomId;
+    std::string pendingRoomId;
+    std::string pendingAction;
+    std::string authNonce;
+    std::string authSalt;
     std::string name;
     std::string stage;
     std::string rxBuffer;
@@ -325,7 +328,8 @@ struct Client {
 
 struct Room {
     std::string id;
-    std::string password;
+    std::string authSalt;
+    std::string proofKey;
     std::vector<std::string> clientIds;
     std::string ownerClientId;
     uint64_t settingsGeneration = 0;
@@ -348,6 +352,7 @@ struct Options {
     int publicPort = 0;
     double helloTimeoutSeconds = kHelloTimeoutSeconds;
     bool verbose = false;
+    std::string endpointKey;
 };
 
 json room_settings_json(const Room& room) {
@@ -433,7 +438,7 @@ public:
 #endif
 
         if (!mConnections.open(mOptions.host, static_cast<uint16_t>(mOptions.port),
-                               FD_SETSIZE - 2, true, true)) {
+                               FD_SETSIZE - 2, true, true, mOptions.endpointKey)) {
             std::cerr << "UDP listen failed\n";
             return false;
         }
@@ -590,6 +595,30 @@ private:
         const std::string type = message.value("type", "");
         if (type != "peer_reliable" && message.dump().size() > dusklight_online::net::reliableJsonLimit) {
             reject_and_close(client,"message_too_large"); return;
+        }
+        if (type == "auth_begin") {
+            if (!client.roomId.empty() || !client.authNonce.empty() ||
+                message.value("protocol_version", -1) != kProtocolVersion) {
+                reject_and_close(client, "invalid_auth_begin"); return;
+            }
+            const std::string roomId = trim(message.value("room_id", ""));
+            const std::string action = message.value("action", "");
+            if (roomId.empty() || roomId.size() > kMaxRoomIdBytes ||
+                (action != "create" && action != "join")) {
+                reject_and_close(client, "invalid_auth_begin"); return;
+            }
+            const auto room = mRooms.find(roomId);
+            if (room == mRooms.end() && action != "create") {
+                reject_and_close(client, "lobby_not_found"); return;
+            }
+            client.pendingRoomId = roomId;
+            client.pendingAction = action;
+            client.authNonce = dusklight_online::net::auth::random_nonce();
+            client.authSalt = room == mRooms.end() ?
+                dusklight_online::net::auth::random_nonce() : room->second.authSalt;
+            send_json(client, {{"type", "auth_challenge"},
+                {"nonce", client.authNonce}, {"salt", client.authSalt}});
+            return;
         }
         if (type == "hello") {
             if (!client.roomId.empty()) {
@@ -834,7 +863,7 @@ private:
         std::string roomId = trim(hello.value("room_id", ""));
         std::string name = trim(hello.value("name", ""));
         const std::string action = hello.value("action", "");
-        const std::string password = hello.value("password", "");
+        const std::string proof = hello.value("code_proof", "");
         if (roomId.empty()) {
             send_error(client, "missing_lobby");
             return;
@@ -851,28 +880,33 @@ private:
             send_error(client, "username_too_long");
             return;
         }
-        if (password.size() > kMaxPasswordBytes) {
-            send_error(client, "password_too_long");
-            return;
-        }
-        if (password.size() < kMinPasswordBytes) {
-            send_error(client, "password_too_short");
-            return;
-        }
         if (action != "create" && action != "join") {
             send_error(client, "invalid_action");
             return;
         }
 
+        if (roomId != client.pendingRoomId || action != client.pendingAction ||
+            client.authNonce.empty() || !dusklight_online::net::auth::unhex_digest(proof)) {
+            reject_and_close(client, "invalid_lobby_code_proof"); return;
+        }
         auto roomIt = mRooms.find(roomId);
         if (action == "create") {
             if (roomIt != mRooms.end()) {
                 send_error(client, "lobby_exists");
                 return;
             }
+            const auto verifier = dusklight_online::net::auth::unhex_digest(
+                hello.value("code_verifier", ""));
+            const auto key = verifier ? dusklight_online::net::auth::room_proof_key(
+                *verifier, client.authSalt) : std::nullopt;
+            if (!key || !dusklight_online::net::auth::equal(proof,
+                dusklight_online::net::auth::room_proof(*key, client.authNonce))) {
+                reject_and_close(client, "invalid_lobby_code_proof"); return;
+            }
             Room room;
             room.id = roomId;
-            room.password = password;
+            room.authSalt = client.authSalt;
+            room.proofKey = dusklight_online::net::auth::hex(*key);
             room.ownerClientId = client.id;
             if (!apply_room_settings(room, hello.value("settings", json::object()))) {
                 send_error(client, "invalid_settings");
@@ -882,8 +916,12 @@ private:
         } else if (roomIt == mRooms.end()) {
             send_error(client, "lobby_not_found");
             return;
-        } else if (roomIt->second.password != password) {
-            send_error(client, "bad_password");
+        } else if (client.authSalt != roomIt->second.authSalt ||
+                   !dusklight_online::net::auth::equal(proof,
+                   dusklight_online::net::auth::room_proof(
+                     *dusklight_online::net::auth::unhex_digest(roomIt->second.proofKey),
+                     client.authNonce))) {
+            send_error(client, "bad_lobby_code");
             return;
         }
 
@@ -1406,6 +1444,8 @@ Options parse_options(int argc, char** argv) {
                 std::exit(2);
             }
             options.helloTimeoutSeconds = static_cast<double>(timeoutMs) / 1000.0;
+        } else if (arg == "--endpoint-key") {
+            options.endpointKey = next_value("--endpoint-key");
         } else if (arg == "--verbose") {
             options.verbose = true;
         } else if (arg == "--version") {
@@ -1437,6 +1477,11 @@ Options parse_options(int argc, char** argv) {
         std::cerr << "--public-port must be between 1 and 65535\n";
         std::exit(2);
     }
+    if (options.endpointKey.empty()) options.endpointKey = dusk::multiplayer::make_session_token(16);
+    if (options.endpointKey.size() < 16) {
+        std::cerr << "--endpoint-key must contain at least 16 characters\n";
+        std::exit(2);
+    }
     return options;
 }
 
@@ -1451,7 +1496,7 @@ int main(int argc, char** argv) {
         endpoint.port = options.publicPort;
         endpoint.room = "relay-endpoint";
         endpoint.sessionId = "relay";
-        endpoint.sessionKey = "endpoint";
+        endpoint.sessionKey = options.endpointKey;
         std::cout << "Relay code: " << dusk::multiplayer::create_invite_code(endpoint)
                   << std::endl;
 
