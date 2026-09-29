@@ -6,6 +6,9 @@
 #include "d/d_com_inf_game.h"
 #include "d/d_save.h"
 #include "d/d_kankyo.h"
+#include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_b_gnd.h"
+#include "f_op/f_op_actor_mng.h"
 #include "f_op/f_op_scene_mng.h"
 #include "f_op/f_op_overlap_mng.h"
 #include "f_pc/f_pc_manager.h"
@@ -91,6 +94,50 @@ bool initialize() {
 
 bool mode_active() {
     return manager != nullptr && manager->isCurrentGameMode("vanilla_speedrun");
+}
+
+bool timer_running() {
+    return mode_active() && timer != nullptr && timer->m_isRunStarted;
+}
+
+bool local_finish_started() {
+    if (!mode_active()) return false;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr || std::strcmp(stage, "D_MN09B") != 0) return false;
+    const auto* link = static_cast<const daAlink_c*>(daPy_getPlayerActorClass());
+    return link != nullptr && link->mProcID == daAlink_c::PROC_GANON_FINISH;
+}
+
+FinishReadiness finish_readiness() {
+    if (!timer_running() || fpcM_SearchByName(fpcNm_PLAY_SCENE_e) == nullptr)
+        return FinishReadiness::Ineligible;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr || std::strcmp(stage, "D_MN09B") != 0 ||
+        !dComIfGs_isSaveDunSwitch(1)) return FinishReadiness::Ineligible;
+    auto* ganondorf = static_cast<b_gnd_class*>(fpcM_SearchByName(fpcNm_B_GND_e));
+    if (ganondorf == nullptr || ganondorf->checkRide() ||
+        ganondorf->mActionMode < 10 || ganondorf->mActionMode >= 22 ||
+        fopAcM_SearchByID(ganondorf->mMantChildID) == nullptr ||
+        dComIfGp_getHorseActor() == nullptr || daPy_getPlayerActorClass() == nullptr)
+        return FinishReadiness::Ineligible;
+    if (ganondorf->mDemoCamMode != 0 || ganondorf->mNoDrawTimer != 0 ||
+        dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage() ||
+        fopOvlpM_IsPeek() || fopOvlpM_IsDoingReq() || mDoRst::isReset() ||
+        fpcM_SearchByName(fpcNm_GAMEOVER_e) != nullptr)
+        return FinishReadiness::Busy;
+    return FinishReadiness::Ready;
+}
+
+bool start_finish_sequence() {
+    if (finish_readiness() != FinishReadiness::Ready) return false;
+    auto* ganondorf = static_cast<b_gnd_class*>(fpcM_SearchByName(fpcNm_B_GND_e));
+    if (ganondorf == nullptr) return false;
+    // Match the native final-blow transition in b_gnd_g_down. Its demo camera
+    // requests the event and starts Link's finisher, which stops the timer.
+    ganondorf->mActionMode = 22;
+    ganondorf->mMoveMode = 0;
+    ganondorf->mDemoCamMode = 60;
+    return true;
 }
 
 bool can_start_here() {

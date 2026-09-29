@@ -841,6 +841,7 @@ void OnlineApp::update() {
             game::push_online_notification("Could not send chat message.", 4.0f, true);
         }
     }
+    tick_speedrun_finish();
     transport_.tick();
     const net::Status captureStatus = transport_.status();
     if (voice_ != nullptr) {
@@ -952,6 +953,7 @@ void OnlineApp::update() {
         case net::EventKind::Disconnected:
             clear_speedrun_request();
             speedrunResetAt_ = {};
+            speedrunFinishPendingUntil_ = {};
             if (voice_ != nullptr) voice_->stop();
             if (event.ingress.mode == net::Mode::CloudRoom)
                 log_info("MP_CLOUD_DISCONNECT reason=" + event.detail);
@@ -1017,7 +1019,7 @@ void OnlineApp::update() {
                     type == "speedrun_prompt" || type == "speedrun_player_ready" ||
                     type == "speedrun_ready_count" || type == "speedrun_countdown" ||
                     type == "speedrun_cancel" || type == "speedrun_start" ||
-                    type == "speedrun_reset") {
+                    type == "speedrun_reset" || type == "speedrun_finish") {
                     handle_speedrun_message(event);
                     break;
                 }
@@ -2272,7 +2274,8 @@ ModResult OnlineApp::build_speedrun_tab(ModContext*, UiWindowHandle, UiElementHa
     svc_ui->elem_set_class(mod_ctx, right, "online-session-pane", true);
     svc_ui->pane_add_rml(mod_ctx, right,
         "<p>Start requires all three Speedrun save slots to be empty for every "
-        "player. Reset ends the timer and soft resets everyone.</p>",
+        "player. Reset ends the timer and soft resets everyone. "
+        "Finish sync requires Sync flags; Start and Reset do not.</p>",
         nullptr);
     return MOD_OK;
 }
@@ -2964,6 +2967,60 @@ void OnlineApp::tick_speedrun() {
     }
 }
 
+void OnlineApp::tick_speedrun_finish() {
+    const bool running = speedrunAvailable_ && game::speedrun::timer_running();
+    const bool localFinishStarted = game::speedrun::local_finish_started();
+    const net::Status status = transport_.status();
+    const bool syncFlags = status.enabled && status.settings.syncFlags;
+    if ((running && !speedrunTimerWasRunning_) ||
+        (!localFinishStarted && speedrunLocalFinishWasStarted_)) {
+        speedrunFinishHandled_ = false;
+        speedrunFinishPendingUntil_ = {};
+    }
+    if (speedrunFinishPendingUntil_ != std::chrono::steady_clock::time_point{}) {
+        const auto readiness = game::speedrun::finish_readiness();
+        if (!syncFlags || !running ||
+            speedrunResetAt_ != std::chrono::steady_clock::time_point{} ||
+            std::chrono::steady_clock::now() >= speedrunFinishPendingUntil_ ||
+            readiness == game::speedrun::FinishReadiness::Ineligible) {
+            speedrunFinishPendingUntil_ = {};
+        } else if (readiness == game::speedrun::FinishReadiness::Ready &&
+                   game::speedrun::start_finish_sequence()) {
+            speedrunFinishPendingUntil_ = {};
+            speedrunFinishHandled_ = true;
+            log_info("Speedrun finish started from peer event");
+        }
+    }
+    if (!running && speedrunTimerWasRunning_ && syncFlags &&
+        localFinishStarted && !speedrunLocalFinishWasStarted_ &&
+        !speedrunFinishHandled_) {
+        speedrunFinishHandled_ = true;
+        const bool connected = status.mode == net::Mode::DirectHost ?
+            status.state == net::State::Connected : status.welcomed;
+        const auto& peers = transport_.peers();
+        const bool allPeersReady = !peers.empty() &&
+            std::all_of(peers.begin(), peers.end(),
+                [this](const auto& peer) {
+                    return transport_.reliable_peer_ready(peer.first);
+                });
+        if (status.enabled && connected && !peers.empty()) {
+            const nlohmann::json finish = {{"type", "speedrun_finish"}};
+            if (allPeersReady) {
+                if (!transport_.send(finish))
+                    log_info("Could not send Speedrun finish to peers");
+            } else {
+                for (const auto& [peerId, _] : peers) {
+                    if (transport_.reliable_peer_ready(peerId) &&
+                        !transport_.send_to(peerId, finish))
+                        log_info("Could not send Speedrun finish to peer " + peerId);
+                }
+            }
+        }
+    }
+    speedrunTimerWasRunning_ = running;
+    speedrunLocalFinishWasStarted_ = localFinishStarted;
+}
+
 void OnlineApp::commit_speedrun_start() {
     if (speedrunPhase_ != SpeedrunPhase::Countdown ||
         !speedrunLocalReady_ || !speedrunLocalPlayerReady_ ||
@@ -2994,6 +3051,21 @@ void OnlineApp::handle_speedrun_message(const net::Event& event) {
     const net::Status status = transport_.status();
     if (!status.enabled) return;
     const std::string type = event.message.value("type", std::string());
+    if (type == "speedrun_finish") {
+        const bool connected = status.mode == net::Mode::DirectHost ?
+            status.state == net::State::Connected : status.welcomed;
+        if (!connected || !status.settings.syncFlags || event.peerId.empty() ||
+            speedrunFinishHandled_ ||
+            speedrunFinishPendingUntil_ != std::chrono::steady_clock::time_point{} ||
+            speedrunPhase_ != SpeedrunPhase::None ||
+            speedrunResetAt_ != std::chrono::steady_clock::time_point{} ||
+            !game::speedrun::timer_running() ||
+            game::speedrun::finish_readiness() == game::speedrun::FinishReadiness::Ineligible)
+            return;
+        speedrunFinishPendingUntil_ = std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(3);
+        return;
+    }
     const bool localOwner = status.mode == net::Mode::DirectHost ||
         (net::is_room_mode(status.mode) && status.isOwner);
     const bool fromOwner = status.mode == net::Mode::DirectJoin ?
@@ -3003,6 +3075,7 @@ void OnlineApp::handle_speedrun_message(const net::Event& event) {
     if (type == "speedrun_reset") {
         if (fromOwner && game::speedrun::mode_active()) {
             clear_speedrun_request();
+            speedrunFinishPendingUntil_ = {};
             speedrunResetAt_ = std::chrono::steady_clock::now() +
                                std::chrono::milliseconds(500);
         }

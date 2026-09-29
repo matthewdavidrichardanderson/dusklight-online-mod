@@ -309,6 +309,43 @@ int main() {
         drain_for_type(bob, "speedrun_player_ready"))
         fail("speedrun player readiness must go only to the host");
 
+    // Race controls must still work when progression sync and remote player
+    // interaction are disabled for an independent run.
+    const auto normalSettings = host.status().settings;
+    auto raceSettings = normalSettings;
+    raceSettings.syncFlags = false;
+    raceSettings.dummyModel = false;
+    raceSettings.remoteCollision = false;
+    raceSettings.pvp = false;
+    if (!host.publish_room_settings(raceSettings)) fail("race settings publish");
+    pump(host, alice, bob, 40);
+    if (alice.status().settings.syncFlags || alice.status().settings.dummyModel ||
+        alice.status().settings.remoteCollision || alice.status().settings.pvp ||
+        bob.status().settings.syncFlags || bob.status().settings.dummyModel ||
+        bob.status().settings.remoteCollision || bob.status().settings.pvp)
+        fail("race settings did not reach guests");
+    if (!host.send({{"type", "speedrun_check"}, {"request_id", 9U}}))
+        fail("race save check send");
+    pump(host, alice, bob, 40);
+    for (Transport* recipient : {&alice, &bob}) {
+        if (!drain_for_type(*recipient, "speedrun_check"))
+            fail("race save check did not reach guest");
+    }
+    if (!host.send({{"type", "speedrun_start"}, {"request_id", 9U}}))
+        fail("race start send");
+    pump(host, alice, bob, 40);
+    if (!drain_for_type(alice, "speedrun_start") ||
+        !drain_for_type(bob, "speedrun_start"))
+        fail("race start did not reach guests");
+    if (!alice.send({{"type", "speedrun_ready"}, {"request_id", 9U},
+                     {"ready", true}}))
+        fail("race readiness send");
+    pump(host, alice, bob, 30);
+    if (!drain_for_type(host, "speedrun_ready"))
+        fail("race readiness did not reach host");
+    if (!host.publish_room_settings(normalSettings)) fail("restore room settings");
+    pump(host, alice, bob, 40);
+
     // Appearance is reliable presence metadata, including the empty default.
     for (const auto& [color, outfit] : {std::pair{"C06030", "204060"},
                                       std::pair{"C06030", ""}, std::pair{"", "204060"},

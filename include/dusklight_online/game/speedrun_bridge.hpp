@@ -9,6 +9,11 @@ namespace dusklight_online::game::speedrun {
 // Uses the native speedrun mode and card routines from the official host.
 bool initialize();
 bool mode_active();
+bool timer_running();
+bool local_finish_started();
+enum class FinishReadiness { Ineligible, Busy, Ready };
+FinishReadiness finish_readiness();
+bool start_finish_sequence();
 bool can_start_here();
 bool reset_run();
 bool start_run();

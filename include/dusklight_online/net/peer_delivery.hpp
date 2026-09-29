@@ -17,7 +17,7 @@ inline bool peer_delivery_type(std::string_view type) {
         "save_recovery_setting","save_recovery_setting_request",
         "speedrun_check","speedrun_ready","speedrun_prompt","speedrun_player_ready",
         "speedrun_ready_count","speedrun_countdown","speedrun_cancel",
-        "speedrun_start","speedrun_reset"};
+        "speedrun_start","speedrun_reset","speedrun_finish"};
     for(auto value:types) if(type==value) return true;
     return false;
 }

@@ -161,6 +161,10 @@ private:
     std::chrono::steady_clock::time_point speedrunHoldStart_{};
     std::chrono::steady_clock::time_point speedrunCountdownAt_{};
     std::chrono::steady_clock::time_point speedrunResetAt_{};
+    std::chrono::steady_clock::time_point speedrunFinishPendingUntil_{};
+    bool speedrunTimerWasRunning_ = false;
+    bool speedrunLocalFinishWasStarted_ = false;
+    bool speedrunFinishHandled_ = false;
     bool speedrunLocalReady_ = false;
     bool speedrunPeerReady_ = false;
     bool speedrunLocalPlayerReady_ = false;
@@ -209,6 +213,7 @@ private:
     void open_player_options_window();
     void open_speedrun_window();
     void tick_speedrun();
+    void tick_speedrun_finish();
     void update_speedrun_prompt();
     void begin_speedrun_ready();
     void begin_speedrun_countdown();
