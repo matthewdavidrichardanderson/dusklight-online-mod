@@ -118,7 +118,8 @@ void pump(Transport& host, Transport& first, Transport& second, int ticks = 300)
 
 int main() {
     constexpr dusklight_online::net::RoomSettings defaults{};
-    static_assert(defaults.dummyModel && defaults.syncFlags && !defaults.syncWorld &&
+    static_assert(defaults.dummyModel && defaults.syncFlags && defaults.saveRecovery &&
+                  !defaults.syncWorld &&
                   defaults.remoteCollision && defaults.pvp &&
                   defaults.voiceProximity && defaults.voiceProximityRange == 50);
 #if defined(_WIN32)
@@ -497,6 +498,9 @@ int main() {
     if (!host.publish_voice_settings(true, 75)) {
         fail("host peer voice settings publish failed");
     }
+    if (!host.publish_save_recovery_setting(false)) {
+        fail("host save recovery setting publish failed");
+    }
     pump(host, alice, bob, 30);
     if (alice.status().settings.remoteCollision || alice.status().settings.pvp) {
         fail("joiner did not apply direct settings messages");
@@ -508,6 +512,15 @@ int main() {
         alice.status().settings.voiceProximityRange != 75 ||
         bob.status().settings.voiceProximityRange != 75) {
         fail("host proximity changes were not applied by joiners");
+    }
+    if (alice.status().settings.saveRecovery || bob.status().settings.saveRecovery ||
+        !alice.status().saveRecoverySettingsReady) {
+        fail("joiners did not apply host save recovery setting");
+    }
+    alice.send({{"type", "save_recovery_setting"}, {"enabled", true}});
+    pump(host, alice, bob, 30);
+    if (bob.status().settings.saveRecovery || host.status().settings.saveRecovery) {
+        fail("direct joiner changed host-controlled save recovery setting");
     }
     alice.send({{"type", "voice_settings"}, {"enabled", false},
                 {"range_percent", 0}});

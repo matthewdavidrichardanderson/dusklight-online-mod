@@ -222,18 +222,24 @@ int main() {
         host.status().settings.voiceProximityRange != 125)
         fail("non-owner changed peer voice settings");
     if (!host.publish_voice_settings(true, 75)) fail("host peer voice update failed");
+    if (!host.publish_save_recovery_setting(false))
+        fail("host peer save recovery update failed");
     const auto voiceDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < voiceDeadline &&
            (!guest.status().settings.voiceProximity ||
-            guest.status().settings.voiceProximityRange != 75)) {
+            guest.status().settings.voiceProximityRange != 75 ||
+            !guest.status().saveRecoverySettingsReady ||
+            guest.status().settings.saveRecovery)) {
         host.tick(); guest.tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (!guest.status().settings.voiceProximity ||
         guest.status().settings.voiceProximityRange != 75 ||
+        !guest.status().saveRecoverySettingsReady ||
+        guest.status().settings.saveRecovery ||
         broker.gameplayForwardingAttempt || broker.voiceSettingsOnRoomChannel ||
         broker.roomSettingsMessages != 0)
-        fail("host peer voice update did not stay on the peer path");
+        fail("host peer settings did not stay on the peer path");
     Transport late;
     configuration.name = "Late";
     configuration.settings.voiceProximity = false;
@@ -242,29 +248,36 @@ int main() {
         fail(error.c_str());
     const auto lateDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
     while (std::chrono::steady_clock::now() < lateDeadline &&
-           (!late.status().voiceSettingsReady || late.status().natPeerCount != 2)) {
+           (!late.status().voiceSettingsReady || !late.status().saveRecoverySettingsReady ||
+            late.status().natPeerCount != 2)) {
         host.tick(); guest.tick(); late.tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (!late.status().voiceSettingsReady || !late.status().settings.voiceProximity ||
         late.status().settings.voiceProximityRange != 75 ||
+        !late.status().saveRecoverySettingsReady || late.status().settings.saveRecovery ||
         broker.voiceSettingsOnRoomChannel || broker.roomSettingsMessages != 0)
-        fail("late joiner did not receive host voice settings over the peer path");
+        fail("late joiner did not receive host peer settings");
     host.disconnect();
     guest.tick(); late.tick();
     if (!guest.status().isOwner) fail("remaining peer did not inherit room ownership");
+    if (guest.status().settings.saveRecovery)
+        fail("new owner discarded the previous save recovery setting");
     if (!guest.publish_voice_settings(false, 90)) fail("new owner voice update failed");
+    if (!guest.publish_save_recovery_setting(true)) fail("new owner save recovery update failed");
     const auto transferDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < transferDeadline &&
            (late.status().settings.voiceProximity ||
-            late.status().settings.voiceProximityRange != 90)) {
+            late.status().settings.voiceProximityRange != 90 ||
+            !late.status().settings.saveRecovery)) {
         guest.tick(); late.tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (late.status().settings.voiceProximity ||
         late.status().settings.voiceProximityRange != 90 ||
+        !late.status().settings.saveRecovery ||
         broker.voiceSettingsOnRoomChannel || broker.roomSettingsMessages != 0)
-        fail("transferred host voice settings did not stay on the peer path");
+        fail("transferred host peer settings did not stay on the peer path");
     late.disconnect();
     guest.disconnect();
 

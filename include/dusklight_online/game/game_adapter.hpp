@@ -2,6 +2,7 @@
 
 #include "dusklight_online/game/protocol_router.hpp"
 #include "dusklight_online/game/pose_playback.hpp"
+#include "dusklight_online/game/save_recovery.hpp"
 #include "dusklight_online/game/ooccoo_sync.hpp"
 #include "dusklight_online/game/visual_bridge.hpp"
 #include "dusk/multiplayer/multiplayer.hpp"
@@ -55,6 +56,7 @@ public:
     [[nodiscard]] bool stage_ready() const override;
     [[nodiscard]] bool allow_stage_unready(const RoutedMessage& message) const override;
     [[nodiscard]] bool discard_stage_message(const RoutedMessage& message) const override;
+    bool retain_for_save_recovery(const RoutedMessage& message) override;
     ApplyResult consume(const RoutedMessage& message) override;
     ApplyResult consume_udp(const net::Event& event) override;
     void peer_joined(std::string_view peerId, std::string_view name) override;
@@ -63,8 +65,11 @@ public:
     void report_pvp_target_hit(fopAc_ac_c* remoteLinkActor, fopAc_ac_c* attackActor,
                                dCcD_GObjInf* attackInfo);
     void notify_local_save_reset();
-    void notify_local_save_loaded();
-    void notify_local_save_written();
+    void notify_local_save_new(uint32_t slot);
+    void notify_local_save_loaded(uint32_t slot);
+    void notify_local_save_written(uint32_t slot);
+    void set_save_recovery_policy(bool ready, bool enabled);
+    void restore_saved_progress_if_ready();
     void notify_room_scene_initialized(int room);
     void notify_local_event_bit(uint16_t flag);
     void observe_local_memory_item(int stage, int flag);
@@ -170,9 +175,24 @@ private:
     uint32_t localPvpHitSequence_ = 0;
     bool applyingRemote_ = false;
     bool syncFlagsEnabled_ = true;
+    bool saveRecoveryEnabled_ = false;
+    bool saveRecoveryPolicyReady_ = false;
+    std::string activeSaveName_;
+    std::optional<uint32_t> activeSaveSlot_;
     bool syncWorldEnabled_ = false;
     bool hooksInstalled_ = false;
     SaveObserverHandle saveObserver_ = 0;
+    struct SaveRecoveryJournal {
+        std::string saveName;
+        uint32_t slot = 0;
+        std::chrono::steady_clock::time_point savedAt{};
+        std::chrono::steady_clock::time_point captureUntil{};
+        SaveRecoveryDelta delta;
+        std::deque<RoutedMessage> titleMessages;
+        size_t titleMessageBytes = 0;
+        bool restorePending = false;
+    };
+    std::optional<SaveRecoveryJournal> saveRecovery_;
     ItemGiveHandle itemGiveObserver_ = 0;
     // Save-scoped acquisition receipts; never stores a peer's return warp.
     ooccoo::State ooccooState_;
@@ -267,6 +287,8 @@ private:
     ApplyResult consume_randomizer(const RoutedMessage& message);
     ApplyResult consume_pvp_hit(const RoutedMessage& message);
     nlohmann::json make_save_snapshot();
+    nlohmann::json make_recovery_snapshot();
+    void record_received_progress(const nlohmann::json& before, ApplyResult result);
     ApplyResult apply_save_snapshot(const RoutedMessage& message);
     ApplyResult apply_switch_bit(const nlohmann::json& message,
                                  std::string_view peerId = {});

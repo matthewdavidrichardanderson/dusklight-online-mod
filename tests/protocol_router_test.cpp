@@ -21,13 +21,22 @@ namespace {
 class Consumer final : public MessageConsumer {
 public:
     bool ready = false;
+    bool retainForSave = false;
     std::vector<std::string> types;
     std::vector<nlohmann::json> payloads;
+    std::vector<std::chrono::steady_clock::time_point> receivedAt;
+    std::vector<RoutedMessage> saveMessages;
 
     bool stage_ready() const override { return ready; }
+    bool retain_for_save_recovery(const RoutedMessage& message) override {
+        if (!retainForSave) return false;
+        saveMessages.push_back(message);
+        return true;
+    }
     ApplyResult consume(const RoutedMessage& message) override {
         types.push_back(message.payload.at("type").get<std::string>());
         payloads.push_back(message.payload);
+        receivedAt.push_back(message.receivedAt);
         return ApplyResult::Applied;
     }
     ApplyResult consume_udp(const Event&) override { return ApplyResult::Applied; }
@@ -62,6 +71,8 @@ int main() {
         {"name_labels",Domain::Membership,false,false}, {"dummy_model",Domain::Membership,false,false},
         {"sync_flags",Domain::Membership,false,false}, {"sync_world",Domain::Membership,false,false},
         {"remote_collision",Domain::Membership,false,false}, {"pvp_enabled",Domain::Membership,false,false},
+        {"voice_settings",Domain::Membership,false,false},
+        {"save_recovery_setting",Domain::Membership,false,false},
         {"presence",Domain::Presence,false,false}, {"progression_state",Domain::Presence,false,true},
         {"puppet_preference",Domain::Presence,false,false}, {"midna_preference",Domain::Presence,false,false},
         {"chat",Domain::Chat,false,false},
@@ -216,12 +227,45 @@ int main() {
 
     Consumer consumer;
     ProtocolRouter router(consumer);
+    const auto beforeReceive = std::chrono::steady_clock::now();
     assert(router.route(message("save_snapshot"), true) == ApplyResult::Deferred);
+    const auto afterReceive = std::chrono::steady_clock::now();
     assert(router.stats().pendingMessages == 1);
     consumer.ready = true;
     router.flush(true);
     assert(router.stats().pendingMessages == 0);
     assert(consumer.types.size() == 1 && consumer.types.front() == "save_snapshot");
+    assert(consumer.receivedAt.front() >= beforeReceive);
+    assert(consumer.receivedAt.front() <= afterReceive);
+
+    // A saved player at title receives both stage-dependent and immediate
+    // progression while the normal stage is unavailable. Neither may mutate
+    // the title save or sit in the generic stage queue.
+    {
+        Consumer savedAtTitle;
+        savedAtTitle.retainForSave = true;
+        ProtocolRouter titleRouter(savedAtTitle);
+        assert(titleRouter.route(message("item_get"), true) == ApplyResult::Retained);
+        assert(titleRouter.route(message("switch_bit"), true) == ApplyResult::Retained);
+        assert(titleRouter.stats().pendingMessages == 0);
+        assert(savedAtTitle.types.empty());
+        assert(savedAtTitle.saveMessages.size() == 2);
+        savedAtTitle.retainForSave = false;
+        savedAtTitle.ready = true;
+        for (const RoutedMessage& saved : savedAtTitle.saveMessages)
+            assert(savedAtTitle.consume(saved) == ApplyResult::Applied);
+        assert(savedAtTitle.types.size() == 2);
+    }
+    {
+        Consumer transitioningToTitle;
+        ProtocolRouter titleRouter(transitioningToTitle);
+        assert(titleRouter.route(message("switch_bit"), true) == ApplyResult::Deferred);
+        transitioningToTitle.retainForSave = true;
+        titleRouter.flush(true);
+        assert(titleRouter.stats().pendingMessages == 0);
+        assert(transitioningToTitle.types.empty());
+        assert(transitioningToTitle.saveMessages.size() == 1);
+    }
 
     // Match the AIO: a resolved randomizer reward is never queued behind its
     // non-stage-dependent absolute companion counter.

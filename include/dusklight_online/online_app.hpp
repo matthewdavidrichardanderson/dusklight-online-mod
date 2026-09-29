@@ -60,6 +60,7 @@ private:
         ConfigVarHandle dummyModel = 0;
         ConfigVarHandle nameLabels = 0;
         ConfigVarHandle syncFlags = 0;
+        ConfigVarHandle saveRecovery = 0;
         ConfigVarHandle displayMidna = 0;
         ConfigVarHandle remoteCollision = 0;
         ConfigVarHandle pvp = 0;
@@ -342,6 +343,8 @@ public:
     static void dummy_model_set(ModContext*, void*, const UiControlValue*);
     static void sync_flags_get(ModContext*, void*, UiControlValue*);
     static void sync_flags_set(ModContext*, void*, const UiControlValue*);
+    static void save_recovery_get(ModContext*, void*, UiControlValue*);
+    static void save_recovery_set(ModContext*, void*, const UiControlValue*);
     static void remote_collision_get(ModContext*, void*, UiControlValue*);
     static void remote_collision_set(ModContext*, void*, const UiControlValue*);
     static void pvp_get(ModContext*, void*, UiControlValue*);

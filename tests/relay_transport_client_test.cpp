@@ -128,11 +128,19 @@ int main(int argc, char** argv) {
         joiner.status().settings.voiceProximity ||
         joiner.status().settings.voiceProximityRange != 125)
         fail("relay joiner did not receive peer voice settings from owner");
+    if (!wait_until(owner, joiner, [&] { return joiner.status().saveRecoverySettingsReady; }) ||
+        !joiner.status().settings.saveRecovery)
+        fail("relay joiner did not receive the host save recovery setting");
     if (!owner.publish_voice_settings(true, 75) ||
         !wait_until(owner, joiner, [&] {
             return joiner.status().settings.voiceProximity &&
                    joiner.status().settings.voiceProximityRange == 75;
         })) fail("relay peer voice setting update failed");
+    if (!owner.publish_save_recovery_setting(false) ||
+        !wait_until(owner, joiner, [&] { return !joiner.status().settings.saveRecovery; }) ||
+        !owner.publish_save_recovery_setting(true) ||
+        !wait_until(owner, joiner, [&] { return joiner.status().settings.saveRecovery; }))
+        fail("relay peer save recovery setting update failed");
 
     bool ownerDirect = false, joinerDirect = false;
     if (!std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") && !wait_until(owner, joiner, [&] {

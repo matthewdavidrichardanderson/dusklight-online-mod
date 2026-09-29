@@ -33,6 +33,8 @@ constexpr std::array kEntries = {
     Entry{"sync_world", {Domain::Membership, false, false}},
     Entry{"remote_collision", {Domain::Membership, false, false}},
     Entry{"pvp_enabled", {Domain::Membership, false, false}},
+    Entry{"voice_settings", {Domain::Membership, false, false}},
+    Entry{"save_recovery_setting", {Domain::Membership, false, false}},
     Entry{"presence", {Domain::Presence, false, false}},
     Entry{"progression_state", {Domain::Presence, false, true}},
     Entry{"puppet_preference", {Domain::Presence, false, false}},
@@ -147,7 +149,8 @@ ApplyResult ProtocolRouter::route(const net::Event& event, bool syncFlagsEnabled
     }
 
     const std::string& type = typeIt->get_ref<const std::string&>();
-    RoutedMessage routed{event.peerId, event.message, classify(type), event.ingress};
+    RoutedMessage routed{event.peerId, event.message, classify(type), event.ingress,
+                         std::chrono::steady_clock::now()};
     // Each reliable line carries the authoritative settings which existed at
     // its exact place in the receive stream. Using the batch's final status
     // reorders off/event/on and on/event/off semantics.
@@ -165,6 +168,14 @@ ApplyResult ProtocolRouter::route_message(RoutedMessage message, bool syncFlagsE
     if (message.spec.syncFlagsControlled && !syncFlagsEnabled) {
         record(ApplyResult::IgnoredByPolicy);
         return ApplyResult::IgnoredByPolicy;
+    }
+    // A player can save and quit while remaining connected. Keep eligible
+    // updates for that save before stage deferral or the title's temporary
+    // game state can consume them instead.
+    if (message.spec.domain == MessageDomain::Progression &&
+        consumer_.retain_for_save_recovery(message)) {
+        record(ApplyResult::Retained);
+        return ApplyResult::Retained;
     }
     if (message.spec.stageDependent && consumer_.discard_stage_message(message)) {
         record(ApplyResult::IgnoredByPolicy);

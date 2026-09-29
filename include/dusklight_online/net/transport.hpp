@@ -37,6 +37,7 @@ enum class State : uint8_t {
 struct RoomSettings {
     bool dummyModel = true;
     bool syncFlags = true;
+    bool saveRecovery = true;
     bool syncWorld = false;
     bool remoteCollision = true;
     bool pvp = true;
@@ -171,6 +172,7 @@ struct Status {
     bool udpReady = false;
     bool isOwner = false;
     bool voiceSettingsReady = false;
+    bool saveRecoverySettingsReady = false;
     bool semanticVisualsReady = false;
     bool snapshotDeltasReady = false;
     std::string name;
@@ -250,6 +252,8 @@ public:
     // Proximity settings use the reliable peer path; the room service never
     // stores or forwards them.
     bool publish_voice_settings(bool proximity, int rangePercent);
+    // Sent over the reliable peer path so room services never handle this option.
+    bool publish_save_recovery_setting(bool enabled);
     bool publish_visual_preferences(bool wantPuppet, bool wantMidna);
     // Removes one guest from the lobby. Direct hosts enforce this locally;
     // relay lobby owners request an owner-validated removal from the relay.

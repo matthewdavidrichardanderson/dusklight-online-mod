@@ -14,6 +14,7 @@ inline bool peer_delivery_type(std::string_view type) {
         "collect","visited_room","letter_get","pvp_hit","ganondorf_owner_claim","ganondorf_owner",
         "ganondorf_hit","ganondorf_reaction","ganondorf_player_damage","ganondorf_state","ooccoo_state",
         "chat","voice_settings","voice_settings_request",
+        "save_recovery_setting","save_recovery_setting_request",
         "speedrun_check","speedrun_ready","speedrun_prompt","speedrun_player_ready",
         "speedrun_ready_count","speedrun_countdown","speedrun_cancel",
         "speedrun_start","speedrun_reset"};

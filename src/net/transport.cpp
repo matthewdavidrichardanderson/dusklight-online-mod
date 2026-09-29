@@ -222,6 +222,7 @@ struct Transport::Impl {
     };
 
     Status status;
+    bool preferredSaveRecovery = true;
     VisualSendStats lastVisualSend;
     socket_t socket = kInvalidSocket;
     UdpConnection connections;
@@ -614,6 +615,7 @@ struct Transport::Impl {
         status.welcomed = false;
         status.isOwner = false;
         status.voiceSettingsReady = false;
+        status.saveRecoverySettingsReady = false;
         status.semanticVisualsReady = false;
         status.snapshotDeltasReady = false;
         status.state = State::Disconnected;
@@ -815,6 +817,7 @@ struct Transport::Impl {
             {"direct_peer_name", status.name},
             {"dummy_model", status.settings.dummyModel},
             {"sync_flags", status.settings.syncFlags},
+            {"save_recovery", status.settings.saveRecovery},
             {"sync_world", status.settings.syncWorld},
             {"remote_collision", status.settings.remoteCollision},
             {"pvp", status.settings.pvp && status.settings.remoteCollision},
@@ -1415,6 +1418,7 @@ struct Transport::Impl {
         // Direct guests cannot inject host-controlled voice settings into the
         // host's broadcast path.
         if (type == "voice_settings") return;
+        if (type == "save_recovery_setting" || type == "save_recovery_setting_request") return;
         // A rebroadcast would give a guest's command the host's identity on
         // other clients. Readiness replies are for the host alone.
         if (type == "speedrun_check" || type == "speedrun_prompt" ||
@@ -1574,6 +1578,13 @@ struct Transport::Impl {
         if (!target.empty()) message["target_client_id"] = target;
         return send_mesh_message(message);
     }
+    bool send_save_recovery_setting_to(const std::string& target = {}) {
+        if (!is_room_mode(status.mode) || !status.isOwner || !status.welcomed) return false;
+        json message = {{"type", "save_recovery_setting"},
+                        {"enabled", status.settings.saveRecovery}};
+        if (!target.empty()) message["target_client_id"] = target;
+        return send_mesh_message(message);
+    }
     void flush_deferred_gameplay() {
         while (!settingsRequested && !settingsBarrier && !deferredSends.empty() && !deliveryFailure) {
             auto item = std::move(deferredSends.front()); deferredSends.pop_front();
@@ -1728,6 +1739,7 @@ struct Transport::Impl {
             status.udpToken = message.value("udp_token", "");
             status.isOwner = !status.clientId.empty() && status.clientId == status.ownerClientId;
             status.voiceSettingsReady = status.mode == Mode::DirectJoin || status.isOwner;
+            status.saveRecoverySettingsReady = status.mode == Mode::DirectJoin || status.isOwner;
             status.semanticVisualsReady =
                 message.value("semantic_visuals_ready", false);
             status.snapshotDeltasReady =
@@ -1757,6 +1769,7 @@ struct Transport::Impl {
             } else {
                 status.settings.dummyModel = message.value("dummy_model", status.settings.dummyModel);
                 status.settings.syncFlags = message.value("sync_flags", status.settings.syncFlags);
+                status.settings.saveRecovery = message.value("save_recovery", status.settings.saveRecovery);
                 status.settings.syncWorld = message.value("sync_world", status.settings.syncWorld);
                 status.settings.remoteCollision =
                     message.value("remote_collision", status.settings.remoteCollision);
@@ -1792,6 +1805,12 @@ struct Transport::Impl {
             if (is_room_mode(status.mode) && !status.isOwner &&
                 meshLinks.contains(status.ownerClientId) &&
                 !send_mesh_message({{"type", "voice_settings_request"},
+                                    {"target_client_id", status.ownerClientId}})) {
+                deliveryFailure = true;
+            }
+            if (is_room_mode(status.mode) && !status.isOwner &&
+                meshLinks.contains(status.ownerClientId) &&
+                !send_mesh_message({{"type", "save_recovery_setting_request"},
                                     {"target_client_id", status.ownerClientId}})) {
                 deliveryFailure = true;
             }
@@ -1909,10 +1928,23 @@ struct Transport::Impl {
             if (status.isOwner) {
                 status.voiceSettingsReady = true;
                 if (!send_voice_settings_to()) deliveryFailure = true;
+                // Keep the lobby's last known value when ownership moves.
+                // Fall back to this client's preference only if the former
+                // owner never delivered the setting.
+                if (!status.saveRecoverySettingsReady)
+                    status.settings.saveRecovery = preferredSaveRecovery;
+                status.saveRecoverySettingsReady = true;
+                if (!send_save_recovery_setting_to()) deliveryFailure = true;
             } else {
                 status.voiceSettingsReady = false;
+                status.saveRecoverySettingsReady = false;
                 if (meshLinks.contains(status.ownerClientId) &&
                     !send_mesh_message({{"type", "voice_settings_request"},
+                                        {"target_client_id", status.ownerClientId}})) {
+                    deliveryFailure = true;
+                }
+                if (meshLinks.contains(status.ownerClientId) &&
+                    !send_mesh_message({{"type", "save_recovery_setting_request"},
                                         {"target_client_id", status.ownerClientId}})) {
                     deliveryFailure = true;
                 }
@@ -1937,6 +1969,21 @@ struct Transport::Impl {
             status.settings.voiceProximity = enabled->get<bool>();
             status.settings.voiceProximityRange = static_cast<int>(percent);
             status.voiceSettingsReady = true;
+            emit(EventKind::Message, source, {}, message);
+        } else if (type == "save_recovery_setting_request") {
+            const std::string source = message.value("client_id", "");
+            if (is_room_mode(status.mode) && status.isOwner &&
+                meshLinks.contains(source) && !send_save_recovery_setting_to(source)) {
+                deliveryFailure = true;
+            }
+        } else if (type == "save_recovery_setting") {
+            const std::string source = message.value("client_id", "");
+            if (is_room_mode(status.mode) && source != status.ownerClientId) return;
+            if (status.mode != Mode::DirectJoin && !is_room_mode(status.mode)) return;
+            const auto enabled = message.find("enabled");
+            if (enabled == message.end() || !enabled->is_boolean()) return;
+            status.settings.saveRecovery = enabled->get<bool>();
+            status.saveRecoverySettingsReady = true;
             emit(EventKind::Message, source, {}, message);
         } else if (type == "room_settings") {
             status.ownerClientId = message.value("owner_client_id", status.ownerClientId);
@@ -2274,8 +2321,10 @@ bool Transport::start_direct_host(const DirectHostConfig& config, std::string* e
     impl_->status.publicHost = config.publicHost;
     impl_->status.port = config.port;
     impl_->status.settings = config.settings;
+    impl_->preferredSaveRecovery = config.settings.saveRecovery;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
     impl_->status.voiceSettingsReady = true;
+    impl_->status.saveRecoverySettingsReady = true;
     impl_->sessionId = config.sessionId;
     impl_->sessionKey = config.sessionKey;
     impl_->wantPuppet = config.wantPuppet;
@@ -2310,6 +2359,7 @@ bool Transport::start_direct_join(const DirectJoinConfig& config, std::string* e
     impl_->status.host = config.host;
     impl_->status.port = config.port;
     impl_->status.settings = config.settings;
+    impl_->preferredSaveRecovery = config.settings.saveRecovery;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
     impl_->sessionId = config.sessionId;
     impl_->sessionKey = config.sessionKey;
@@ -2350,6 +2400,7 @@ bool Transport::start_relay(const RelayConfig& config, std::string* error) {
     impl_->status.host = config.host;
     impl_->status.port = config.port;
     impl_->status.settings = config.settings;
+    impl_->preferredSaveRecovery = config.settings.saveRecovery;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
     impl_->password = config.password;
     impl_->sessionId = config.sessionId;
@@ -2397,6 +2448,7 @@ bool Transport::start_cloud_room(const CloudRoomConfig& config,
     impl_->status.room = config.room;
     impl_->status.host = server;
     impl_->status.settings = config.settings;
+    impl_->preferredSaveRecovery = config.settings.saveRecovery;
     impl_->status.settings.pvp &= impl_->status.settings.remoteCollision;
     impl_->password = config.password;
     impl_->relayCreateRoom = config.createRoom;
@@ -2714,6 +2766,20 @@ bool Transport::publish_voice_settings(bool proximity, int rangePercent) {
                      {"range_percent", impl_->status.settings.voiceProximityRange}});
     }
     return impl_->send_voice_settings_to();
+}
+
+bool Transport::publish_save_recovery_setting(bool enabled) {
+    if (!impl_->status.enabled ||
+        (impl_->status.mode != Mode::DirectHost &&
+         (!is_room_mode(impl_->status.mode) || !impl_->status.isOwner))) return false;
+    const bool changed = impl_->status.settings.saveRecovery != enabled;
+    impl_->status.settings.saveRecovery = enabled;
+    impl_->preferredSaveRecovery = enabled;
+    impl_->status.saveRecoverySettingsReady = true;
+    if (!changed) return true;
+    if (impl_->status.mode == Mode::DirectHost)
+        return send({{"type", "save_recovery_setting"}, {"enabled", enabled}});
+    return impl_->send_save_recovery_setting_to();
 }
 
 bool Transport::publish_visual_preferences(bool wantPuppet, bool wantMidna) {

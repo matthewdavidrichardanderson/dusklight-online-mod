@@ -580,6 +580,12 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     )
     add_test(NAME dusklight_online_protocol_router COMMAND dusklight_online_protocol_router_test)
 
+    add_executable(dusklight_online_save_recovery_test tests/save_recovery_test.cpp)
+    target_compile_features(dusklight_online_save_recovery_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_save_recovery_test PRIVATE include)
+    target_link_libraries(dusklight_online_save_recovery_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME dusklight_online_save_recovery COMMAND dusklight_online_save_recovery_test)
+
     add_executable(dusklight_online_pickup_sync_test tests/pickup_sync_test.cpp)
     target_compile_features(dusklight_online_pickup_sync_test PRIVATE cxx_std_20)
     target_include_directories(dusklight_online_pickup_sync_test PRIVATE include)

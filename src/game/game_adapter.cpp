@@ -2252,16 +2252,16 @@ void info_switch_off_post(ModContext*, void* args, void*, void*) {
     });
 }
 
-void save_new(ModContext*, uint32_t, void* data) {
-    static_cast<GameAdapter*>(data)->notify_local_save_reset();
+void save_new(ModContext*, uint32_t slot, void* data) {
+    static_cast<GameAdapter*>(data)->notify_local_save_new(slot);
 }
 
-void save_loaded(ModContext*, uint32_t, void* data) {
-    static_cast<GameAdapter*>(data)->notify_local_save_loaded();
+void save_loaded(ModContext*, uint32_t slot, void* data) {
+    static_cast<GameAdapter*>(data)->notify_local_save_loaded(slot);
 }
 
-void save_written(ModContext*, uint32_t, void* data) {
-    static_cast<GameAdapter*>(data)->notify_local_save_written();
+void save_written(ModContext*, uint32_t slot, void* data) {
+    static_cast<GameAdapter*>(data)->notify_local_save_written(slot);
 }
 
 void item_given(ModContext*, const ItemGiveInfo* info, void* data) {
@@ -2986,7 +2986,36 @@ void GameAdapter::notify_local_save_reset() {
     manualSyncTimedOut_ = false;
 }
 
-void GameAdapter::notify_local_save_loaded() {
+void GameAdapter::notify_local_save_new(uint32_t slot) {
+    const char* name = mDoMemCd_GetFileName();
+    activeSaveName_ = name != nullptr ? name : "";
+    activeSaveSlot_ = slot;
+    saveRecovery_.reset();
+    notify_local_save_reset();
+}
+
+void GameAdapter::set_save_recovery_policy(bool ready, bool enabled) {
+    saveRecoveryPolicyReady_ = ready;
+    if (!ready) return;
+    if (saveRecoveryEnabled_ == enabled) return;
+    saveRecoveryEnabled_ = enabled;
+    if (!enabled) saveRecovery_.reset();
+}
+
+void GameAdapter::notify_local_save_loaded(uint32_t slot) {
+    const char* name = mDoMemCd_GetFileName();
+    activeSaveName_ = name != nullptr ? name : "";
+    activeSaveSlot_ = slot;
+    if (saveRecovery_ && (name == nullptr || saveRecovery_->saveName != name ||
+                          saveRecovery_->slot != slot))
+        saveRecovery_.reset();
+    if (saveRecovery_)
+        saveRecovery_->restorePending =
+            !saveRecovery_->delta.empty() || !saveRecovery_->titleMessages.empty();
+    svc_log->info(mod_ctx, ("Save recovery load slot=" + std::to_string(slot) +
+        " pending=" + (saveRecovery_ && saveRecovery_->restorePending ? "yes" : "no") +
+        " title_messages=" +
+        std::to_string(saveRecovery_ ? saveRecovery_->titleMessages.size() : 0)).c_str());
     notify_local_save_reset();
     load_bottle_source_state();
     load_bomb_bag_save_warp_candidate();
@@ -3076,7 +3105,7 @@ void GameAdapter::replace_bottle_source_state(const nlohmann::json& message) {
         static_cast<int>(completedBottleSources_.size()) == bottles;
 }
 
-void GameAdapter::notify_local_save_written() {
+void GameAdapter::notify_local_save_written(uint32_t slot) {
     bind_ooccoo_to_save();
     const nlohmann::json state = {
         {"state", ooccoo_snapshot_state()}, {"pending", ooccooState_.pending()},
@@ -3087,6 +3116,29 @@ void GameAdapter::notify_local_save_written() {
     (void)svc_save->delete_blob(mod_ctx, kLegacyOoccooSaveBlob.data());
     persist_bottle_source_state();
     persist_bomb_bag_save_warp_candidate();
+    const char* name = mDoMemCd_GetFileName();
+    activeSaveName_ = name != nullptr ? name : "";
+    activeSaveSlot_ = slot;
+    // An autosave can occur during the load transition, before the journal's
+    // safe stage boundary. Preserve the pending repair instead of discarding
+    // the only copy of those post-save updates.
+    if (saveRecovery_ && saveRecovery_->restorePending && name != nullptr &&
+        saveRecovery_->saveName == name && saveRecovery_->slot == slot) return;
+    saveRecovery_.reset();
+    const net::Status status = transport_.status();
+    if (saveRecoveryEnabled_ && saveRecoveryPolicyReady_ && syncFlagsEnabled_ && status.enabled &&
+        (status.mode == net::Mode::DirectHost || status.welcomed) &&
+        !randomizer_active() && name != nullptr && *name != '\0') {
+        SaveRecoveryJournal journal;
+        journal.saveName = name;
+        journal.slot = slot;
+        journal.savedAt = std::chrono::steady_clock::now();
+        journal.captureUntil = journal.savedAt + std::chrono::seconds(60);
+        journal.delta.begin(make_recovery_snapshot());
+        saveRecovery_ = std::move(journal);
+        svc_log->info(mod_ctx, ("Save recovery armed slot=" +
+            std::to_string(slot) + " for 60 seconds").c_str());
+    }
 }
 
 void GameAdapter::persist_bomb_bag_save_warp_candidate() {
@@ -4116,6 +4168,45 @@ bool GameAdapter::discard_stage_message(const RoutedMessage& message) const {
     return false;
 }
 
+bool GameAdapter::retain_for_save_recovery(const RoutedMessage& message) {
+    if (!saveRecoveryEnabled_ || !saveRecoveryPolicyReady_ || !saveRecovery_ ||
+        !syncFlagsEnabled_ || !activeSaveSlot_ ||
+        saveRecovery_->slot != *activeSaveSlot_ ||
+        saveRecovery_->saveName != activeSaveName_ ||
+        message.receivedAt < saveRecovery_->savedAt ||
+        message.receivedAt >= saveRecovery_->captureUntil ||
+        !opening_or_title_active() || randomizer_active()) return false;
+
+    const std::string type = message.payload.value("type", std::string());
+    // Requests and live room effects are not save facts. Currency deltas are
+    // non-idempotent; their absolute companion is recoverable.
+    if (type == "sync_request" || type == "floor_switch_state" ||
+        type == "room_actor_action" || type == "web_timer" ||
+        type == "room_switch_bit" || type == "rupee_delta" ||
+        (type == "save_snapshot" && message.payload.value("manual_sync", false)))
+        return false;
+
+    constexpr size_t kMaxTitleMessages = 512;
+    constexpr size_t kMaxTitleBytes = 2U * 1024U * 1024U;
+    size_t bytes = 0;
+    try {
+        bytes = message.payload.dump().size();
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    if (saveRecovery_->titleMessages.size() >= kMaxTitleMessages ||
+        bytes > kMaxTitleBytes - saveRecovery_->titleMessageBytes) {
+        svc_log->warn(mod_ctx, "Save recovery title inbox overflowed; discarding journal");
+        saveRecovery_.reset();
+        return true;
+    }
+    saveRecovery_->titleMessageBytes += bytes;
+    saveRecovery_->titleMessages.push_back(message);
+    svc_log->info(mod_ctx, ("Save recovery retained title message type=" + type +
+        " count=" + std::to_string(saveRecovery_->titleMessages.size())).c_str());
+    return true;
+}
+
 ApplyResult GameAdapter::consume(const RoutedMessage& message) {
     try {
         const std::string type = message.payload.at("type").get<std::string>();
@@ -4218,8 +4309,20 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                     return ApplyResult::IgnoredByPolicy;
                 return receive_floor_switch_state(message.peerId, message.payload);
             }
+            const bool record = saveRecoveryEnabled_ && saveRecoveryPolicyReady_ && saveRecovery_ &&
+                message.receivedAt >= saveRecovery_->savedAt &&
+                message.receivedAt < saveRecovery_->captureUntil &&
+                activeSaveSlot_ && saveRecovery_->slot == *activeSaveSlot_ &&
+                saveRecovery_->saveName == activeSaveName_ &&
+                !opening_or_title_active() &&
+                !randomizer_active() && type != "sync_request" &&
+                !(type == "save_snapshot" && message.payload.value("manual_sync", false)) &&
+                type != "room_actor_action" &&
+                type != "web_timer" && type != "room_switch_bit";
+            const nlohmann::json before = record ? make_recovery_snapshot() : nlohmann::json();
             RemoteApplicationGuard applying(applyingRemote_);
             const ApplyResult result = consume_progression(message);
+            if (record) record_received_progress(before, result);
             if (stage_ready() && !opening_or_title_active()) poll_local_state(false);
             return result;
         }
@@ -4835,6 +4938,11 @@ void GameAdapter::peer_left(std::string_view peerId) {
 }
 
 void GameAdapter::reset_session() {
+    saveRecovery_.reset();
+    saveRecoveryEnabled_ = false;
+    saveRecoveryPolicyReady_ = false;
+    activeSaveName_.clear();
+    activeSaveSlot_.reset();
     liveFieldMapMarker_.reset();
     lastVoicePosition_.reset();
     reset_floor_switch_state(true);
@@ -5328,7 +5436,7 @@ void GameAdapter::flush_story_messages() {
                 deferredFaronInbound_.push_back(std::move(routed));
                 continue;
             }
-            (void)consume_progression(routed);
+            (void)consume(routed);
         }
         appliedDeferredRemote = true;
     }
@@ -6307,6 +6415,130 @@ nlohmann::json GameAdapter::make_save_snapshot() {
     return snapshot;
 }
 
+nlohmann::json GameAdapter::make_recovery_snapshot() {
+    nlohmann::json snapshot = make_save_snapshot();
+    snapshot["item_first_bits"] = nlohmann::json::array();
+    for (int item = 0; item < 256; ++item)
+        if (is_synced_item_first_bit(item) &&
+            dComIfGs_isItemFirstBit(static_cast<u8>(item)))
+            snapshot["item_first_bits"].push_back(item);
+    snapshot["visited_rooms"] = nlohmann::json::array();
+    for (int stage = 0; stage < dSv_save_c::STAGE2_MAX; ++stage)
+        for (int room = 0; room < 64; ++room)
+            if (dComIfGs_isSaveVisitedRoom(stage, room))
+                snapshot["visited_rooms"].push_back({{"stage", stage}, {"room", room}});
+    return snapshot;
+}
+
+void GameAdapter::record_received_progress(const nlohmann::json& before,
+                                            ApplyResult result) {
+    if (result != ApplyResult::Applied || !saveRecovery_) return;
+    const nlohmann::json after = make_recovery_snapshot();
+    saveRecovery_->delta.observe(before, after);
+    constexpr size_t kMaxRecoveryFacts = 4096;
+    if (saveRecovery_->delta.size() > kMaxRecoveryFacts) {
+        svc_log->warn(mod_ctx, "Save recovery journal exceeded its fact limit; discarding it");
+        saveRecovery_.reset();
+    }
+}
+
+void GameAdapter::restore_saved_progress_if_ready() {
+    if (!saveRecoveryEnabled_ || !saveRecovery_ || !saveRecovery_->restorePending ||
+        !stage_ready() || opening_or_title_active() || manualTransitionActive_ ||
+        manualReloadPending_) return;
+    const char* name = mDoMemCd_GetFileName();
+    if (name == nullptr || saveRecovery_->saveName != name) {
+        saveRecovery_->restorePending = false;
+        return;
+    }
+    saveRecovery_->restorePending = false;
+    const RecoveryFacts changes = saveRecovery_->delta.applicable(make_recovery_snapshot());
+    std::deque<RoutedMessage> titleMessages = std::move(saveRecovery_->titleMessages);
+    saveRecovery_->titleMessageBytes = 0;
+    if (changes.empty() && titleMessages.empty()) return;
+
+    nlohmann::json snapshot = {{"type", "save_snapshot"}};
+    RemoteApplicationGuard applying(applyingRemote_);
+    for (const auto& [fact, value] : changes) {
+        const std::string& field = fact.field;
+        if (field == "event_flags") {
+            if (fact.key < 0 || fact.key > 0xFFFF ||
+                is_unsynced_event_bit(static_cast<uint16_t>(fact.key))) continue;
+            if (value.is_null()) {
+                RoutedMessage clear{"save_recovery",
+                                    {{"type", "event_bit"}, {"flag", fact.key}, {"set", false}},
+                                    {MessageDomain::Progression, false, true}, {}};
+                (void)apply_event_bit(clear);
+            } else snapshot[field].push_back(fact.key);
+        } else if (field == "switches") {
+            if (!valid_stage(fact.key) || fact.subkey < 0 ||
+                fact.subkey >= dSv_info_c::MEMORY_SWITCH ||
+                is_unsynced_switch_bit(fact.key, fact.subkey) ||
+                loaded_floor_switch_owns_flag(fact.key, fact.subkey)) continue;
+            if (value.is_null()) {
+                (void)apply_switch_bit({{"type", "switch_bit"}, {"stage", fact.key},
+                                        {"flag", fact.subkey}, {"set", false}},
+                                       "save_recovery");
+            } else snapshot[field].push_back({{"stage", fact.key}, {"flags", {fact.subkey}}});
+        } else if (field == "item_first_bits") {
+            if (fact.key < 0 || fact.key > 0xFF || !is_synced_item_first_bit(fact.key)) continue;
+            if (value.is_null()) dComIfGs_offItemFirstBit(static_cast<u8>(fact.key));
+            else dComIfGs_onItemFirstBit(static_cast<u8>(fact.key));
+        } else if (field == "visited_rooms") {
+            if (!value.is_null() && fact.key >= 0 && fact.key < dSv_save_c::STAGE2_MAX &&
+                fact.subkey >= 0 && fact.subkey < 64)
+                dComIfGs_onSaveVisitedRoom(fact.key, fact.subkey);
+        } else if (field == "chests" || field == "items" || field == "dungeon_items") {
+            if (value.is_null() || !valid_stage(fact.key)) continue;
+            const char* member = field == "dungeon_items" ? "kinds" : "flags";
+            snapshot[field].push_back({{"stage", fact.key}, {member, {fact.subkey}}});
+        } else if (field == "key_counts" || field == "light_drop_counts") {
+            const char* index = field == "key_counts" ? "stage" : "area";
+            snapshot[field].push_back({{index, fact.key},
+                                       {"count", value.is_null() ? 0 : value.value("count", 0)}});
+        } else if (field == "bomb_bag_slots" || field == "fish_records") {
+            if (!value.is_null()) snapshot[field].push_back(value);
+        } else if (field == "ooccoo_state") {
+            if (!value.is_object()) continue;
+            const auto decoded = ooccoo::decode(value);
+            if (!decoded) continue;
+            bind_ooccoo_to_save();
+            ooccooState_.observe_native_completion(
+                native_ooccoo_facts(false, stage_ready()).completed);
+            ooccooState_.merge_remote(*decoded);
+            snapshot[field] = value;
+        } else if (field == "key_items" || field == "crystals" || field == "mirrors" ||
+                   field == "dark_clear_levels" || field == "transform_levels" ||
+                   field == "region_bits" || field == "collect_clothing" ||
+                   field == "collect_sword" || field == "collect_shield" ||
+                   field == "letter_get_flags" || field == "light_drop_get_flags") {
+            if (!value.is_null()) snapshot[field].push_back(fact.key);
+        } else if (!value.is_null()) {
+            snapshot[field] = value;
+        }
+    }
+    if ((snapshot.contains("bottle_sources") ||
+         snapshot.contains("bottle_sources_complete")) &&
+        !snapshot.contains("bottle_slots"))
+        snapshot["bottle_slots"] = bottle_slot_count();
+    if (snapshot.size() > 1) {
+        RoutedMessage routed{"save_recovery", std::move(snapshot),
+                             {MessageDomain::Progression, true, true}, {}};
+        const ApplyResult result = apply_save_snapshot(routed);
+        if (result != ApplyResult::Applied)
+            svc_log->warn(mod_ctx, "Save recovery snapshot could not be applied");
+    }
+    size_t replayed = 0;
+    for (const RoutedMessage& message : titleMessages) {
+        if (consume(message) == ApplyResult::Applied) ++replayed;
+    }
+    poll_local_state(false);
+    svc_log->info(mod_ctx, ("Save recovery applied facts=" +
+        std::to_string(changes.size()) + " title_messages=" +
+        std::to_string(replayed) + "/" +
+        std::to_string(titleMessages.size())).c_str());
+}
+
 void GameAdapter::send_snapshot_to(std::string_view peerId, bool manual, bool flagsOnly,
                                    uint64_t requestId) {
     nlohmann::json snapshot = make_save_snapshot();
@@ -6437,6 +6669,7 @@ bool GameAdapter::apply_manual_full_state(const std::string& encoded, bool flags
     // Other items/equipment retain exact replacement semantics. The deliberate
     // Ooccoo exception above prevents importing another player's return point.
     localWagonEscortStarted_ = false;
+    saveRecovery_.reset();
     clear_replaced_save_progression_state();
     if (flagsOnly) {
         dSv_player_c& localPlayer = g_dComIfG_gameInfo.info.getPlayer();

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <deque>
 #include <string>
 #include <string_view>
@@ -47,6 +48,7 @@ struct RoutedMessage {
     nlohmann::json payload;
     MessageSpec spec;
     net::EventContext ingress;
+    std::chrono::steady_clock::time_point receivedAt{};
 };
 
 // Game integration owns all mutation and presentation behavior. The router
@@ -59,6 +61,7 @@ public:
     [[nodiscard]] virtual bool stage_ready() const = 0;
     [[nodiscard]] virtual bool allow_stage_unready(const RoutedMessage&) const { return false; }
     [[nodiscard]] virtual bool discard_stage_message(const RoutedMessage&) const { return false; }
+    virtual bool retain_for_save_recovery(const RoutedMessage&) { return false; }
     virtual ApplyResult consume(const RoutedMessage& message) = 0;
     virtual ApplyResult consume_udp(const net::Event& event) = 0;
     virtual void peer_joined(std::string_view peerId, std::string_view name) = 0;

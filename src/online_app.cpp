@@ -863,6 +863,10 @@ void OnlineApp::update() {
     const bool captureSyncFlags = captureStatus.enabled ? captureStatus.settings.syncFlags :
                                                           bool_value(config_.syncFlags, true);
     if (game_ != nullptr) {
+        game_->set_save_recovery_policy(
+            captureStatus.enabled && captureStatus.saveRecoverySettingsReady,
+            captureStatus.settings.saveRecovery);
+        game_->restore_saved_progress_if_ready();
         game_->capture_local_mutations_before_remote(captureSyncFlags);
     }
     bool protocolFatal = false;
@@ -1284,6 +1288,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"remote-model", true, &config_.dummyModel},
         BoolVar{"name-labels", true, &config_.nameLabels},
         BoolVar{"sync-flags", true, &config_.syncFlags},
+        BoolVar{"save-recovery", true, &config_.saveRecovery},
         BoolVar{"display-midna", false, &config_.displayMidna},
         BoolVar{"remote-collision", true, &config_.remoteCollision},
         BoolVar{"pvp", true, &config_.pvp},
@@ -1352,6 +1357,7 @@ net::RoomSettings OnlineApp::configured_settings() const {
     net::RoomSettings settings;
     settings.dummyModel = bool_value(config_.dummyModel, true);
     settings.syncFlags = bool_value(config_.syncFlags, true);
+    settings.saveRecovery = bool_value(config_.saveRecovery, true);
     settings.syncWorld = false;
     settings.remoteCollision = bool_value(config_.remoteCollision, true);
     settings.pvp = bool_value(config_.pvp, true) && settings.remoteCollision;
@@ -2348,6 +2354,10 @@ ModResult OnlineApp::build_settings_tab(ModContext*, UiWindowHandle, UiElementHa
         left, "Sync flags", &OnlineApp::sync_flags_get, &OnlineApp::sync_flags_set,
         &OnlineApp::room_setting_locked, &app,
         "<p>Share supported story, item and progression state with the lobby.</p>");
+    add_session_toggle(
+        left, "Savewarp protection", &OnlineApp::save_recovery_get,
+        &OnlineApp::save_recovery_set, &OnlineApp::room_setting_locked, &app,
+        "<p>For 60 seconds after saving, keep progress received from other players if you reload the same file without closing the game.</p>");
     add_session_toggle(
         left, "Remote collision", &OnlineApp::remote_collision_get,
         &OnlineApp::remote_collision_set, &OnlineApp::remote_collision_setting_locked, &app,
@@ -3506,6 +3516,22 @@ void OnlineApp::sync_flags_set(ModContext*, void* data, const UiControlValue* va
         settings.syncFlags = value->bool_value;
         settings.syncWorld = false;
         app.transport_.publish_room_settings(settings);
+    }
+}
+
+void OnlineApp::save_recovery_get(ModContext*, void* data, UiControlValue* value) {
+    value->bool_value = static_cast<OnlineApp*>(data)->displayed_settings().saveRecovery;
+}
+
+void OnlineApp::save_recovery_set(ModContext*, void* data, const UiControlValue* value) {
+    auto& app = *static_cast<OnlineApp*>(data);
+    const net::Status status = app.transport_.status();
+    if (room_settings_locked(status, app.relayHostIntent_)) return;
+    svc_config->set_bool(mod_ctx, app.config_.saveRecovery, value->bool_value);
+    if (status.enabled &&
+        (status.mode == net::Mode::DirectHost ||
+         (net::is_room_mode(status.mode) && status.isOwner))) {
+        (void)app.transport_.publish_save_recovery_setting(value->bool_value);
     }
 }
 
