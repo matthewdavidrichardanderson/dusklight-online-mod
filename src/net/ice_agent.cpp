@@ -1,4 +1,5 @@
 #include "dusklight_online/net/ice_agent.hpp"
+#include "dusklight_online/net/wire_limits.hpp"
 #include <juice/juice.h>
 #include <array>
 #include <deque>
@@ -24,7 +25,7 @@ struct IceAgent::Impl {
     }
     static void receive(juice_agent_t*, const char* bytes, size_t size, void* user) {
         auto& self = *static_cast<Impl*>(user);
-        if (!size || size > 1200) return;
+        if (!size || size > kIceDatagramBytes) return;
         std::lock_guard lock(self.mutex);
         if (self.received.size() < 512)
             self.received.emplace_back(bytes, bytes + size);
@@ -95,7 +96,7 @@ bool IceAgent::pop(std::vector<uint8_t>& bytes) {
     bytes = std::move(impl_->received.front()); impl_->received.pop_front(); return true;
 }
 bool IceAgent::send(std::span<const uint8_t> bytes) {
-    return connected() && !bytes.empty() && bytes.size() <= 1200 &&
+    return connected() && !bytes.empty() && bytes.size() <= kIceDatagramBytes &&
         juice_send(impl_->agent, reinterpret_cast<const char*>(bytes.data()), bytes.size()) == 0;
 }
 }

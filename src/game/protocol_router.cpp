@@ -126,9 +126,15 @@ ApplyResult ProtocolRouter::route(const net::Event& event, bool syncFlagsEnabled
     case net::EventKind::UdpMessage:
     case net::EventKind::UdpRemoteObject:
     case net::EventKind::UdpAck: {
-        const ApplyResult result = consumer_.consume_udp(event);
-        record(result);
-        return result;
+        try {
+            const ApplyResult result = consumer_.consume_udp(event);
+            record(result);
+            return result;
+        } catch (const nlohmann::json::exception&) {
+            lastError_ = "rejected malformed UDP gameplay message";
+            record(ApplyResult::Rejected);
+            return ApplyResult::Rejected;
+        }
     }
     case net::EventKind::Message:
         break;
@@ -159,42 +165,48 @@ ApplyResult ProtocolRouter::route(const net::Event& event, bool syncFlagsEnabled
 
 ApplyResult ProtocolRouter::route_message(RoutedMessage message, bool syncFlagsEnabled,
                                           bool allowQueue) {
-    if (message.spec.domain == MessageDomain::Unknown) {
-        lastError_ = "unsupported protocol message type: " +
-                     message.payload.value("type", std::string());
-        record(ApplyResult::Unsupported);
-        return ApplyResult::Unsupported;
-    }
-    if (message.spec.syncFlagsControlled && !syncFlagsEnabled) {
-        record(ApplyResult::IgnoredByPolicy);
-        return ApplyResult::IgnoredByPolicy;
-    }
-    // A player can save and quit while remaining connected. Keep eligible
-    // updates for that save before stage deferral or the title's temporary
-    // game state can consume them instead.
-    if (message.spec.domain == MessageDomain::Progression &&
-        consumer_.retain_for_save_recovery(message)) {
-        record(ApplyResult::Retained);
-        return ApplyResult::Retained;
-    }
-    if (message.spec.stageDependent && consumer_.discard_stage_message(message)) {
-        record(ApplyResult::IgnoredByPolicy);
-        return ApplyResult::IgnoredByPolicy;
-    }
-    if (message.spec.stageDependent && !consumer_.stage_ready() &&
-        !consumer_.allow_stage_unready(message)) {
-        if (!allowQueue) {
-            return ApplyResult::Deferred;
+    try {
+        if (message.spec.domain == MessageDomain::Unknown) {
+            lastError_ = "unsupported protocol message type: " +
+                         message.payload.value("type", std::string());
+            record(ApplyResult::Unsupported);
+            return ApplyResult::Unsupported;
         }
-        return enqueue(std::move(message));
-    }
+        if (message.spec.syncFlagsControlled && !syncFlagsEnabled) {
+            record(ApplyResult::IgnoredByPolicy);
+            return ApplyResult::IgnoredByPolicy;
+        }
+        // A player can save and quit while remaining connected. Keep eligible
+        // updates for that save before stage deferral or the title's temporary
+        // game state can consume them instead.
+        if (message.spec.domain == MessageDomain::Progression &&
+            consumer_.retain_for_save_recovery(message)) {
+            record(ApplyResult::Retained);
+            return ApplyResult::Retained;
+        }
+        if (message.spec.stageDependent && consumer_.discard_stage_message(message)) {
+            record(ApplyResult::IgnoredByPolicy);
+            return ApplyResult::IgnoredByPolicy;
+        }
+        if (message.spec.stageDependent && !consumer_.stage_ready() &&
+            !consumer_.allow_stage_unready(message)) {
+            if (!allowQueue) {
+                return ApplyResult::Deferred;
+            }
+            return enqueue(std::move(message));
+        }
 
-    const ApplyResult result = consumer_.consume(message);
-    if (result == ApplyResult::Deferred && allowQueue) {
-        return enqueue(std::move(message));
+        const ApplyResult result = consumer_.consume(message);
+        if (result == ApplyResult::Deferred && allowQueue) {
+            return enqueue(std::move(message));
+        }
+        record(result);
+        return result;
+    } catch (const nlohmann::json::exception&) {
+        lastError_ = "rejected malformed gameplay message";
+        record(ApplyResult::Rejected);
+        return ApplyResult::Rejected;
     }
-    record(result);
-    return result;
 }
 
 ApplyResult ProtocolRouter::enqueue(RoutedMessage message) {

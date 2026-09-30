@@ -85,8 +85,12 @@ int main() {
     require(client.send_realtime(address, realtime), "realtime send queued");
     UdpConnection::Address source{};
     std::array<uint8_t, 256> visual{};
-    require(wait_until([&] { return server.receive_realtime(source, visual) == 58; }),
+    UdpConnection::Id authenticatedPeer = UdpConnection::invalid;
+    require(wait_until([&] {
+        return server.receive_realtime(source, visual, &authenticatedPeer) == 58;
+    }),
             "encrypted realtime payload delivered");
+    require(authenticatedPeer == serverId, "realtime payload bound to secure peer");
     require(std::equal(realtime.begin(), realtime.end(), visual.begin()),
             "realtime payload intact");
 

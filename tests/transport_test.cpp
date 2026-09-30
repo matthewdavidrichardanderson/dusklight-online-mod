@@ -415,6 +415,20 @@ int main() {
         fail("direct UDP pose was not routed through the host");
     }
 
+    // The packet is encrypted by Alice's connection, but its visual header
+    // claims Bob's ID. The host must reject that mismatch before decoding it.
+    if (!alice.send_test_visual_as({{"type", "pose"}, {"sequence", 1000},
+                                    {"state", {{"stage", "F_SP103"}, {"x", 1000.0f}}}},
+                                   bob.status().clientId)) {
+        fail("spoofed direct UDP pose could not be sent");
+    }
+    pump(host, alice, bob, 30);
+    if (drain_udp_for_sequence(host, 1000) ||
+        drain_udp_for_sequence(alice, 1000) ||
+        drain_udp_for_sequence(bob, 1000)) {
+        fail("spoofed direct UDP sender was accepted");
+    }
+
     if (!host.send_visual({{"type", "pose"}, {"sequence", 3},
                            {"state", {{"stage", "F_SP103"},
                                       {"matrix_scope", "attachments"}}}},

@@ -2244,7 +2244,7 @@ ModResult OnlineApp::build_host_relay_settings(ModContext*, UiElementHandle pane
     add_form_string(pane, "Lobby name", app.config_.relayRoom, 64, "online-half-field",
                     "<p>The lobby name guests must enter to find your session.</p>");
     add_form_string(pane, "Lobby code", app.config_.lobbyCode, 128, "online-half-field",
-                    "<p>Required: 6-128 characters. Share this code with guests.</p>");
+                    "<p>Required: 6-128 characters. Share it with guests; do not reuse an account password.</p>");
     add_bound_control(pane, UI_CONTROL_TOGGLE, "Manual host",
                       app.config_.relayManualHost, 0, 0, 1, 0, nullptr, nullptr,
                       "online-wide-control", nullptr,

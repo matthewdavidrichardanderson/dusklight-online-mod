@@ -1,5 +1,8 @@
 #include "dusklight_online/net/transport.hpp"
 #include "dusklight_online/net/auth_code.hpp"
+#include "dusklight_online/net/cloud_cipher.hpp"
+#include "dusklight_online/net/reliable_json.hpp"
+#include "dusklight_online/net/wire_limits.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -8,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -20,6 +24,8 @@ namespace {
 class Channel;
 
 struct Broker {
+    std::vector<std::string> urls, wires;
+    enum class Attack { None, Plaintext, Tamper, Replay } attack = Attack::None;
     std::map<std::string, Channel*> members;
     uint32_t nextId = 1;
     bool gameplayForwardingAttempt = false;
@@ -40,16 +46,38 @@ class Channel final : public RoomChannel {
 public:
     explicit Channel(Broker& broker) : broker(broker) {}
     ~Channel() override { close(); }
-    bool open(std::string_view, std::string&) override {
+    bool open(std::string_view url, std::string&) override {
         active = true;
+        broker.urls.emplace_back(url);
+        cipher.emplace(url.substr(url.rfind('/') + 1), false);
         events.push_back({EventKind::Open, {}});
         nonce = auth::random_nonce();
-        push({{"type", "auth_challenge"}, {"nonce", nonce}, {"salt", broker.authSalt}});
+        events.push_back({EventKind::Message, json({{"type", "secure_hello"}, {"version", 1},
+            {"public_key", cipher->public_key()}}).dump()});
         return true;
     }
     bool send(std::string_view text) override {
         if (!active) return false;
-        broker.accept(*this, json::parse(text));
+        broker.wires.emplace_back(text);
+        if (!cipher->established()) {
+            const auto ready = json::parse(text);
+            if (ready.value("type", "") != "secure_ready" || ready.value("version", 0) != 1 ||
+                !cipher->exchange(ready.value("public_key", "")))
+                throw std::runtime_error("invalid cloud key exchange");
+            const json challenge = {{"type", "auth_challenge"}, {"nonce", nonce}, {"salt", broker.authSalt}};
+            if (broker.attack == Broker::Attack::Plaintext)
+                events.push_back({EventKind::Message, challenge.dump()});
+            else {
+                push(challenge);
+                if (broker.attack == Broker::Attack::Tamper)
+                    events.back().text.back() = events.back().text.back() == '0' ? '1' : '0';
+                if (broker.attack == Broker::Attack::Replay) events.push_back(events.back());
+            }
+        } else {
+            const auto plaintext = cipher->open(text);
+            if (!plaintext) throw std::runtime_error("invalid encrypted cloud request");
+            broker.accept(*this, json::parse(*plaintext));
+        }
         return true;
     }
     bool poll(Event& event) override {
@@ -64,7 +92,13 @@ public:
         events.clear();
         id.clear();
     }
-    void push(const json& value) { events.push_back({EventKind::Message, value.dump()}); }
+    void push(const json& value) {
+        const auto wire = cipher->seal(value.dump());
+        if (wire.empty()) throw std::runtime_error("invalid encrypted cloud reply");
+        broker.wires.push_back(wire);
+        events.push_back({EventKind::Message, wire});
+    }
+    std::optional<CloudCipher> cipher;
     Broker& broker;
     std::string id;
     std::string name;
@@ -153,6 +187,57 @@ void Broker::leave(Channel& channel) {
     std::exit(1);
 }
 
+void check_security(const CloudRoomConfig& configuration) {
+    for (const json& hello : std::vector<json>{
+        {{"type", "auth_challenge"}, {"nonce", auth::random_nonce()}, {"salt", auth::random_nonce()}},
+        {{"type", "secure_hello"}, {"version", 0}, {"public_key", std::string(64, '1')}},
+        {{"type", "secure_hello"}, {"version", 1}, {"public_key", std::string(64, '0')}},
+        {{"type", "secure_hello"}, {"version", 1}, {"public_key", "invalid"}},
+        json::array(), nullptr}) {
+        Broker broker;
+        Transport transport;
+        auto channel = std::make_unique<Channel>(broker);
+        auto* wire = channel.get();
+        if (!transport.start_cloud_room(configuration, std::move(channel))) fail("security test open");
+        wire->events.back().text = hello.dump();
+        transport.tick();
+        if (transport.status().state != State::Disconnected || transport.status().welcomed ||
+            !broker.wires.empty()) fail("invalid handshake leaked credentials or was accepted");
+    }
+    for (const auto attack : {Broker::Attack::Plaintext, Broker::Attack::Tamper, Broker::Attack::Replay}) {
+        Broker broker;
+        broker.attack = attack;
+        Transport transport;
+        if (!transport.start_cloud_room(configuration, std::make_unique<Channel>(broker)))
+            fail("encrypted rejection test open");
+        transport.tick();
+        if (transport.status().state != State::Disconnected || transport.status().welcomed ||
+            transport.status().error != "Invalid encrypted cloud room message")
+            fail("invalid encrypted service response was accepted");
+        for (const auto& message : broker.wires)
+            if (!message.starts_with("DCR1:") && json::parse(message).value("type", "") != "secure_ready")
+                fail("client fell back to plaintext");
+    }
+    Broker broker;
+    Transport transport;
+    auto channel = std::make_unique<Channel>(broker);
+    auto* wire = channel.get();
+    if (!transport.start_cloud_room(configuration, std::move(channel))) fail("reconnect test open");
+    transport.tick();
+    if (!transport.status().welcomed) fail("encrypted welcome");
+    const auto oldPublic = wire->cipher->public_key();
+    const auto oldWelcome = broker.wires.back();
+    wire->events.push_back({RoomChannel::EventKind::Closed, "test reconnect"});
+    transport.tick();
+    for (int n = 0; n < 40 && !transport.status().welcomed; ++n) transport.tick();
+    if (!transport.status().welcomed || wire->cipher->public_key() == oldPublic)
+        fail("reconnect did not establish fresh encryption");
+    wire->events.push_back({RoomChannel::EventKind::Message, oldWelcome});
+    transport.tick();
+    if (transport.status().welcomed || transport.status().state != State::Disconnected)
+        fail("reconnect accepted old session ciphertext");
+}
+
 }  // namespace
 
 int main() {
@@ -169,6 +254,7 @@ int main() {
     configuration.createRoom = true;
     configuration.settings.voiceProximity = false;
     configuration.settings.voiceProximityRange = 125;
+    check_security(configuration);
     std::string error;
     if (!host.start_cloud_room(configuration, std::make_unique<Channel>(broker), &error))
         fail(error.c_str());
@@ -178,6 +264,9 @@ int main() {
     configuration.settings.voiceProximityRange = 50;
     if (!guest.start_cloud_room(configuration, std::make_unique<Channel>(broker), &error))
         fail(error.c_str());
+    for (const auto& url : broker.urls)
+        if (url != "wss://rooms.example.test/room/v2/" + cloud_room_route(configuration.room))
+            fail("lobby name was not replaced with an opaque route");
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
     bool sent = false, delivered = false, sawIceTx = false, sawIceRx = false;
@@ -214,6 +303,27 @@ int main() {
                   << " guest_error=" << guest.status().error << '\n';
         fail("direct-only ICE did not deliver the buffered gameplay message");
     }
+    std::mt19937 random(42);
+    std::string largeText(16000, ' ');
+    for (char& c : largeText) c = static_cast<char>('!' + random() % 90);
+    const json largeMessage = {{"type", "chat"}, {"text", largeText}};
+    if (encode_reliable_json(largeMessage).size() <= kIceDatagramBytes)
+        fail("large ICE regression message did not need fragmentation");
+    if (!host.send(largeMessage)) fail("large reliable peer message did not queue");
+    bool largeDelivered = false;
+    const auto largeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (std::chrono::steady_clock::now() < largeDeadline && !largeDelivered) {
+        host.tick(); guest.tick();
+        while (guest.has_events()) {
+            const auto event = guest.pop_event();
+            largeDelivered |= event.message.is_object() &&
+                event.message.value("type", "") == "chat" &&
+                event.message.value("text", "") == largeText;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!largeDelivered || !host.status().error.empty() || !guest.status().error.empty())
+        fail("large reliable message stalled on encrypted ICE");
     if (!guest.status().voiceSettingsReady ||
         guest.status().settings.voiceProximity ||
         guest.status().settings.voiceProximityRange != 125) {
@@ -284,6 +394,25 @@ int main() {
         !late.status().saveRecoverySettingsReady || late.status().settings.saveRecovery ||
         broker.voiceSettingsOnRoomChannel || broker.roomSettingsMessages != 0)
         fail("late joiner did not receive host peer settings");
+    const std::string lateId = late.status().clientId;
+    if (!guest.send_test_peer_message(hostId,
+            {{"type", "cloud_join_failure"}, {"unreachable_client_id", lateId}}))
+        fail("could not simulate a forged newcomer failure report");
+    bool ignoredReport = false;
+    const auto forgedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < forgedDeadline && !ignoredReport) {
+        host.tick(); guest.tick(); late.tick();
+        while (host.has_events()) {
+            const auto event = host.pop_event();
+            ignoredReport |= event.kind == EventKind::Diagnostic &&
+                event.detail == "ignored_untrusted_newcomer_failure";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!ignoredReport || broker.kickRequests != 0 || !broker.members.contains(lateId) ||
+        host.status().natPeerCount != 2 || guest.status().natPeerCount != 2 ||
+        late.status().natPeerCount != 2)
+        fail("guest report evicted a fully connected newcomer");
     host.disconnect();
     guest.tick(); late.tick();
     if (!guest.status().isOwner) fail("remaining peer did not inherit room ownership");

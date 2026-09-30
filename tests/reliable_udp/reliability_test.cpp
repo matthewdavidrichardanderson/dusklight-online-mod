@@ -33,7 +33,8 @@ struct Simulated : DatagramTransport {
     size_t chargedBytes = 0;
     bool send(LogicalPeerId peer, std::span<const uint8_t> bytes) override {
         require(peer == 7, "carrier received an address instead of logical peer");
-        require(bytes.size() <= ReliableUdp::maxDatagramBytes, "MTU exceeded");
+        require(bytes.size() + kSealedDatagramOverhead <= kIceDatagramBytes,
+                "sealed reliable packet exceeds ICE limit");
         ++sends;
         chargedBytes += bytes.size() + 64;
         if (blackhole || (faults && sends % 7 == 0)) return false;

@@ -38,6 +38,19 @@ int main() {
         decoded.type != udp::PacketType::SemanticPoseMsgpack || decoded.message != small) {
         fail("semantic pose packet type round trip mismatch");
     }
+    // A joined peer can send arbitrary visual payloads. Reject nesting before
+    // a recursive parser can exhaust the game's stack.
+    nlohmann::json nested = nlohmann::json::object({{"leaf", true}});
+    for (int i = 0; i < 80; ++i) nested = nlohmann::json::array({std::move(nested)});
+    for (const auto format : {udp::PacketType::PoseJson, udp::PacketType::PoseMsgpack}) {
+        encoded = udp::encode_message(nested, "direct1", format, &error);
+        if (encoded.empty()) fail("could not encode nested visual test: " + error);
+        decoder.reset();
+        for (const auto& datagram : encoded) {
+            if (decoder.accept(datagram.bytes).kind == udp::DecodeKind::Message)
+                fail("deeply nested peer visual was accepted");
+        }
+    }
     const auto semanticAck = udp::encode_ack(
         "receiver", "direct1", udp::PacketType::SemanticPoseMsgpack, 4);
     decoded = decoder.accept(semanticAck.bytes);

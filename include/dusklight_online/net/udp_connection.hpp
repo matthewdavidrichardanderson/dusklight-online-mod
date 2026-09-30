@@ -32,7 +32,10 @@ public:
     // Preserves authenticated visual endpoint rebinding without changing the
     // reliable session's address or allocating a second bandwidth allowance.
     bool bind_realtime(Id peer, Address address);
-    int receive_realtime(Address& address, std::span<uint8_t> bytes);
+    // Reports the secure native peer that authenticated this datagram when
+    // available. Callers must match it to the claimed visual sender.
+    int receive_realtime(Address& address, std::span<uint8_t> bytes,
+                         Id* authenticatedPeer = nullptr);
     void poll();
     // Relay idle wait: wake for received data without imposing a polling delay.
     // Does not service game callbacks or bypass the shared datagram budget.

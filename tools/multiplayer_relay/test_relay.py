@@ -338,6 +338,17 @@ class RelayTests(unittest.TestCase):
         client.sock.sendall(b"Z1gg\n")
         client.expect_error("invalid_compressed_json")
 
+    def test_deep_json_before_auth_cannot_crash_relay(self):
+        client = self.client()
+        # Keep the probe below the relay's deliberately short test login
+        # timeout; the unit test covers a full 32 KiB nested frame.
+        client.send_bytes(b"[" * 128 + b"0" + b"]" * 128 + b"\n")
+        client.expect_error("invalid_compressed_json")
+        self.assertIsNone(self.relay.process.poll())
+        owner, _ = self.join("Still Running", "after-deep-json")
+        owner.send({"type": "ping"})
+        owner.expect_type("pong")
+
     def test_stun_shares_gameplay_port(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.bind(("127.0.0.1", 0))

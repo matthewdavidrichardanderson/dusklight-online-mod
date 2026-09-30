@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace dusklight_online::net::udp {
 namespace {
@@ -110,6 +111,59 @@ void set_error(std::string* output, std::string value) {
         *output = std::move(value);
     }
 }
+
+// Parse peer-owned visuals with a fixed nesting budget. A size limit alone
+// does not protect the recursive JSON/MessagePack parsers from tiny, deeply
+// nested values.
+class BoundedPoseSax final : public nlohmann::json_sax<nlohmann::json> {
+public:
+    nlohmann::json value;
+
+    bool null() override { add(nullptr); return true; }
+    bool boolean(bool input) override { add(input); return true; }
+    bool number_integer(number_integer_t input) override { add(input); return true; }
+    bool number_unsigned(number_unsigned_t input) override { add(input); return true; }
+    bool number_float(number_float_t input, const string_t&) override { add(input); return true; }
+    bool string(string_t& input) override { add(std::move(input)); return true; }
+    bool binary(binary_t& input) override {
+        add(nlohmann::json::binary(std::move(input)));
+        return true;
+    }
+    bool start_object(std::size_t) override {
+        if (parents_.size() >= kMaxDepth) return false;
+        parents_.push_back(add(nlohmann::json::object()));
+        return true;
+    }
+    bool key(string_t& input) override { key_ = std::move(input); return true; }
+    bool end_object() override { parents_.pop_back(); return true; }
+    bool start_array(std::size_t) override {
+        if (parents_.size() >= kMaxDepth) return false;
+        parents_.push_back(add(nlohmann::json::array()));
+        return true;
+    }
+    bool end_array() override { parents_.pop_back(); return true; }
+    bool parse_error(std::size_t, const std::string&,
+                     const nlohmann::detail::exception&) override { return false; }
+
+private:
+    static constexpr size_t kMaxDepth = 64;
+    std::vector<nlohmann::json*> parents_;
+    string_t key_;
+
+    nlohmann::json* add(nlohmann::json input) {
+        if (parents_.empty()) {
+            value = std::move(input);
+            return &value;
+        }
+        auto* parent = parents_.back();
+        if (parent->is_array()) {
+            parent->push_back(std::move(input));
+            return &parent->back();
+        }
+        (*parent)[key_] = std::move(input);
+        return &(*parent)[key_];
+    }
+};
 
 }  // namespace
 
@@ -380,10 +434,14 @@ DecodeResult Decoder::accept(std::span<const uint8_t> datagram) {
     }
 
     try {
-        result.message = type == PacketType::PoseJson
-                             ? nlohmann::json::parse(std::string(
-                                   reinterpret_cast<const char*>(raw.data()), raw.size()))
-                             : nlohmann::json::from_msgpack(raw);
+        BoundedPoseSax sax;
+        const auto format = type == PacketType::PoseJson ?
+            nlohmann::json::input_format_t::json : nlohmann::json::input_format_t::msgpack;
+        if (!nlohmann::json::sax_parse(raw.begin(), raw.end(), &sax, format)) {
+            sequences.erase(header.sequence);
+            return {};
+        }
+        result.message = std::move(sax.value);
     } catch (const nlohmann::json::exception&) {
         sequences.erase(header.sequence);
         return {};

@@ -3,6 +3,7 @@
   "name": "dusklight-online-rooms",
   "main": "src/index.js",
   "compatibility_date": "2025-10-01",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "durable_objects": {
     "bindings": [

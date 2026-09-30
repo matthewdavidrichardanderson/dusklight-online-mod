@@ -18,7 +18,8 @@ std::optional<Digest> unhex_digest(std::string_view value);
 std::string random_nonce();
 bool equal(std::string_view left, std::string_view right);
 
-// The endpoint key is empty for Cloudflare, where WSS protects registration.
+// The endpoint key is empty for Cloudflare, where the encrypted WSS control
+// channel protects registration.
 // A manually hosted relay uses the secret from its TP1 endpoint code so a
 // captured verifier cannot be dictionary-attacked without that separate code.
 Digest lobby_verifier(std::string_view code, std::string_view room,

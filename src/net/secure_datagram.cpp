@@ -1,5 +1,6 @@
 #include "dusklight_online/net/secure_datagram.hpp"
 #include "dusklight_online/net/secure_random.hpp"
+#include "dusklight_online/net/wire_limits.hpp"
 #include "monocypher.h"
 
 #include <algorithm>
@@ -11,7 +12,6 @@ namespace dusklight_online::net {
 namespace {
 constexpr size_t kHelloSize = 4 + 1 + 32 + 16 + 32;
 constexpr size_t kFinishSize = 4 + 1 + 32;
-constexpr size_t kPacketOverhead = 4 + 8 + 8 + 16;
 using Key = std::array<uint8_t, 32>;
 
 void append(std::vector<uint8_t>& to, std::span<const uint8_t> from) {
@@ -178,21 +178,21 @@ std::vector<uint8_t> SecureDatagram::handshake(std::span<const uint8_t> packet) 
 
 std::vector<uint8_t> SecureDatagram::seal(std::span<const uint8_t> plaintext) {
     if (!established() || !session_ || txCounter_ == std::numeric_limits<uint64_t>::max()) return {};
-    std::vector<uint8_t> packet(kPacketOverhead + plaintext.size());
+    std::vector<uint8_t> packet(kSealedDatagramOverhead + plaintext.size());
     std::memcpy(packet.data(), "DSE1", 4);
     write64(packet.data() + 4, session_);
     write64(packet.data() + 12, txCounter_);
     std::array<uint8_t, 24> nonce{};
     std::copy(txPrefix_.begin(), txPrefix_.end(), nonce.begin());
     write64(nonce.data() + 16, txCounter_++);
-    crypto_aead_lock(packet.data() + kPacketOverhead, packet.data() + 20,
+    crypto_aead_lock(packet.data() + kSealedDatagramOverhead, packet.data() + 20,
                      txKey_.data(), nonce.data(), packet.data(), 20,
                      plaintext.data(), plaintext.size());
     return packet;
 }
 
 std::optional<std::vector<uint8_t>> SecureDatagram::open(std::span<const uint8_t> packet) {
-    if (!established() || !session_ || packet.size() < kPacketOverhead ||
+    if (!established() || !session_ || packet.size() < kSealedDatagramOverhead ||
         std::memcmp(packet.data(), "DSE1", 4) != 0) return std::nullopt;
     if (read64(packet.data() + 4) != session_) return std::nullopt;
     const uint64_t counter = read64(packet.data() + 12);
@@ -202,10 +202,10 @@ std::optional<std::vector<uint8_t>> SecureDatagram::open(std::span<const uint8_t
     std::array<uint8_t, 24> nonce{};
     std::copy(rxPrefix_.begin(), rxPrefix_.end(), nonce.begin());
     write64(nonce.data() + 16, counter);
-    std::vector<uint8_t> plaintext(packet.size() - kPacketOverhead);
+    std::vector<uint8_t> plaintext(packet.size() - kSealedDatagramOverhead);
     if (crypto_aead_unlock(plaintext.data(), packet.data() + 20, rxKey_.data(),
                            nonce.data(), packet.data(), 20,
-                           packet.data() + kPacketOverhead, plaintext.size()) != 0)
+                           packet.data() + kSealedDatagramOverhead, plaintext.size()) != 0)
         return std::nullopt;
     if (!rxSeen_) { rxSeen_ = true; rxHighest_ = counter; rxWindow_ = 1; }
     else if (counter > rxHighest_) {

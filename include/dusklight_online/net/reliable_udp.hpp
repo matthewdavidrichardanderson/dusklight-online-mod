@@ -4,6 +4,7 @@
 #include <memory>
 #include <span>
 #include <vector>
+#include "dusklight_online/net/wire_limits.hpp"
 
 namespace dusklight_online::net {
 using LogicalPeerId = uint64_t;
@@ -20,7 +21,9 @@ class ReliableUdp {
 public:
     static constexpr size_t maxMessageBytes = 2 * 1024 * 1024;
     static constexpr size_t maxBufferedBytes = 8 * 1024 * 1024;
-    static constexpr size_t maxDatagramBytes = 1200;
+    static constexpr size_t maxDatagramBytes = kReliableDatagramBytes;
+    // Accept packets from an older sender while its path is being updated.
+    static constexpr size_t maxReceiveDatagramBytes = kIceDatagramBytes;
     struct Message { LogicalPeerId peer; uint16_t group; std::vector<uint8_t> bytes; };
     explicit ReliableUdp(DatagramTransport& carrier, size_t maxPeers = 8, uint16_t groups = 1);
     ~ReliableUdp();

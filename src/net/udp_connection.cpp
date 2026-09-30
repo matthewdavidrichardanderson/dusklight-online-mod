@@ -80,7 +80,11 @@ struct UdpConnection::Impl : DatagramTransport {
         std::array<uint32_t, 3> iceSent{}, iceReceived{}, iceRejected{};
         std::string rx;
     };
-    struct Raw { Address address; std::vector<uint8_t> bytes; };
+    struct Raw {
+        Address address;
+        std::vector<uint8_t> bytes;
+        Id authenticatedPeer = invalid;
+    };
     mutable std::mutex mutex;
     std::condition_variable activity;
     uint64_t activityGeneration = 0;
@@ -518,7 +522,8 @@ bool UdpConnection::bind_realtime(Id id, Address address) {
     it->second.realtimeAddress.sin_port = htons(address.port);
     return true;
 }
-int UdpConnection::receive_realtime(Address& address, std::span<uint8_t> bytes) {
+int UdpConnection::receive_realtime(Address& address, std::span<uint8_t> bytes,
+                                    Id* authenticatedPeer) {
     std::unique_lock lock(impl_->mutex);
     if (impl_->realtime.empty()) {
         // A datagram can arrive after the caller's initial poll, before its
@@ -533,6 +538,7 @@ int UdpConnection::receive_realtime(Address& address, std::span<uint8_t> bytes) 
     }
     auto packet = std::move(impl_->realtime.front()); impl_->realtime.pop_front();
     address = packet.address;
+    if (authenticatedPeer) *authenticatedPeer = packet.authenticatedPeer;
     size_t size = std::min(bytes.size(), packet.bytes.size());
     std::copy_n(packet.bytes.begin(), size, bytes.begin()); return static_cast<int>(size);
 }
@@ -571,6 +577,7 @@ void UdpConnection::poll() {
         }
         std::optional<std::vector<uint8_t>> decrypted;
         bool encrypted = false;
+        Id authenticatedPeer = invalid;
         if (!impl_->inviteSecret.empty()) {
             if (packet.size() >= 36 && std::memcmp(packet.data(), "DSE1", 4) == 0) {
                 const uint64_t session = read64(packet.data() + 4);
@@ -579,6 +586,7 @@ void UdpConnection::poll() {
                     if (!peer.logical && !peer.closed && peer.session == session &&
                         peer.secure && peer.secure->established()) {
                         owner = &peer;
+                        authenticatedPeer = id;
                         break;
                     }
                 }
@@ -595,19 +603,21 @@ void UdpConnection::poll() {
         }
         if (peer_group_header(packet)) {
             if (impl_->server && impl_->realtime.size() < 512)
-                impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)}, {packet.begin(), packet.end()}});
+                impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)},
+                                           {packet.begin(), packet.end()}, authenticatedPeer});
             continue;
         }
         if (is_peer_tunnel(packet)) {
             if (impl_->server) {
                 if (impl_->realtime.size() < 512)
-                    impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)}, {packet.begin(), packet.end()}});
+                    impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)},
+                                               {packet.begin(), packet.end()}, authenticatedPeer});
             } else {
 #ifdef DUSKLIGHT_TRANSPORT_TESTING
                 if (impl_->rawTestTunnels) {
                     if (impl_->realtime.size() < 512)
                         impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)},
-                                                   {packet.begin(), packet.end()}});
+                                                   {packet.begin(), packet.end()}, authenticatedPeer});
                     continue;
                 }
 #endif
@@ -630,14 +640,16 @@ void UdpConnection::poll() {
         // game/relay token validator. This bounded queue allocates no peer state.
         if (datagram_kind(packet) == DatagramKind::Realtime) {
             if (impl_->realtime.size() < 512)
-                impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)}, {packet.begin(), packet.end()}});
+                impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)},
+                                           {packet.begin(), packet.end()}, authenticatedPeer});
             continue;
         }
         Id id = impl_->find(from);
         if (id == invalid || !impl_->peers.at(id).ready) continue;
         bool accepted = dispatch_datagram(id, packet, impl_->reliable, [&](auto, auto data) {
             if (impl_->realtime.size() >= 512) return false;
-            impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)}, {data.begin(), data.end()}});
+            impl_->realtime.push_back({{from.sin_addr.s_addr, ntohs(from.sin_port)},
+                                       {data.begin(), data.end()}, id});
             return true;
         });
         if (accepted) impl_->peers.at(id).lastReceive = now;

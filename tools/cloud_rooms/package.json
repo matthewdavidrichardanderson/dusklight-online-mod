@@ -4,7 +4,7 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node test.js",
+    "test": "node test.js && node test_crypto.js",
     "test:local": "node test_local.js",
     "deploy": "wrangler deploy"
   },

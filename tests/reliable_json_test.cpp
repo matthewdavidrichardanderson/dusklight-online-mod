@@ -33,6 +33,25 @@ int main(int argc, char** argv) {
     rejects(packed + "00");
     rejects("Z1"); rejects("Z1000"); rejects("Z1gg"); rejects("Z10000");
     rejects(std::string(reliableJsonLimit + 1, 'x'));
+    // Validate nesting before nlohmann's recursive parser sees untrusted input.
+    const std::string deep = std::string(16000, '[') + "0" + std::string(16000, ']');
+    rejects(deep);
+    std::string deepPacked(ZSTD_compressBound(deep.size()), '\0');
+    auto deepCount = ZSTD_compress(deepPacked.data(), deepPacked.size(),
+                                   deep.data(), deep.size(), 1);
+    deepPacked.resize(deepCount);
+    std::string deepWire = "Z1";
+    constexpr char digits[] = "0123456789abcdef";
+    for (unsigned char c : deepPacked) {
+        deepWire.push_back(digits[c >> 4]);
+        deepWire.push_back(digits[c & 15]);
+    }
+    rejects(deepWire);
+    const std::string shallow = std::string(reliableJsonMaxDepth, '[') + "0" +
+        std::string(reliableJsonMaxDepth, ']');
+    assert(decode_reliable_json(shallow) == json::parse(shallow));
+    const json quotedBrackets = {{"quoted brackets", "[\"[\""}};
+    assert(decode_reliable_json(quotedBrackets.dump()) == quotedBrackets);
     // A valid compressed frame advertising expansion beyond the allowed bound.
     std::string oversized(reliableJsonLimit + 1, 'x');
     std::string compressed(ZSTD_compressBound(oversized.size()), '\0');

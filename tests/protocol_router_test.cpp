@@ -20,8 +20,10 @@ namespace {
 
 class Consumer final : public MessageConsumer {
 public:
+    enum class MalformedHook { None, Retain, Discard, Allow, Udp };
     bool ready = false;
     bool retainForSave = false;
+    MalformedHook malformedHook = MalformedHook::None;
     std::vector<std::string> types;
     std::vector<nlohmann::json> payloads;
     std::vector<std::chrono::steady_clock::time_point> receivedAt;
@@ -29,9 +31,21 @@ public:
 
     bool stage_ready() const override { return ready; }
     bool retain_for_save_recovery(const RoutedMessage& message) override {
+        if (malformedHook == MalformedHook::Retain)
+            (void)message.payload.value("manual_sync", false);
         if (!retainForSave) return false;
         saveMessages.push_back(message);
         return true;
+    }
+    bool discard_stage_message(const RoutedMessage& message) const override {
+        if (malformedHook == MalformedHook::Discard)
+            (void)message.payload.value("manual_sync", false);
+        return false;
+    }
+    bool allow_stage_unready(const RoutedMessage& message) const override {
+        if (malformedHook == MalformedHook::Allow)
+            (void)message.payload.value("manual_sync", false);
+        return false;
     }
     ApplyResult consume(const RoutedMessage& message) override {
         types.push_back(message.payload.at("type").get<std::string>());
@@ -39,7 +53,11 @@ public:
         receivedAt.push_back(message.receivedAt);
         return ApplyResult::Applied;
     }
-    ApplyResult consume_udp(const Event&) override { return ApplyResult::Applied; }
+    ApplyResult consume_udp(const Event& event) override {
+        if (malformedHook == MalformedHook::Udp)
+            (void)event.message.value("manual_sync", false);
+        return ApplyResult::Applied;
+    }
     void peer_joined(std::string_view, std::string_view) override {}
     void peer_left(std::string_view) override {}
 };
@@ -296,5 +314,26 @@ int main() {
     malformed.kind = EventKind::Message;
     malformed.message = nullptr;
     assert(router.route(malformed, true) == ApplyResult::Rejected);
+    // A joined peer can set a known field to the wrong JSON type. The save
+    // recovery and stage hooks run before GameAdapter::consume's own catch.
+    for (const auto hook : {Consumer::MalformedHook::Retain,
+                            Consumer::MalformedHook::Discard,
+                            Consumer::MalformedHook::Allow}) {
+        Consumer adversarial;
+        adversarial.malformedHook = hook;
+        ProtocolRouter guarded(adversarial);
+        Event invalidSnapshot = message("save_snapshot");
+        invalidSnapshot.message["manual_sync"] = "not a boolean";
+        assert(guarded.route(invalidSnapshot, true) == ApplyResult::Rejected);
+        assert(guarded.stats().pendingMessages == 0);
+        assert(adversarial.types.empty());
+    }
+    Consumer visual;
+    visual.malformedHook = Consumer::MalformedHook::Udp;
+    ProtocolRouter visualRouter(visual);
+    Event invalidVisual;
+    invalidVisual.kind = EventKind::UdpMessage;
+    invalidVisual.message = {{"manual_sync", "not a boolean"}};
+    assert(visualRouter.route(invalidVisual, true) == ApplyResult::Rejected);
     return 0;
 }

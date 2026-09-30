@@ -1,5 +1,6 @@
 // Room membership and ICE signaling only. This Worker deliberately has no
 // peer_reliable, UDP, TURN, or gameplay-forwarding endpoint.
+import { createSession, exchange, seal, open, roomRoute, MAX_WIRE } from "./cloud_cipher.js";
 const MAX_PLAYERS = 8;
 const MAX_PENDING = 4;
 const MAX_MESSAGE_BYTES = 16 * 1024;
@@ -32,11 +33,21 @@ function settings(value) {
 }
 
 function send(ws, value) {
-  try { ws.send(JSON.stringify(value)); return true; }
-  catch { try { ws.close(1011, "send failed"); } catch {} return false; }
+  try {
+    const info = attachment(ws);
+    if (info.closing) return false;
+    const wire = seal(info.secure, JSON.stringify(value));
+    ws.serializeAttachment(info); // Persist the consumed nonce before sending.
+    ws.send(wire);
+    return true;
+  }
+  catch { close(ws, 1011, "send failed"); return false; }
 }
 
 function close(ws, code, reason) {
+  // Close handshakes can leave already queued messages to be dispatched.
+  // Persist terminal state so none can revive a rejected encrypted channel.
+  try { ws.serializeAttachment({ ...attachment(ws), closing: true }); } catch {}
   try { ws.close(code, reason); } catch {}
 }
 
@@ -129,16 +140,14 @@ function error(ws, reason, fatal = false) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === "/health") return Response.json({ service: "dusklight-rooms", version: 1 });
+    if (url.pathname === "/health") return Response.json({ service: "dusklight-rooms", version: 2 });
     if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       return new Response("WebSocket upgrade required", { status: 426 });
-    if (!url.pathname.startsWith("/room/")) return new Response("Not found", { status: 404 });
-    let supplied;
-    try { supplied = decodeURIComponent(url.pathname.slice(6)); }
-    catch { return new Response("Invalid room name", { status: 400 }); }
-    const room = normalizedRoom(supplied);
-    if (!room || url.search) return new Response("Invalid room name", { status: 400 });
-    const id = env.ROOMS.idFromName(room);
+    if (!url.pathname.startsWith("/room/v2/"))
+      return new Response("Room encryption update required", { status: 426 });
+    const route = url.pathname.slice(9);
+    if (!hexBytes(route, 32) || url.search) return new Response("Invalid room route", { status: 400 });
+    const id = env.ROOMS.idFromName("v2:" + route);
     return env.ROOMS.get(id).fetch(request);
   },
 };
@@ -166,6 +175,10 @@ export class Room {
   async fetch(request) {
     await this.ready;
     return this.exclusive(async () => {
+      const url = new URL(request.url);
+      const route = url.pathname.startsWith("/room/v2/") ? url.pathname.slice(9) : "";
+      if (!hexBytes(route, 32) || url.search)
+        return new Response("Invalid room route", { status: 400 });
       const sockets = this.state.getWebSockets();
       if (sockets.length >= MAX_PLAYERS + MAX_PENDING ||
           sockets.filter(ws => !attachment(ws).joined).length >= MAX_PENDING)
@@ -174,11 +187,16 @@ export class Room {
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
       const nonce = randomHex();
+      // Connections waiting for the first host must use the same provisional
+      // salt. Socket attachments retain it even if this object hibernates.
+      const pendingSalt = sockets.map(attachment).find(info => !info.joined && !info.closing &&
+        info.deadline > Date.now() && hexBytes(info.salt, 16))?.salt;
       const salt = joined(this.state).length && typeof this.room?.salt === "string" ?
-        this.room.salt : randomHex();
+        this.room.salt : pendingSalt ?? randomHex();
       server.serializeAttachment({ joined: false, deadline: Date.now() + HELLO_TIMEOUT_MS,
-        nonce, salt });
-      send(server, { type: "auth_challenge", nonce, salt });
+        nonce, salt, route, secure: createSession() });
+      server.send(JSON.stringify({ type: "secure_hello", version: 1,
+        public_key: attachment(server).secure.publicKey }));
       await this.armAlarm();
       return new Response(null, { status: 101, webSocket: client });
     });
@@ -196,8 +214,35 @@ export class Room {
 
   async webSocketMessage(ws, raw) {
     await this.ready;
-    if (typeof raw !== "string" || raw.length > MAX_MESSAGE_BYTES ||
-        new TextEncoder().encode(raw).length > MAX_MESSAGE_BYTES) {
+    // Keep record counters, membership changes, and broadcasts in one ordered
+    // transaction. An awaited proof check must not overwrite a newer nonce.
+    return this.exclusive(() => this.handleSocketMessage(ws, raw));
+  }
+
+  async handleSocketMessage(ws, raw) {
+    const current = attachment(ws);
+    if (typeof raw !== "string" || raw.length > MAX_WIRE ||
+        current.closing || !current.secure || (!current.joined && current.deadline <= Date.now())) {
+      close(ws, 4000, "invalid_encrypted_message"); return;
+    }
+    if (!current.secure.txKey) {
+      try {
+        if (raw.length > 256) throw new Error("invalid key exchange");
+        const ready = JSON.parse(raw);
+        if (ready?.type !== "secure_ready" || ready.version !== 1) throw new Error("encryption required");
+        await exchange(current.secure, ready.public_key, current.route);
+        ws.serializeAttachment(current);
+        send(ws, { type: "auth_challenge", nonce: current.nonce, salt: current.salt });
+      } catch { close(ws, 4000, "invalid_key_exchange"); }
+      return;
+    }
+    try {
+      raw = open(current.secure, raw);
+      ws.serializeAttachment(current);
+    } catch {
+      close(ws, 4000, "invalid_encrypted_message"); return;
+    }
+    if (new TextEncoder().encode(raw).length > MAX_MESSAGE_BYTES) {
       error(ws, "invalid_message", true); return;
     }
     let message;
@@ -210,7 +255,7 @@ export class Room {
     const own = attachment(ws);
     if (!own.joined) {
       if (message.type !== "hello") { error(ws, "hello_required", true); return; }
-      await this.exclusive(() => this.hello(ws, message));
+      await this.hello(ws, message);
       return;
     }
     if (message.type === "ice_signal") {
@@ -218,27 +263,32 @@ export class Room {
       if (!target || message.target_client_id === own.id ||
           !Number.isInteger(message.kind) || message.kind < 0 || message.kind > 2 ||
           !Number.isSafeInteger(message.generation) || message.generation < 0 ||
-          typeof message.data !== "string" || message.data.length > MAX_SIGNAL_BYTES) {
+          typeof message.data !== "string" ||
+          new TextEncoder().encode(message.data).length > MAX_SIGNAL_BYTES) {
         error(ws, "invalid_ice_signal"); return;
       }
-      send(target, { type: "ice_signal", client_id: own.id, kind: message.kind,
-        data: message.data, generation: message.generation });
+      const signal = { type: "ice_signal", client_id: own.id, kind: message.kind,
+        data: message.data, generation: message.generation };
+      // Re-encoding numbers and replacing the target with the sender's ID can
+      // enlarge otherwise valid input. Reject it before touching the recipient.
+      if (new TextEncoder().encode(JSON.stringify(signal)).length > MAX_MESSAGE_BYTES) {
+        error(ws, "invalid_ice_signal"); return;
+      }
+      send(target, signal);
       return;
     }
     if (message.type === "room_settings") {
-      await this.exclusive(() => this.changeSettings(ws, message)); return;
+      await this.changeSettings(ws, message); return;
     }
     if (message.type === "settings_ready") {
-      await this.exclusive(() => this.settingsReady(ws, message)); return;
+      await this.settingsReady(ws, message); return;
     }
     if (message.type === "kick") {
-      await this.exclusive(async () => {
-        if (own.id !== this.room?.owner) { error(ws, "not_owner"); return; }
-        const target = member(this.state, message.target_client_id);
-        if (!target || target === ws) { error(ws, "player_not_found"); return; }
-        send(target, { type: "kicked", reason: "removed_by_host" });
-        close(target, 4001, "removed by lobby host");
-      });
+      if (own.id !== this.room?.owner) { error(ws, "not_owner"); return; }
+      const target = member(this.state, message.target_client_id);
+      if (!target || target === ws) { error(ws, "player_not_found"); return; }
+      send(target, { type: "kicked", reason: "removed_by_host" });
+      close(target, 4001, "removed by lobby host");
       return;
     }
     // Fail closed: no peer_reliable, peer_receipt, pose, chat, save, or other
@@ -253,6 +303,7 @@ export class Room {
     const proof = hexBytes(message.code_proof, 32);
     if (message.protocol_version !== 5 || typeof name !== "string" ||
         !CLIENT_NAME.test(name) ||
+        !normalizedRoom(message.room_id) || roomRoute(message.room_id) !== pending.route ||
         !proof || !hexBytes(pending.nonce, 16) || !hexBytes(pending.salt, 16) ||
         (action !== "create" && action !== "join")) {
       error(ws, "invalid_hello", true); return;
@@ -293,7 +344,8 @@ export class Room {
       }
     }
     const id = newClientId(this.state);
-    const info = { joined: true, id, name, capabilities: capabilities(message),
+    const info = { joined: true, id, name, secure: pending.secure, route: pending.route,
+      capabilities: capabilities(message),
       want_puppet: message.want_puppet === true };
     ws.serializeAttachment(info);
     if (!member(this.state, this.room.owner)) this.room.owner = id;

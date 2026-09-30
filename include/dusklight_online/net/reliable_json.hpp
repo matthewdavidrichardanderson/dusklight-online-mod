@@ -11,6 +11,26 @@ namespace dusklight_online::net {
 class ReliableJsonError : public std::runtime_error { public: using std::runtime_error::runtime_error; };
 inline constexpr size_t reliableJsonLimit = 512 * 1024;
 inline constexpr size_t reliablePeerFrameLimit = reliableJsonLimit + 2048;
+inline constexpr size_t reliableJsonMaxDepth = 64;
+inline void check_reliable_json_depth(std::string_view raw) {
+    size_t depth = 0;
+    bool quoted = false;
+    bool escaped = false;
+    for (char c : raw) {
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') quoted = false;
+        } else if (c == '"') quoted = true;
+        else if (c == '{' || c == '[') {
+            if (++depth > reliableJsonMaxDepth)
+                throw ReliableJsonError("reliable JSON nesting too deep");
+        } else if (c == '}' || c == ']') {
+            if (depth == 0) throw ReliableJsonError("invalid reliable JSON nesting");
+            --depth;
+        }
+    }
+}
 inline std::string encode_reliable_json(const nlohmann::json& message, size_t limit = reliableJsonLimit) {
     auto raw = message.dump();
     if (raw.size() > limit) return raw; // existing send limits handle oversized messages
@@ -29,7 +49,10 @@ inline std::string encode_reliable_json(const nlohmann::json& message, size_t li
 }
 inline nlohmann::json decode_reliable_json(std::string_view wire, size_t limit = reliableJsonLimit) {
     if (wire.size() > limit) throw ReliableJsonError("reliable JSON too large");
-    if (!wire.starts_with("Z1")) return nlohmann::json::parse(wire);
+    if (!wire.starts_with("Z1")) {
+        check_reliable_json_depth(wire);
+        return nlohmann::json::parse(wire);
+    }
     wire.remove_prefix(2);
     if (wire.empty() || wire.size() % 2) throw ReliableJsonError("invalid compressed JSON");
     auto digit = [](char c) -> unsigned {
@@ -47,6 +70,7 @@ inline nlohmann::json decode_reliable_json(std::string_view wire, size_t limit =
     std::string raw(static_cast<size_t>(expanded), '\0');
     auto count = ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size());
     if (ZSTD_isError(count) || count != raw.size()) throw ReliableJsonError("invalid compressed JSON frame");
+    check_reliable_json_depth(raw);
     return nlohmann::json::parse(raw);
 }
 }

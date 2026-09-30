@@ -1052,7 +1052,9 @@ private:
         std::array<uint8_t, kMaxUdpDatagramBytes> packet{};
         for (size_t receivedThisTick = 0; receivedThisTick < 512; ++receivedThisTick) {
             UdpConnection::Address endpoint;
-            const int received = mConnections.receive_realtime(endpoint, packet);
+            UdpConnection::Id authenticatedPeer = UdpConnection::invalid;
+            const int received = mConnections.receive_realtime(endpoint, packet,
+                                                               &authenticatedPeer);
             if (received < 0) return;
             sockaddr_in from{};
             from.sin_family = AF_INET;
@@ -1069,12 +1071,13 @@ private:
                     const auto target = tunnel_read(wire.subspan(13 + i * 8, 8));
                     if (!target || std::find(seen.begin(), seen.end(), target) != seen.end()) continue;
                     seen[i] = target;
-                    route_peer_datagram(from, peer_tunnel(sender, target, payload));
+                    route_peer_datagram(from, peer_tunnel(sender, target, payload),
+                                        authenticatedPeer);
                 }
                 continue;
             }
             if (dusklight_online::net::is_peer_tunnel(wire)) {
-                route_peer_datagram(from, wire);
+                route_peer_datagram(from, wire, authenticatedPeer);
                 continue;
             }
             if (static_cast<size_t>(received) < sizeof(UdpRelayHeader)) {
@@ -1098,6 +1101,7 @@ private:
                 continue;
             }
             Client& sender = senderIt->second;
+            if (sender.sock != authenticatedPeer) continue;
             const uint8_t* payload = packet.data() + sizeof(UdpRelayHeader);
 
             if (header.type == kUdpPacketTypeRelayRegister) {
@@ -1211,7 +1215,8 @@ private:
         }
     }
 
-    void route_peer_datagram(const sockaddr_in& from, std::span<const uint8_t> wire) {
+    void route_peer_datagram(const sockaddr_in& from, std::span<const uint8_t> wire,
+                             UdpConnection::Id authenticatedPeer) {
         using namespace dusklight_online::net;
         if (!is_peer_tunnel(wire)) return;
         const auto senderId = "client_" + std::to_string(tunnel_read(wire.subspan(4, 8)));
@@ -1221,6 +1226,7 @@ private:
             source->second.closeAfterFlush || destination->second.closeAfterFlush) return;
         auto& sender = source->second; auto& target = destination->second;
         if (sender.roomId.empty() || sender.roomId != target.roomId ||
+            sender.sock != authenticatedPeer ||
             !sender.udpAddrKnown || !same_udp_endpoint(from, sender.udpAddr)) return;
         const auto now = SteadyClock::now();
         if (now - sender.udpRateWindowStarted >= std::chrono::seconds(1)) {

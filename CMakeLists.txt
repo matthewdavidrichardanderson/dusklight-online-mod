@@ -331,6 +331,7 @@ set(ONLINE_CORE_SOURCES
     ${ONLINE_INVITE_SOURCES}
     src/net/transport.cpp
     src/net/auth_code.cpp
+    src/net/cloud_cipher.cpp
     src/net/udp_codec.cpp
 )
 
@@ -544,6 +545,14 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(dusklight_online_auth_code_test PRIVATE include)
     add_test(NAME dusklight_online_auth_code COMMAND dusklight_online_auth_code_test)
 
+    add_executable(dusklight_online_cloud_cipher_test
+        tests/cloud_cipher_test.cpp src/net/cloud_cipher.cpp src/net/auth_code.cpp
+        vendor/monocypher/monocypher.c)
+    target_compile_features(dusklight_online_cloud_cipher_test PRIVATE cxx_std_20)
+    target_include_directories(dusklight_online_cloud_cipher_test PRIVATE include)
+    target_link_libraries(dusklight_online_cloud_cipher_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME dusklight_online_cloud_cipher COMMAND dusklight_online_cloud_cipher_test)
+
     add_executable(dusklight_online_secure_datagram_test
         tests/secure_datagram_test.cpp src/net/secure_datagram.cpp
         vendor/monocypher/monocypher.c)
@@ -567,6 +576,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${ONLINE_CORE_SOURCES}
     )
     target_compile_features(dusklight_online_transport_test PRIVATE cxx_std_20)
+    target_compile_definitions(dusklight_online_transport_test PRIVATE DUSKLIGHT_DIRECT_SECURITY_TESTING=1)
     target_include_directories(dusklight_online_transport_test PRIVATE include src)
     target_link_libraries(dusklight_online_transport_test PRIVATE
         nlohmann_json::nlohmann_json
@@ -582,6 +592,7 @@ if (DUSKLIGHT_ONLINE_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${ONLINE_CORE_SOURCES}
     )
     target_compile_features(dusklight_online_cloud_room_transport_test PRIVATE cxx_std_20)
+    target_compile_definitions(dusklight_online_cloud_room_transport_test PRIVATE DUSKLIGHT_CLOUD_SECURITY_TESTING=1)
     target_include_directories(dusklight_online_cloud_room_transport_test PRIVATE include src)
     target_link_libraries(dusklight_online_cloud_room_transport_test PRIVATE
         nlohmann_json::nlohmann_json ${ONLINE_ZSTD_TARGET})

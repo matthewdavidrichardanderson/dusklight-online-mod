@@ -147,7 +147,7 @@ bool ReliableUdp::send(LogicalPeerId id, std::span<const uint8_t> bytes, uint16_
 bool ReliableUdp::input(LogicalPeerId id, std::span<const uint8_t> bytes) {
     auto it = impl_->peers.find(id);
     if (it == impl_->peers.end() || it->second.failed || bytes.size() < headerBytes + 24 ||
-        bytes.size() > maxDatagramBytes || bytes[0] != 'D' || bytes[1] != 'U' ||
+        bytes.size() > maxReceiveDatagramBytes || bytes[0] != 'D' || bytes[1] != 'U' ||
         bytes[2] != 'R' || bytes[3] != '1' || get(bytes.subspan(4, 8)) != it->second.session) return false;
     auto group = get(bytes.subspan(12, 2));
     if (group >= impl_->groupCount) return false;

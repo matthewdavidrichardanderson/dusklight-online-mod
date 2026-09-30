@@ -235,6 +235,15 @@ public:
     void tick();
     bool send(const nlohmann::json& message);
     bool send_to(const std::string& peerId, const nlohmann::json& message);
+#if defined(DUSKLIGHT_CLOUD_SECURITY_TESTING)
+    // Simulate a modified peer sending a control frame over the authenticated mesh.
+    bool send_test_peer_message(const std::string& peerId, const nlohmann::json& message);
+#endif
+#if defined(DUSKLIGHT_DIRECT_SECURITY_TESTING)
+    // Simulate a direct guest claiming another player's visual sender ID.
+    bool send_test_visual_as(const nlohmann::json& message,
+                             const std::string& claimedSender);
+#endif
     bool send_visual(const nlohmann::json& message,
                      udp::PacketType type = udp::PacketType::PoseMsgpack);
     bool send_remote_object(const udp::RemoteObjectPacket& object);

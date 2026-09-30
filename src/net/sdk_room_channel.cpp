@@ -1,4 +1,5 @@
 #include "dusklight_online/net/sdk_room_channel.hpp"
+#include "dusklight_online/net/cloud_cipher.hpp"
 
 #include <mods/svc/websocket.hpp>
 
@@ -16,7 +17,7 @@ public:
         mods::ws::Options options;
         options.url = std::string(url);
         options.connectTimeoutMs = 8000;
-        options.maxMessageBytes = 16 * 1024;
+        options.maxMessageBytes = CloudCipher::maxWire;
         connection_ = mods::ws::connect(options);
         if (!connection_) {
             error = "Could not open the Cloudflare room connection";

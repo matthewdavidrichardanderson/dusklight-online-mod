@@ -1,5 +1,6 @@
 #include "dusklight_online/net/peer_delivery.hpp"
 #include "dusklight_online/net/auth_code.hpp"
+#include "dusklight_online/net/cloud_cipher.hpp"
 #include "dusklight_online/net/reliable_json.hpp"
 #include "dusklight_online/net/pose_ack_history.hpp"
 #include "dusklight_online/net/transport.hpp"
@@ -187,8 +188,7 @@ std::string cloud_room_url(std::string_view base, std::string_view room) {
     std::string result(base);
     if (result.starts_with("https://")) result.replace(0, 8, "wss://");
     while (result.ends_with('/')) result.pop_back();
-    result += "/room/";
-    for (char c : room) result += c == ' ' ? "%20" : std::string(1, c);
+    result += "/room/v2/" + cloud_room_route(room);
     return result;
 }
 
@@ -230,6 +230,7 @@ struct Transport::Impl {
     socket_t socket = kInvalidSocket;
     UdpConnection connections;
     std::unique_ptr<RoomChannel> cloudChannel;
+    std::optional<CloudCipher> cloudCipher;
     std::string cloudUrl;
     std::string cloudStunHost;
     uint16_t cloudStunPort = 0;
@@ -590,6 +591,7 @@ struct Transport::Impl {
     void close_all() {
         stop_udp_tx_pacer();
         if (cloudChannel) cloudChannel->close();
+        cloudCipher.reset();
         connections.close();
         socket = kInvalidSocket;
         listening = udpOpen = false;
@@ -700,9 +702,13 @@ struct Transport::Impl {
         if (status.mode != Mode::CloudRoom) return queue(socket, tx, message);
         // This is an egress security boundary, not merely a Worker policy.
         // Gameplay payloads can only travel on the native ICE mesh.
-        if (!cloudChannel || !cloud_control_type(message.value("type", ""))) return false;
-        const std::string wire = message.dump();
-        return wire.size() <= 16 * 1024 && cloudChannel->send(wire);
+        if (!cloudChannel || !cloudCipher || !cloudCipher->established() ||
+            !cloud_control_type(message.value("type", ""))) return false;
+        const std::string wire = cloudCipher->seal(message.dump());
+        if (wire.empty()) return false;
+        if (cloudChannel->send(wire)) return true;
+        deliveryFailure = true;
+        return false;
     }
 
     bool queue_peer(Peer& peer, const json& message) {
@@ -888,6 +894,11 @@ struct Transport::Impl {
     bool begin_cloud() {
         events.clear();
         ++connectionEpoch;
+        cloudCipher.emplace(cloud_room_route(status.room));
+        if (!cloudCipher->valid()) {
+            fail("Could not initialize cloud room encryption", false);
+            return false;
+        }
         stop_udp_tx_pacer();
         connections.close();
         socket = kInvalidSocket;
@@ -1324,7 +1335,8 @@ struct Transport::Impl {
         if (status.mode == Mode::CloudRoom) return;
         while (true) {
             UdpConnection::Address address;
-            const int count = connections.receive_realtime(address, packet);
+            UdpConnection::Id authenticatedPeer = UdpConnection::invalid;
+            const int count = connections.receive_realtime(address, packet, &authenticatedPeer);
             if (count < 0) return;
             sockaddr_in from{};
             from.sin_family = AF_INET;
@@ -1348,7 +1360,8 @@ struct Transport::Impl {
             if (status.mode == Mode::DirectHost) {
                 auto peer = directPeers.find(admittedSender);
                 if (peer == directPeers.end() || !peer->second.welcomed ||
-                    peer->second.kickPending) {
+                    peer->second.kickPending ||
+                    peer->second.socket != authenticatedPeer) {
                     // Unknown sender IDs must allocate zero Decoder state.
                     continue;
                 }
@@ -1642,21 +1655,9 @@ struct Transport::Impl {
             deliveryFailure = true; return;
         }
         if (type == "cloud_join_failure") {
-            const auto targetValue = message.find("unreachable_client_id");
-            if (status.isOwner && targetValue != message.end() && targetValue->is_string()) {
-                const std::string target = targetValue->get<std::string>();
-                const auto arrival = cloudNewcomers.find(target);
-                const bool reporterWasHereFirst = !cloudNewcomers.contains(name) ||
-                    (arrival != cloudNewcomers.end() && cloudNewcomers.at(name) < arrival->second);
-                if (target != name && arrival != cloudNewcomers.end() &&
-                    reporterWasHereFirst && meshRoutes.contains(name) && meshRoutes.at(name) &&
-                    meshLinks.contains(target) &&
-                    std::chrono::steady_clock::now() - arrival->second < std::chrono::seconds(60) &&
-                    queue_primary({{"type", "kick"}, {"target_client_id", target}})) {
-                    emit(EventKind::Diagnostic, target,
-                         "unreachable_newcomer_kick_requested_by=" + name);
-                }
-            }
+            // A joined peer can report any client ID, including a healthy
+            // newcomer. Only the owner's own ICE timeout may remove a peer.
+            emit(EventKind::Diagnostic, name, "ignored_untrusted_newcomer_failure");
             return;
         }
         message["client_id"] = name;
@@ -2209,11 +2210,30 @@ struct Transport::Impl {
                 emit(EventKind::Diagnostic, {}, "room_websocket_open");
                 // The room sends a fresh challenge after opening.
             } else if (event.kind == RoomChannel::EventKind::Message) {
-                if (event.text.size() > 16 * 1024) {
+                if (event.text.size() > CloudCipher::maxWire) {
                     fail("Cloud room message exceeds limit", false); return;
                 }
                 try {
-                    const auto message = json::parse(event.text);
+                    if (!cloudCipher || !cloudCipher->established()) {
+                        const auto hello = json::parse(event.text);
+                        if (!cloudCipher || !hello.is_object() ||
+                            hello.value("type", "") != "secure_hello" ||
+                            hello.value("version", 0) != 1 ||
+                            !cloudCipher->exchange(hello.value("public_key", ""))) {
+                            fail("Cloud room service needs the encryption update", false); return;
+                        }
+                        const json ready = {{"type", "secure_ready"}, {"version", 1},
+                                            {"public_key", cloudCipher->public_key()}};
+                        if (!cloudChannel->send(ready.dump())) {
+                            fail("Could not establish cloud room encryption", false); return;
+                        }
+                        continue;
+                    }
+                    const auto plaintext = cloudCipher->open(event.text);
+                    if (!plaintext) {
+                        fail("Invalid encrypted cloud room message", false); return;
+                    }
+                    const auto message = json::parse(*plaintext);
                     if (!message.is_object() || !message.contains("type") ||
                         !message["type"].is_string()) {
                         fail("Invalid cloud room message", false); return;
@@ -2376,21 +2396,22 @@ struct Transport::Impl {
                                     std::chrono::steady_clock::now() - newcomer->second <
                                         std::chrono::seconds(60)) {
                                     if (elapsedSeconds >= attempt.nextEvictionSecond) {
-                                        bool requested = false;
                                         if (status.isOwner) {
-                                            requested = queue_primary({{"type", "kick"},
+                                            const bool requested = queue_primary({{"type", "kick"},
                                                 {"target_client_id", id}});
+                                            emit(EventKind::Diagnostic, id,
+                                                 "unreachable_newcomer_removal_requested=" +
+                                                 std::string(requested ? "yes " : "no ") +
+                                                 connections.mesh_diagnostics(id));
                                         } else if (meshLinks.contains(status.ownerClientId) &&
                                                    delivery_direct(status.ownerClientId)) {
-                                            requested = send_peer_gameplay({
-                                                {"type", "cloud_join_failure"},
-                                                {"target_client_id", status.ownerClientId},
-                                                {"unreachable_client_id", id}});
+                                            // An incumbent's report cannot authorize a
+                                            // kick; wait for the owner/newcomer to resolve
+                                            // this link instead of evicting a healthy peer.
+                                            emit(EventKind::Diagnostic, id,
+                                                 "waiting_for_newcomer_route " +
+                                                 connections.mesh_diagnostics(id));
                                         }
-                                        emit(EventKind::Diagnostic, id,
-                                             "unreachable_newcomer_removal_requested=" +
-                                             std::string(requested ? "yes " : "no ") +
-                                             connections.mesh_diagnostics(id));
                                         attempt.nextEvictionSecond =
                                             static_cast<uint32_t>(elapsedSeconds + 5);
                                     }
@@ -2662,6 +2683,32 @@ bool Transport::send_to(const std::string& peerId, const nlohmann::json& message
     }
     return true;
 }
+
+#if defined(DUSKLIGHT_CLOUD_SECURITY_TESTING)
+bool Transport::send_test_peer_message(const std::string& peerId,
+                                       const nlohmann::json& message) {
+    if (impl_->status.mode != Mode::CloudRoom || !impl_->status.welcomed ||
+        !message.is_object() || !impl_->meshLinks.contains(peerId)) return false;
+    nlohmann::json targeted = message;
+    targeted["target_client_id"] = peerId;
+    return impl_->send_peer_gameplay(targeted);
+}
+#endif
+
+#if defined(DUSKLIGHT_DIRECT_SECURITY_TESTING)
+bool Transport::send_test_visual_as(const nlohmann::json& message,
+                                    const std::string& claimedSender) {
+    if (impl_->status.mode != Mode::DirectJoin || !impl_->status.welcomed ||
+        !message.is_object() || !impl_->udpRemoteAddressKnown) return false;
+    const auto datagrams = udp::encode_message(message, claimedSender,
+                                                udp::PacketType::PoseMsgpack);
+    if (datagrams.empty()) return false;
+    for (const auto& datagram : datagrams) {
+        if (!impl_->send_udp_datagram_now(impl_->udpRemoteAddress, datagram)) return false;
+    }
+    return true;
+}
+#endif
 
 bool Transport::send_visual(const nlohmann::json& message, udp::PacketType type) {
     if (!impl_->status.enabled || !impl_->status.welcomed || !message.is_object() ||
