@@ -5960,6 +5960,10 @@ ApplyResult GameAdapter::consume_progression(const RoutedMessage& routed) {
         }
         if (merged > current) {
             dComIfGs_setMaxLife(static_cast<u8>(merged));
+            // Match moveLife's heart-piece/container refill through TP's
+            // pending health counter, without granting the capacity again.
+            dComIfGp_setItemLifeCount(
+                static_cast<f32>(dComIfGs_getMaxLifeGauge() - dComIfGs_getLife()), 0);
         }
         return ApplyResult::Applied;
     }
