@@ -35,6 +35,23 @@ int main() {
         if (!condition) std::cerr << message << '\n';
         return condition;
     };
+    // Only the enumerated loose refills become local. Check every item ID so
+    // neighbouring traps, portals, heart upgrades and keys remain shareable.
+    const std::set<int> looseRefills = {
+        0x00, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12,
+        0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+    };
+    for (int item = 0; item <= 255; ++item) {
+        for (const auto check : {"", "freestanding:F_SP122:255"}) {
+            if (!expect(local_only_randomizer_pickup(item, check) == looseRefills.contains(item),
+                        "Unnamed pickup policy changed a protected reward or shared a loose refill")) return 1;
+        }
+        for (const auto check : {"chest:F_SP122:11", "freestanding:F_SP122:133",
+                                 "shop:14", "boss:D_MN05A", "chest:F_SP122:255"}) {
+            if (!expect(!local_only_randomizer_pickup(item, check),
+                        "Named reward was incorrectly made local")) return 1;
+        }
+    }
     using A = WalletTotalAction;
     if (!expect(wallet_total_action(125, 100, 0, 300) == A::Apply, "Gain rejected") ||
         !expect(wallet_total_action(75, 100, 0, 300) == A::Apply, "Spending rejected") ||

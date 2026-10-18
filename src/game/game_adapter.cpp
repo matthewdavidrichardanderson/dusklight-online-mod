@@ -2359,6 +2359,7 @@ void GameAdapter::notify_local_item_grant(const ItemGiveInfo& info) {
 
     std::string checkName = info.check_name != nullptr ? info.check_name : "";
     if (repeatable_pickup_check(checkName)) checkName.clear();
+    if (local_only_randomizer_pickup(info.item, checkName)) return;
     // Ordinary currency pickups need only the wallet update. Named one-time
     // rewards still carry their location and notification, but not extra money.
     if (checkName.empty() && rupee_pickup_amount(info.item) != 0) return;
@@ -4404,6 +4405,10 @@ ApplyResult GameAdapter::consume_randomizer(const RoutedMessage& message) {
             return ApplyResult::Applied;
         }
     }
+
+    // Apply the same policy to older peers which still send ordinary drops.
+    if (local_only_randomizer_pickup(itemToApply, checkName))
+        return ApplyResult::IgnoredByPolicy;
 
     // Freestanding checks normally publish their item bit at the end of the
     // get-item demo. Carry it with the resolved reward as well, so another

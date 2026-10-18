@@ -12,6 +12,15 @@ inline bool repeatable_pickup_check(std::string_view name) {
     return name.starts_with("freestanding:") && name.ends_with(":255");
 }
 
+// These IDs are ordinary health/ammo refills in Randomizer. Missing source
+// metadata alone must never suppress equipment, keys or other progression.
+inline bool local_only_randomizer_pickup(int item, std::string_view check) {
+    if (!check.empty() && !repeatable_pickup_check(check)) return false;
+    return item == 0x00 ||                    // Heart
+           (item >= 0x0a && item <= 0x12) ||  // Bombs, arrows, slingshot seeds
+           (item >= 0x16 && item <= 0x1d);    // Water bombs and bomblings
+}
+
 // Vanilla and Randomizer retain these seven currency IDs. Sharing their
 // wallet effect and executing their remote item grant must not both add money.
 inline int rupee_pickup_amount(int item) {
