@@ -236,6 +236,10 @@ struct Transport::Impl {
     uint16_t cloudStunPort = 0;
     std::chrono::steady_clock::time_point cloudJoinedAt{};
     std::optional<std::chrono::steady_clock::time_point> cloudDisconnectedAt;
+    std::string cloudResumeToken, cloudRetireToken, cloudMeshKey;
+    bool cloudRecovering = false, cloudRecoveryOpening = false;
+    std::chrono::steady_clock::time_point cloudRecoveryStarted{}, cloudRetryAt{};
+    static constexpr auto cloudRecoveryLimit = std::chrono::seconds(8);
     struct CloudLinkAttempt {
         std::chrono::steady_clock::time_point started;
         uint32_t nextLogSecond = 3;
@@ -604,6 +608,9 @@ struct Transport::Impl {
         std::deque<Event> accepted;
         if (preserveAcceptedEvents) accepted = std::move(events);
         close_all();
+        if (!cloudResumeToken.empty()) cloudRetireToken = cloudResumeToken;
+        cloudResumeToken.clear(); cloudMeshKey.clear();
+        cloudRecovering = cloudRecoveryOpening = false;
         rx.clear();
         tx.clear();
         events.clear();
@@ -647,6 +654,7 @@ struct Transport::Impl {
         udpDecoder.reset();
         eventQueueOverflow = false;
         if (!keepConfiguration) {
+            cloudRetireToken.clear();
             cloudDisconnectedAt.reset();
             status = {};
             automaticReconnect = true;
@@ -670,6 +678,8 @@ struct Transport::Impl {
               bool preserveAcceptedEvents = true) {
         const bool wasActive = status.state != State::Disconnected || status.reconnecting;
         const bool reconnect = sessionEstablished && automaticReconnect && allowReconnect;
+        const bool repeatCloudAttempt = status.mode == Mode::CloudRoom &&
+            status.reconnecting && !status.welcomed && reconnect;
         if (wasActive && status.mode == Mode::CloudRoom) {
             const auto now = std::chrono::steady_clock::now();
             const auto uptime = cloudJoinedAt == std::chrono::steady_clock::time_point{} ? 0 :
@@ -691,7 +701,7 @@ struct Transport::Impl {
         automaticReconnect = reconnect;
         status.enabled = reconnect;
         status.reconnecting = reconnect;
-        if (wasActive) {
+        if (wasActive && !repeatCloudAttempt) {
             emit(EventKind::Disconnected, {}, reason);
         }
     }
@@ -716,6 +726,7 @@ struct Transport::Impl {
 
     bool queue_primary(const json& message) {
         if (status.mode != Mode::CloudRoom) return queue(socket, tx, message);
+        if (cloudRecovering && message.value("type", "") != "hello") return false;
         // This is an egress security boundary, not merely a Worker policy.
         // Gameplay payloads can only travel on the native ICE mesh.
         if (!cloudChannel || !cloudCipher || !cloudCipher->established() ||
@@ -900,6 +911,14 @@ struct Transport::Impl {
             hello["code_proof"] = auth::room_proof(*key, authNonce);
             if (relayCreateRoom) hello["code_verifier"] = auth::hex(verifier);
             hello["action"] = relayCreateRoom ? "create" : "join";
+            if (status.mode == Mode::CloudRoom) {
+                hello["capabilities"]["room_resume_v1"] = true;
+                if (cloudRecovering) {
+                    hello["action"] = "join";
+                    hello["resume_token"] = cloudResumeToken;
+                    hello["resume_client_id"] = status.clientId;
+                } else if (!cloudRetireToken.empty()) hello["retire_token"] = cloudRetireToken;
+            }
             if (relayCreateRoom) {
                 hello["settings"] = settings_json(status.settings);
             }
@@ -932,6 +951,77 @@ struct Transport::Impl {
         }
         status.state = State::Connecting;
         return true;
+    }
+
+    bool healthy_cloud_gameplay() const {
+        return meshEnabled && !deliveryFailure && !settingsRequested && !settingsBarrier &&
+            std::all_of(meshLinks.begin(), meshLinks.end(),
+                [this](const auto& peer) { return delivery_direct(peer.first); });
+    }
+
+    bool recover_cloud_socket(const RoomChannel::Event& event) {
+        // Protocol rejections, kicks and intentional closes remain terminal.
+        if (cloudResumeToken.empty() || !status.welcomed ||
+            !(event.closeCode == 0 || event.closeCode == 1001 ||
+              event.closeCode == 1006 || event.closeCode == 1011) ||
+            (event.closeError != 0 && event.closeError != 6) || !healthy_cloud_gameplay()) return false;
+        const auto now = std::chrono::steady_clock::now();
+        const bool retry = cloudRecovering;
+        if (!cloudRecovering) {
+            cloudRecoveryStarted = now;
+            emit(EventKind::Diagnostic, {}, "room_recovery_started gameplay=preserved");
+        }
+        cloudRecovering = true;
+        cloudRecoveryOpening = false;
+        cloudChannel->close();
+        cloudCipher.reset();
+        helloSent = false; authNonce.clear(); authSalt.clear(); challengeStartedAt = {};
+        cloudRetryAt = now + (retry ? std::chrono::milliseconds(500) : std::chrono::milliseconds(0));
+        return true;
+    }
+
+    bool pump_cloud_recovery() {
+        if (!cloudRecovering) return true;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - cloudRecoveryStarted >= cloudRecoveryLimit || !healthy_cloud_gameplay()) {
+            fail("Room recovery could not preserve gameplay; reconnecting the session");
+            return false;
+        }
+        if (!cloudRecoveryOpening && now >= cloudRetryAt) {
+            cloudCipher.emplace(cloud_room_route(status.room));
+            std::string error;
+            cloudRecoveryOpening = cloudCipher->valid() && cloudChannel->open(cloudUrl, error);
+            cloudRetryAt = now + std::chrono::milliseconds(500);
+        }
+        return true;
+    }
+
+    void accept_cloud_resume(const json& message) {
+        // Preserve every gameplay sequence, journal and decoder only when the
+        // server confirms the exact session. A changed roster/settings epoch
+        // needs the ordinary, visible full reconnect instead.
+        std::set<std::string> peers;
+        bool valid = cloudRecovering && message.value("protocol_version", 0) == 5 &&
+            message.value("client_id", "") == status.clientId &&
+            message.value("owner_client_id", "") == status.ownerClientId &&
+            message.value("mesh_key", "") == cloudMeshKey &&
+            message.value("settings_generation", uint64_t(-1)) == settingsGeneration &&
+            message.value("settings", json::object()) == settings_json(status.settings) &&
+            message.value("semantic_visuals_ready", false) == status.semanticVisualsReady &&
+            message.value("snapshot_deltas_ready", false) == status.snapshotDeltasReady &&
+            message.contains("peers") && message.at("peers").is_array() && healthy_cloud_gameplay();
+        if (valid) for (const auto& peer : message.at("peers")) {
+            const auto id = peer.value("client_id", "");
+            if (!meshLinks.contains(id) || !peers.insert(id).second) valid = false;
+        }
+        if (!valid || peers.size() != meshLinks.size()) {
+            fail("Room changed during recovery; reconnecting the session"); return;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - cloudRecoveryStarted).count();
+        cloudRecovering = cloudRecoveryOpening = false;
+        emit(EventKind::Diagnostic, {}, "room_recovery_completed downtime_ms=" +
+            std::to_string(elapsed) + " gameplay=preserved");
     }
 
     bool begin_connect() {
@@ -1624,6 +1714,10 @@ struct Transport::Impl {
     bool send_mesh_message(const json& message) {
         const auto type = message.value("type", "");
         const bool setting = type == "room_settings";
+        if (setting && cloudRecovering) {
+            emit(EventKind::Error, {}, "Lobby connection is recovering; retry the settings change shortly");
+            return true; // Rejected explicitly without resetting healthy gameplay.
+        }
         if (settingsRequested || settingsBarrier) return defer_gameplay(message);
         if (!setting) {
             if (status.mode != Mode::CloudRoom && type == "progression_state") {
@@ -1683,6 +1777,12 @@ struct Transport::Impl {
     }
     void receive_primary(const json& message) {
         const auto type = message.value("type", "");
+        if (status.mode == Mode::CloudRoom && type == "room_resumed") {
+            accept_cloud_resume(message); return;
+        }
+        if (cloudRecovering && type != "auth_challenge") {
+            fail("Room recovery was rejected; reconnecting the session"); return;
+        }
         if (status.mode == Mode::CloudRoom && type != "auth_challenge" && type != "welcome" &&
             type != "peer_joined" && type != "peer_left" &&
             type != "owner_changed" && type != "room_settings" &&
@@ -1810,7 +1910,7 @@ struct Transport::Impl {
             return;
         }
         const std::string type = message.value("type", "");
-        if (type == "auth_challenge" && !status.welcomed && !helloSent) {
+        if (type == "auth_challenge" && (!status.welcomed || cloudRecovering) && !helloSent) {
             const std::string nonce = message.value("nonce", "");
             const std::string salt = message.value("salt", "");
             if (nonce.size() != 32 || auth::direct_proof("check", nonce).empty() ||
@@ -1839,6 +1939,10 @@ struct Transport::Impl {
                     fail("Cloud room service needs the secure peer update", false);
                     return;
                 }
+                cloudMeshKey = meshKey;
+                const auto token = message.value("resume_token", "");
+                cloudResumeToken = auth::unhex_digest(token) ? token : std::string{};
+                cloudRetireToken.clear();
             }
             status.welcomed = true;
             if (is_room_mode(status.mode)) {
@@ -2151,11 +2255,12 @@ struct Transport::Impl {
             else queue_primary({{"type", "pong"}});
         } else if (type == "error") {
             const std::string reason = message.value("error", "remote error");
-            emit(EventKind::Error, {}, reason, message);
+            if (!(status.mode == Mode::CloudRoom && status.reconnecting && reason == "room_recovering"))
+                emit(EventKind::Error, {}, reason, message);
             if ((is_room_mode(status.mode) || status.mode == Mode::DirectJoin) && !status.welcomed) {
                 const bool recreate = reason == "lobby_not_found" && relayMayRecreateRoom;
                 relayCreateRoom = recreate;
-                automaticReconnect = recreate;
+                automaticReconnect = recreate || (reason == "room_recovering" && sessionEstablished);
                 handshakeRejected = true;
                 status.error = recreate ? "Room vanished; recreating it" : reason;
             }
@@ -2286,7 +2391,8 @@ struct Transport::Impl {
                      "room_websocket_closed code=" + std::to_string(event.closeCode) +
                      " error=" + std::to_string(event.closeError) +
                      " reason=" + event.text);
-                fail(event.text.empty() ? "Cloud room connection closed" : event.text);
+                if (!recover_cloud_socket(event))
+                    fail(event.text.empty() ? "Cloud room connection closed" : event.text);
                 return;
             } else if (event.kind == RoomChannel::EventKind::Diagnostic) {
                 emit(EventKind::Diagnostic, {}, event.text);
@@ -2335,6 +2441,7 @@ struct Transport::Impl {
             return;
         }
         connections.poll();
+        if (!pump_cloud_recovery()) return;
         if (status.state == State::Connected && status.mode != Mode::DirectHost &&
             !helloSent && challengeStartedAt != std::chrono::steady_clock::time_point{} &&
             std::chrono::steady_clock::now() - challengeStartedAt > std::chrono::seconds(12)) {
@@ -2466,7 +2573,7 @@ struct Transport::Impl {
                 // Compiled only into the standalone harness, never the mod.
                 serviceSignals = std::getenv("DUSKLIGHT_TEST_RELAY_ONLY") == nullptr;
 #endif
-                for (size_t n = 0; serviceSignals && n < 128 && connections.mesh_pop_signal(target, signal); ++n) {
+                for (size_t n = 0; serviceSignals && !cloudRecovering && n < 128 && connections.mesh_pop_signal(target, signal); ++n) {
                     if (!queue_primary({{"type", "ice_signal"}, {"target_client_id", target},
                         {"kind", static_cast<int>(signal.kind)}, {"data", signal.text}, {"generation", signal.generation}})) {
                         fail("ICE signaling queue full"); return;
@@ -2679,6 +2786,10 @@ bool Transport::send(const nlohmann::json& message) {
         return impl_->broadcast(message);
     }
     const auto type = message.value("type", "");
+    if (impl_->cloudRecovering && type == "kick") {
+        impl_->emit(EventKind::Error, {}, "Lobby connection is recovering; retry removing the player shortly");
+        return false;
+    }
     const bool cloudPeerControl = impl_->status.mode == Mode::CloudRoom &&
         (type == "ping" || type == "pong" || type == "presence" ||
          type == "puppet_preference");
@@ -2705,6 +2816,10 @@ bool Transport::send_to(const std::string& peerId, const nlohmann::json& message
     nlohmann::json targeted = message;
     targeted["target_client_id"] = peerId;
     const auto type = targeted.value("type", "");
+    if (impl_->cloudRecovering && type == "kick") {
+        impl_->emit(EventKind::Error, {}, "Lobby connection is recovering; retry removing the player shortly");
+        return false;
+    }
     const bool cloudPeerControl = impl_->status.mode == Mode::CloudRoom &&
         (type == "ping" || type == "pong" || type == "presence" ||
          type == "puppet_preference");

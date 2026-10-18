@@ -16,7 +16,7 @@ const settings = { dummy_model: true, sync_flags: true, sync_world: false,
 const room = `Local Test ${Date.now()}`;
 const code = "local-secret-code";
 const secrets = [room, code];
-async function sendHello(client, action, name, lobbyCode = code, challenge) {
+async function sendHello(client, action, name, lobbyCode = code, challenge, extra = {}) {
   const { nonce, salt } = challenge ?? await client.next("auth_challenge");
   const verifier = pbkdf2Sync(lobbyCode, Buffer.from(
     `dusklight-lobby-code-v1:${room.toLowerCase()}\0`), 100_000, 32, "sha256");
@@ -29,7 +29,7 @@ async function sendHello(client, action, name, lobbyCode = code, challenge) {
     action, name, room_id: room, code_proof: proof,
     ...(action === "create" ? { code_verifier: verifier.toString("hex") } : {}),
     settings, want_puppet: true,
-    capabilities: { semantic_visual_v1: true, semantic_snapshot_delta_v1: true } });
+    capabilities: { semantic_visual_v1: true, semantic_snapshot_delta_v1: true }, ...extra });
 }
 
 const host = await connect(room);
@@ -184,6 +184,52 @@ for (const client of [host, guest, wrong, rejoined]) {
     for (const secret of secrets) assert.equal(wire.includes(secret), false);
   }
 }
+const hostClosed = new Promise(resolve => host.socket.addEventListener("close", resolve, { once: true }));
 await host.close();
+await hostClosed;
 await rejoined.close();
+// Real Durable Object socket replacement: the original close callback can
+// arrive after the replacement is already authenticated. It must not evict it.
+const recoveryHost = await connect(room);
+await sendHello(recoveryHost, "create", "Recovery Host", code, undefined,
+  { capabilities: { semantic_visual_v1: true, semantic_snapshot_delta_v1: true, room_resume_v1: true } });
+const recoveryWelcome = await recoveryHost.next("welcome");
+assert.match(recoveryWelcome.resume_token, /^[0-9a-f]{64}$/);
+const recoveryGuest = await connect(room);
+await sendHello(recoveryGuest, "join", "Legacy Guest");
+const recoveryGuestWelcome = await recoveryGuest.next("welcome");
+await recoveryHost.next("peer_joined");
+const recovered = await connect(room);
+await sendHello(recovered, "join", "Recovery Host", code, undefined, {
+  resume_token: recoveryWelcome.resume_token, resume_client_id: recoveryWelcome.client_id });
+const restored = await recovered.next("room_resumed");
+assert.equal(restored.client_id, recoveryWelcome.client_id);
+assert.equal(restored.mesh_key, recoveryWelcome.mesh_key);
+assert.equal(restored.peers[0].client_id, recoveryGuestWelcome.client_id);
+await recovered.send({ type: "ice_signal", target_client_id: recoveryGuestWelcome.client_id,
+  kind: 1, generation: 0, data: "after recovery" });
+assert.equal((await recoveryGuest.next("ice_signal")).data, "after recovery");
+assert.equal(recoveryGuest.messages.some(m => m.type === "peer_left" || m.type === "peer_joined"), false);
+// A raw ws adapter also exercises abnormal closure in the actual runtime,
+// in addition to the still-attached socket replacement tested above.
+const recoveryClosed = new Promise(resolve => recovered.socket.addEventListener("close", resolve, { once: true }));
+// Browsers restrict caller-supplied codes to 1000/3000..4999. A raw ws adapter
+// can additionally test abrupt TCP termination without sending a Close frame.
+if (typeof recovered.socket.terminate === "function") recovered.socket.terminate();
+else recovered.socket.close(1000);
+await recoveryClosed;
+if (typeof recovered.socket.terminate === "function") {
+  const again = await connect(room);
+  await sendHello(again, "join", "Recovery Host", code, undefined, {
+    resume_token: recoveryWelcome.resume_token, resume_client_id: recoveryWelcome.client_id });
+  assert.equal((await again.next("room_resumed")).client_id, recoveryWelcome.client_id);
+  await again.send({ type: "ice_signal", target_client_id: recoveryGuestWelcome.client_id,
+    kind: 1, generation: 0, data: "after TCP loss" });
+  assert.equal((await recoveryGuest.next("ice_signal")).data, "after TCP loss");
+  assert.equal(recoveryGuest.messages.some(m => m.type === "peer_left"), false);
+  await again.close();
+}
+await recovered.close();
+assert.equal((await recoveryGuest.next("peer_left")).client_id, recoveryWelcome.client_id);
+await recoveryGuest.close(); await recoveryHost.close();
 console.log("Local Cloudflare Worker encryption, creation race, forwarding limits, and reconnect integration passed");

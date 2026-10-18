@@ -131,7 +131,7 @@ export async function connect(base, room) {
   const client = new Client(socket, room);
   await new Promise((resolve, reject) => {
     socket.addEventListener("open", resolve, { once: true });
-    socket.addEventListener("error", reject, { once: true });
+    socket.addEventListener("error", event => reject(event.error ?? new Error(event.message || "WebSocket connection failed")), { once: true });
   });
   return client;
 }

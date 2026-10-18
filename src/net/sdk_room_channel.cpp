@@ -41,7 +41,7 @@ public:
                 return true;
             case WEBSOCKET_EVENT_MESSAGE:
                 if (incoming.messageKind != WEBSOCKET_MESSAGE_TEXT) {
-                    event = {EventKind::Closed, "Room service sent a non-text message"};
+                    event = {EventKind::Closed, "Room service sent a non-text message", 1003};
                 } else {
                     event = {EventKind::Message,
                              std::string(reinterpret_cast<const char*>(incoming.data.data()),
@@ -63,6 +63,7 @@ public:
 
     void close() override {
         connected_ = false;
+        if (connection_) connection_.close(1000, "left room");
         connection_ = mods::ws::Connection{};
     }
 

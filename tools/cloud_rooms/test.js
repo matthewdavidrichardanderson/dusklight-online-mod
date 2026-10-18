@@ -9,7 +9,8 @@ class Socket {
     this.state = state; this.sent = []; this.closed = false;
     this.wire = [];
     const nonce = randomBytes(16).toString("hex");
-    const salt = state.getWebSockets().some(ws => ws.info.joined) ?
+    const salt = state.getWebSockets().some(ws => ws.info.joined) ||
+      Object.keys(state.storage.values.get("room")?.suspended ?? {}).length ?
       state.storage.values.get("room")?.salt : randomBytes(16).toString("hex");
     const route = roomRoute("Example Lobby");
     const secure = createSession();
@@ -498,4 +499,125 @@ try {
 globalThis.Response = RealResponse;
 delete globalThis.WebSocketPair;
 
-console.log("Cloud room protocol, encryption, hibernation, and rejection tests passed");
+// Recovery is opt-in. Exercise the real room implementation with persisted
+// attachments/storage, including races that a single happy-path reconnect misses.
+async function recoveryFixture() {
+  const state = new State();
+  const room = new Room(state, {});
+  await room.ready;
+  const host = await state.add(), guest = await state.add();
+  // Both handshakes use one room salt, as fetch() does for pending clients.
+  guest.info.salt = host.info.salt;
+  guest.sent[0].salt = host.info.salt;
+  for (const [socket, action] of [[host, "create"], [guest, "join"]]) {
+    const msg = hello(socket, action);
+    msg.capabilities.room_resume_v1 = true;
+    await deliver(room, socket, JSON.stringify(msg));
+  }
+  assert.ok(host.take("welcome") && guest.take("welcome"));
+  return { state, room, host, guest };
+}
+async function recover(f, previous, overrides = {}) {
+  const socket = await f.state.add();
+  const welcome = previous.take("welcome") ?? previous.take("room_resumed");
+  const msg = { ...hello(socket, "join"), resume_token: previous.info.resumeToken ?? welcome.resume_token,
+    resume_client_id: welcome.client_id, ...overrides };
+  await deliver(f.room, socket, JSON.stringify(msg));
+  return socket;
+}
+{
+  const f = await recoveryFixture();
+  const original = f.host.take("welcome");
+  const token = original.resume_token;
+  assert.match(token, /^[0-9a-f]{64}$/);
+  const before = f.guest.sent.length;
+  await f.room.webSocketClose(f.host, 1006, "network", false);
+  assert.equal(f.guest.sent.length, before, "temporary loss must not announce departure");
+  assert.equal(f.room.room.owner, original.client_id);
+  await deliver(f.room, f.guest, JSON.stringify({ type: "room_settings", settings }));
+  assert.equal(f.guest.sent.at(-1).error, "not_owner");
+  // Rehydrate while the owner is suspended: its reservation and alarm survive.
+  f.room = new Room(f.state, {}); await f.room.ready;
+  const wrong = await recover(f, f.host, { resume_token: "00".repeat(32) });
+  assert.equal(wrong.take("error").error, "resume_rejected");
+  const wrongProof = await recover(f, f.host, { code_proof: "00".repeat(32) });
+  assert.equal(wrongProof.take("error").error, "bad_lobby_code", "a token does not bypass lobby authentication");
+  const resumed = await recover(f, f.host);
+  assert.equal(resumed.take("room_resumed").client_id, original.client_id);
+  assert.equal(resumed.take("room_resumed").mesh_key, original.mesh_key);
+  assert.equal(f.guest.sent.filter(m => m.type === "peer_left").length, 0);
+  assert.equal(f.room.room.suspended[original.client_id], undefined);
+  // Resume before the previous socket's close reaches the Worker.
+  const replacement = await recover(f, resumed);
+  assert.equal(replacement.take("room_resumed").client_id, original.client_id);
+  await deliver(f.room, resumed, JSON.stringify({ type: "room_settings", settings }));
+  assert.equal(f.room.room.pending, null, "fenced socket cannot mutate the room");
+  await f.room.webSocketClose(resumed, 1006, "late close", false);
+  await f.room.webSocketError(resumed);
+  assert.equal(replacement.info.joined, true);
+  assert.equal(f.room.roster().filter(p => p.id === original.client_id).length, 1);
+  await f.room.webSocketClose(replacement, 1000, "left room", true);
+  assert.equal(f.room.room.owner, f.guest.info.id);
+  assert.equal(f.guest.sent.filter(m => m.type === "peer_left").length, 1);
+}
+{
+  const f = await recoveryFixture();
+  await f.room.webSocketClose(f.guest, 1006, "network", false);
+  await deliver(f.room, f.host, JSON.stringify({ type: "room_settings", settings }));
+  assert.equal(f.host.sent.at(-1).error, "room_recovering");
+  assert.equal(f.room.room.pending, null);
+  const newcomer = await f.state.add();
+  await deliver(f.room, newcomer, JSON.stringify(hello(newcomer, "join")));
+  assert.equal(newcomer.take("error").error, "room_recovering");
+  await deliver(f.room, f.host, JSON.stringify({ type: "kick", target_client_id: f.guest.info.id }));
+  assert.equal(f.host.sent.at(-1).type, "peer_left");
+  assert.equal((await recover(f, f.guest)).take("error").error, "resume_rejected", "kick revokes recovery");
+}
+{
+  const f = await recoveryFixture();
+  const ownerId = f.host.info.id;
+  await f.room.webSocketClose(f.host, 1006, "network", false);
+  await f.room.webSocketClose(f.guest, 1006, "network", false);
+  assert.equal(f.room.roster().length, 2, "simultaneous losses retain the room");
+  const a = await recover(f, f.host), b = await recover(f, f.guest);
+  assert.equal(a.take("room_resumed").owner_client_id, ownerId);
+  assert.equal(b.take("room_resumed").owner_client_id, ownerId);
+  await f.room.webSocketClose(a, 1006, "network", false);
+  f.room.room.suspended[ownerId].expires = Date.now() - 1;
+  await f.room.alarm();
+  assert.equal(f.room.room.owner, b.info.id);
+  assert.equal((await recover(f, f.host)).take("error").error, "resume_rejected");
+}
+{
+  const f = await recoveryFixture();
+  await deliver(f.room, f.host, JSON.stringify({ type: "room_settings", settings }));
+  await f.room.webSocketClose(f.guest, 1006, "network", false);
+  assert.equal(f.host.closeCode, 4002, "uncertain settings transaction uses full reconnect");
+  assert.equal(Object.keys(f.room.room.suspended ?? {}).length, 0);
+}
+{
+  const f = await recoveryFixture();
+  const oldId = f.guest.info.id;
+  await f.room.webSocketClose(f.guest, 1006, "network", false);
+  const replacement = await f.state.add();
+  await deliver(f.room, replacement, JSON.stringify({ ...hello(replacement, "join"),
+    retire_token: f.guest.take("welcome").resume_token }));
+  assert.ok(replacement.take("welcome"));
+  assert.notEqual(replacement.info.id, oldId);
+  assert.equal(f.host.sent.filter(m => m.type === "peer_left" && m.client_id === oldId).length, 1);
+}
+{
+  const f = await recoveryFixture();
+  for (let n = 0; n < 6; n++) {
+    const guest = await f.state.add();
+    await deliver(f.room, guest, JSON.stringify(hello(guest, "join")));
+    assert.ok(guest.take("welcome"));
+  }
+  const hostId = f.host.info.id;
+  await f.room.webSocketClose(f.host, 1006, "network", false);
+  assert.equal(f.room.roster().length, 8);
+  const resumed = await recover(f, f.host);
+  assert.equal(resumed.take("room_resumed").client_id, hostId, "a full room must let its reserved owner resume");
+  assert.equal(f.room.roster().length, 8);
+}
+console.log("Cloud room protocol, encryption, hibernation, rejection and recovery tests passed");

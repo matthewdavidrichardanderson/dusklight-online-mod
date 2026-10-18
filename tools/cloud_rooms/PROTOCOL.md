@@ -61,6 +61,37 @@ Message processing, room changes, and broadcasts are serialized together to
 avoid reusing counters across awaited operations. Reconnects always establish
 fresh keys and reject ciphertext from the prior connection.
 
+## Optional room recovery
+
+Protocol 5 clients can advertise `capabilities.room_resume_v1`. Their encrypted
+welcome includes a random 256-bit `resume_token`; legacy clients receive no
+token and retain the original departure/rejoin behavior. Tokens must never be
+logged or shared with peers.
+
+For transient socket loss, the Worker reserves that member for 12 seconds in
+durable storage. The reservation retains the room, owner and occupied slot.
+New admissions and settings changes wait until suspended members recover or
+expire. Explicit leave, kick and protocol rejection revoke membership normally;
+an interrupted settings transaction still forces the existing clean reconnect.
+
+Recovery performs a fresh encrypted handshake and lobby-code proof. Its hello
+adds `resume_token` and `resume_client_id`, with action `join`. A valid token can
+replace its still-attached old socket; that socket is fenced before replacement
+so late callbacks cannot remove the new membership. `room_resumed` returns the
+same identity, mesh key, owner, settings generation and full peer roster. It does
+not broadcast another join. `retire_token` on an ordinary authenticated hello
+explicitly retires an old membership when a full session restart is required.
+
+The mod attempts recovery for at most 8 seconds and only while existing direct
+peer routes remain healthy, reliable delivery has not failed, and no settings
+transaction is in progress. It preserves the gameplay epoch, ICE/KCP connections,
+delivery journals and pose decoders. It accepts recovery only if the returned
+room state matches; otherwise it performs the ordinary full reconnect. Room-only
+recovery produces diagnostic logs, not player-facing disconnect/reconnect
+events. Unsafe, expired or gameplay-affecting recovery retains those events and
+their normal notifications. Settings/kick attempts during local recovery are
+rejected with a retry message rather than silently discarded.
+
 ## Tests
 
 Build Online with `DUSKLIGHT_ONLINE_BUILD_TESTS=ON`. The CTest suites

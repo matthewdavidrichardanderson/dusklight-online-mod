@@ -7,6 +7,7 @@ const MAX_MESSAGE_BYTES = 16 * 1024;
 const MAX_SIGNAL_BYTES = 12 * 1024;
 const HELLO_TIMEOUT_MS = 15_000;
 const SETTINGS_TIMEOUT_MS = 30_000;
+const RESUME_GRACE_MS = 12_000;
 const ROOM_NAME = /^[A-Za-z0-9 _-]{1,64}$/;
 const CLIENT_NAME = /^[^\x00-\x1f\x7f]{1,32}$/;
 const CLIENT_ID = /^client_[1-9][0-9]{0,19}$/;
@@ -85,7 +86,7 @@ function attachment(ws) {
 }
 
 function joined(state) {
-  return state.getWebSockets().filter(ws => attachment(ws).joined);
+  return state.getWebSockets().filter(ws => attachment(ws).joined && !attachment(ws).closing);
 }
 
 function member(state, id) {
@@ -97,6 +98,7 @@ function capabilities(message) {
   return {
     semantic_visual_v1: value?.semantic_visual_v1 === true,
     semantic_snapshot_delta_v1: value?.semantic_snapshot_delta_v1 === true,
+    room_resume_v1: value?.room_resume_v1 === true,
   };
 }
 
@@ -204,11 +206,12 @@ export class Room {
   async fetch(request) {
     await this.ready;
     return this.exclusive(async () => {
+      await this.expire();
       const url = new URL(request.url);
       const route = url.pathname.startsWith("/room/v2/") ? url.pathname.slice(9) : "";
       if (!hexBytes(route, 32) || url.search)
         return new Response("Invalid room route", { status: 400 });
-      const sockets = this.state.getWebSockets();
+      const sockets = this.state.getWebSockets().filter(ws => !attachment(ws).closing);
       if (sockets.length >= MAX_PLAYERS + MAX_PENDING ||
           sockets.filter(ws => !attachment(ws).joined).length >= MAX_PENDING)
         return new Response("Room full", { status: 429 });
@@ -220,7 +223,7 @@ export class Room {
       // salt. Socket attachments retain it even if this object hibernates.
       const pendingSalt = sockets.map(attachment).find(info => !info.joined && !info.closing &&
         info.deadline > Date.now() && hexBytes(info.salt, 16))?.salt;
-      const salt = joined(this.state).length && typeof this.room?.salt === "string" ?
+      const salt = this.roster().length && typeof this.room?.salt === "string" ?
         this.room.salt : pendingSalt ?? randomHex();
       server.serializeAttachment({ joined: false, deadline: Date.now() + HELLO_TIMEOUT_MS,
         nonce, salt, route, secure: createSession(),
@@ -239,9 +242,51 @@ export class Room {
       .map(ws => attachment(ws))
       .filter(item => !item.joined && Number.isFinite(item.deadline) && item.deadline > 0)
       .map(item => item.deadline);
-    const deadline = Math.min(...pending, this.room?.pending?.deadline ?? Infinity);
+    const deadline = Math.min(...pending, this.room?.pending?.deadline ?? Infinity,
+      ...Object.values(this.room?.suspended ?? {}).map(info => info.expires));
     if (Number.isFinite(deadline)) await this.state.storage.setAlarm(Math.max(Date.now() + 1, deadline));
     else await this.state.storage.deleteAlarm();
+  }
+
+  // Suspended members still own their slot, identity and permissions. Only
+  // metadata and a random recovery credential survive; never an old cipher.
+  roster() {
+    return [...joined(this.state).map(attachment),
+      ...Object.values(this.room?.suspended ?? {})];
+  }
+
+  async resume(ws, message) {
+    const token = message.resume_token;
+    if (!hexBytes(token, 32) || this.room?.pending) {
+      error(ws, "resume_rejected", true); return;
+    }
+    const active = joined(this.state).find(other => attachment(other).resumeToken === token);
+    const own = active ? attachment(active) :
+      Object.values(this.room?.suspended ?? {}).find(info => info.resumeToken === token && info.expires > Date.now());
+    if (!own || own.id !== message.resume_client_id) {
+      error(ws, "resume_rejected", true); return;
+    }
+    const fresh = attachment(ws);
+    // Fence the previous socket before transferring membership. Its delayed
+    // close/error callback must never remove the replacement connection.
+    if (active) {
+      active.serializeAttachment({ ...own, joined: false });
+      close(active, 4003, "room socket replaced");
+    }
+    delete (this.room.suspended ?? {})[own.id];
+    ws.serializeAttachment({ ...own, joined: true, secure: fresh.secure, closing: false,
+      closeRequest: undefined, expires: undefined,
+      diagnostic: { ...fresh.diagnostic, joinedAt: Date.now() } });
+    await this.state.storage.put("room", this.room);
+    const peers = this.roster();
+    send(ws, { type: "room_resumed", protocol_version: 5, client_id: own.id,
+      mesh_key: this.room.meshKey, owner_client_id: this.room.owner,
+      settings: this.room.settings, settings_generation: this.room.generation,
+      peers: peers.filter(info => info.id !== own.id).map(info => ({
+        client_id: info.id, name: info.name, want_puppet: info.want_puppet })),
+      ...readiness(peers.map(info => ({ deserializeAttachment: () => info }))) });
+    lifecycle(ws, "room_member_resumed");
+    await this.armAlarm();
   }
 
   async webSocketMessage(ws, raw) {
@@ -318,6 +363,9 @@ export class Room {
     if (message.type === "kick") {
       if (own.id !== this.room?.owner) { error(ws, "not_owner"); return; }
       const target = member(this.state, message.target_client_id);
+      if (!target && this.room?.suspended?.[message.target_client_id]) {
+        await this.removeMember(message.target_client_id); return;
+      }
       if (!target || target === ws) { error(ws, "player_not_found"); return; }
       send(target, { type: "kicked", reason: "removed_by_host" });
       close(target, 4001, "removed by lobby host");
@@ -329,9 +377,11 @@ export class Room {
   }
 
   async hello(ws, message) {
+    await this.expire();
     const name = message.name;
     const action = message.action;
     const pending = attachment(ws);
+    if (pending.closing || pending.deadline <= Date.now()) return;
     const proof = hexBytes(message.code_proof, 32);
     if (message.protocol_version !== 5 || typeof name !== "string" ||
         !CLIENT_NAME.test(name) ||
@@ -340,14 +390,13 @@ export class Room {
         (action !== "create" && action !== "join")) {
       error(ws, "invalid_hello", true); return;
     }
-    const members = joined(this.state);
     // An interrupted close/hibernation must not strand a code-protected
     // room with no live members. Only a new host can recreate an empty room.
-    if (this.room && !members.length) {
+    if (this.room && !this.roster().length) {
       this.room = null;
       await this.state.storage.delete("room");
     }
-    if (members.length >= MAX_PLAYERS) { error(ws, "lobby_full", true); return; }
+    if (message.resume_token && !this.room) { error(ws, "resume_rejected", true); return; }
     if (!this.room) {
       if (action !== "create") { error(ws, "lobby_not_found", true); return; }
       const configured = settings(message.settings);
@@ -362,7 +411,7 @@ export class Room {
         meshKey: randomMeshKey(), owner: "",
         settings: configured, generation: 0, pending: null };
     } else {
-      if (action === "create" && member(this.state, this.room.owner)) {
+      if (action === "create" && this.roster().some(info => info.id === this.room.owner)) {
         error(ws, "lobby_exists", true); return;
       }
       if (typeof this.room.salt !== "string" || !Array.isArray(this.room.proofKey) ||
@@ -375,11 +424,31 @@ export class Room {
         error(ws, "bad_lobby_code", true); return;
       }
     }
+    if (message.resume_token) { await this.resume(ws, message); return; }
+    // A full reconnect can explicitly retire its old membership after proving
+    // both the lobby code and the private recovery token.
+    if (hexBytes(message.retire_token, 32)) {
+      const old = this.roster().find(info => info.resumeToken === message.retire_token);
+      if (old) {
+        const socket = member(this.state, old.id);
+        if (socket) {
+          socket.serializeAttachment({ ...attachment(socket), joined: false });
+          close(socket, 4003, "session restarted");
+        }
+        await this.removeMember(old.id, true);
+      }
+    }
+    if (Object.keys(this.room.suspended ?? {}).length) {
+      error(ws, "room_recovering", true); return;
+    }
+    if (joined(this.state).length >= MAX_PLAYERS) { error(ws, "lobby_full", true); return; }
+    const currentMembers = joined(this.state);
     const id = newClientId(this.state);
     const info = { joined: true, id, name, secure: pending.secure, route: pending.route,
       diagnostic: { ...pending.diagnostic, joinedAt: Date.now() },
       capabilities: capabilities(message),
       want_puppet: message.want_puppet === true };
+    if (info.capabilities.room_resume_v1) info.resumeToken = randomMeshKey();
     ws.serializeAttachment(info);
     if (!member(this.state, this.room.owner)) this.room.owner = id;
     await this.state.storage.put("room", this.room);
@@ -387,14 +456,16 @@ export class Room {
     const ready = readiness(all);
     const welcomed = send(ws, { type: "welcome", protocol_version: 5, room_id: message.room_id,
       mesh_key: this.room.meshKey,
-      client_id: id, owner_client_id: this.room.owner, peers: members.map(other => ({
+      client_id: id, owner_client_id: this.room.owner,
+      ...(info.resumeToken ? { resume_token: info.resumeToken } : {}),
+      peers: currentMembers.map(other => ({
         client_id: attachment(other).id, name: attachment(other).name,
         want_puppet: attachment(other).want_puppet,
       })), settings: this.room.settings, settings_generation: this.room.generation,
       settings_pending: !!this.room.pending, ...ready });
     lifecycle(ws, "room_member_joined", { action, welcome_sent: welcomed,
       member_count: all.length });
-    broadcast(members, { type: "peer_joined", client_id: id, name,
+    broadcast(currentMembers, { type: "peer_joined", client_id: id, name,
       want_puppet: info.want_puppet, ...ready });
     await this.armAlarm();
   }
@@ -403,6 +474,7 @@ export class Room {
     const own = attachment(ws);
     if (own.id !== this.room?.owner) { error(ws, "not_owner"); return; }
     if (this.room.pending) { error(ws, "settings_busy"); return; }
+    if (Object.keys(this.room.suspended ?? {}).length) { error(ws, "room_recovering"); return; }
     const requested = settings(message.settings);
     if (!requested) { error(ws, "invalid_settings"); return; }
     const members = joined(this.state);
@@ -452,31 +524,54 @@ export class Room {
         requested_code: request?.code ?? null,
         requested_reason: request?.reason ?? null });
       close(ws, [1005, 1006, 1015].includes(code) ? 1000 : code, reason, false);
-      await this.leave(ws);
+      const transient = !request && [1001, 1006, 1011].includes(code) ||
+        request?.code === 1011 && ["send failed", "socket error"].includes(request.reason);
+      await this.leave(ws, transient);
     });
   }
 
   async webSocketError(ws) {
-    lifecycle(ws, "room_socket_error");
-    close(ws, 1011, "socket error");
-    await this.exclusive(() => this.leave(ws));
+    await this.ready;
+    await this.exclusive(async () => {
+      lifecycle(ws, "room_socket_error");
+      close(ws, 1011, "socket error");
+      await this.leave(ws, true);
+    });
   }
 
-  async leave(ws) {
+  async leave(ws, transient = false) {
     await this.ready;
     const own = attachment(ws);
     if (!own.joined || !this.room) { await this.armAlarm(); return; }
     // Retain only diagnostic context for any subsequent close/error callback.
     ws.serializeAttachment({ joined: false, closing: own.closing, id: own.id,
       diagnostic: own.diagnostic, closeRequest: own.closeRequest });
+    if (transient && own.resumeToken && !this.room.pending) {
+      this.room.suspended ??= {};
+      this.room.suspended[own.id] = { id: own.id, name: own.name,
+        resumeToken: own.resumeToken, capabilities: own.capabilities,
+        want_puppet: own.want_puppet, route: own.route,
+        expires: Date.now() + RESUME_GRACE_MS };
+      await this.state.storage.put("room", this.room);
+      lifecycle(ws, "room_member_suspended");
+      await this.armAlarm();
+      return;
+    }
+    await this.removeMember(own.id);
+  }
+
+  async removeMember(id, keepRoom = false) {
+    if (!this.room) return;
+    delete (this.room.suspended ?? {})[id];
     const members = joined(this.state);
-    if (!members.length) {
+    const roster = this.roster();
+    if (!roster.length && !keepRoom) {
       this.room = null;
       await this.state.storage.delete("room");
       await this.armAlarm();
       return;
     }
-    if (this.room.pending?.participants.includes(own.id)) {
+    if (this.room.pending?.participants.includes(id)) {
       // All peers reconnect from a clean generation instead of applying a
       // partial settings transaction after a participant disappeared.
       this.room.pending = null;
@@ -485,9 +580,10 @@ export class Room {
       return;
     }
     const previousOwner = this.room.owner;
-    if (previousOwner === own.id) this.room.owner = attachment(members[0]).id;
+    if (previousOwner === id) this.room.owner = roster[0]?.id ?? "";
     await this.state.storage.put("room", this.room);
-    broadcast(members, { type: "peer_left", client_id: own.id, ...readiness(members) });
+    broadcast(members, { type: "peer_left", client_id: id,
+      ...readiness(roster.map(info => ({ deserializeAttachment: () => info }))) });
     if (previousOwner !== this.room.owner)
       broadcast(members, { type: "owner_changed", owner_client_id: this.room.owner });
     await this.armAlarm();
@@ -500,6 +596,9 @@ export class Room {
   async expire() {
     await this.ready;
     const now = Date.now();
+    for (const info of Object.values(this.room?.suspended ?? {})) {
+      if (info.expires <= now) await this.removeMember(info.id);
+    }
     for (const ws of this.state.getWebSockets()) {
       const own = attachment(ws);
       if (!own.joined && own.deadline && own.deadline <= now) {

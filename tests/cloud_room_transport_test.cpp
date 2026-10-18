@@ -32,6 +32,9 @@ struct Broker {
     bool voiceSettingsOnRoomChannel = false;
     int roomSettingsMessages = 0;
     bool forwardIce = true;
+    bool resumeEnabled = false;
+    std::map<std::string, json> suspended;
+    json resumePatch = json::object();
     int kickRequests = 0;
     std::string dropJoinNotificationTo;
     RoomSettings roomSettings;
@@ -81,6 +84,7 @@ public:
         return true;
     }
     bool poll(Event& event) override {
+        if (holdPoll) return false;
         if (events.empty()) return false;
         event = std::move(events.front()); events.pop_front();
         return true;
@@ -98,6 +102,13 @@ public:
         broker.wires.push_back(wire);
         events.push_back({EventKind::Message, wire});
     }
+    void drop() {
+        broker.suspended[id] = {{"name", name}, {"token", token}};
+        broker.members.erase(id);
+        active = false;
+        events.clear();
+        events.push_back({EventKind::Closed, "WinHTTP WebSocket failed (12030)", 0, 6});
+    }
     std::optional<CloudCipher> cipher;
     Broker& broker;
     std::string id;
@@ -105,6 +116,8 @@ public:
     std::string nonce;
     std::deque<Event> events;
     bool active = false;
+    bool holdPoll = false;
+    std::string token;
 };
 
 void Broker::accept(Channel& channel, const json& message) {
@@ -123,6 +136,32 @@ void Broker::accept(Channel& channel, const json& message) {
         if (!proofKey || !auth::equal(message.value("code_proof", ""),
             auth::room_proof(*proofKey, channel.nonce)))
             throw std::runtime_error("invalid lobby proof");
+        if (message.contains("resume_token")) {
+            const auto id = message.value("resume_client_id", "");
+            auto old = suspended.find(id);
+            if (!resumeEnabled || old == suspended.end() ||
+                old->second.value("token", "") != message.value("resume_token", "")) {
+                channel.push({{"type", "error"}, {"error", "resume_rejected"}}); return;
+            }
+            channel.id = id;
+            channel.name = old->second.value("name", "");
+            json peers = json::array();
+            for (const auto& [peerId, other] : members)
+                peers.push_back({{"client_id", peerId}, {"name", other->name}});
+            for (const auto& [peerId, info] : suspended)
+                if (peerId != id) peers.push_back({{"client_id", peerId}, {"name", info.at("name")}});
+            suspended.erase(old);
+            members[id] = &channel;
+            json reply = {{"type", "room_resumed"}, {"protocol_version", 5},
+                {"client_id", id}, {"owner_client_id", owner}, {"peers", peers},
+                {"mesh_key", "fe28b9c93a34c10c697a962e10c70bd32a491f83a6c42d85ef317789663340bf"},
+                {"settings", {{"dummy_model", true}, {"sync_flags", true}, {"sync_world", false},
+                              {"remote_collision", true}, {"pvp", false}}},
+                {"settings_generation", 0}, {"semantic_visuals_ready", true}, {"snapshot_deltas_ready", true}};
+            reply.update(resumePatch);
+            channel.push(reply);
+            return;
+        }
         channel.id = "client_" + std::to_string(nextId++);
         channel.name = message.value("name", "Player");
         if (owner.empty()) owner = channel.id;
@@ -130,7 +169,9 @@ void Broker::accept(Channel& channel, const json& message) {
         for (const auto& [id, other] : members)
             peers.push_back({{"client_id", id}, {"name", other->name}, {"want_puppet", true}});
         members[channel.id] = &channel;
+        channel.token = resumeEnabled ? auth::hex(auth::lobby_verifier(channel.id, "test", "")) : "";
         channel.push({{"type", "welcome"}, {"protocol_version", 5},
+            {"resume_token", channel.token},
             {"mesh_key", "fe28b9c93a34c10c697a962e10c70bd32a491f83a6c42d85ef317789663340bf"},
             {"client_id", channel.id},
             {"owner_client_id", owner}, {"peers", peers},
@@ -259,6 +300,111 @@ void check_security(const CloudRoomConfig& configuration) {
         fail("reconnect accepted old session ciphertext");
 }
 
+void check_room_recovery(CloudRoomConfig configuration) {
+    Broker broker;
+    broker.resumeEnabled = true;
+    Transport host, guest;
+    auto a = std::make_unique<Channel>(broker), b = std::make_unique<Channel>(broker);
+    auto* hostWire = a.get(); auto* guestWire = b.get();
+    configuration.createRoom = true; configuration.name = "Recovery Host";
+    if (!host.start_cloud_room(configuration, std::move(a))) fail("recovery host start");
+    configuration.createRoom = false; configuration.name = "Recovery Guest";
+    if (!guest.start_cloud_room(configuration, std::move(b))) fail("recovery guest start");
+    auto tick = [&] { host.tick(); guest.tick(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); };
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline &&
+           (host.status().natPeerCount != 1 || guest.status().natPeerCount != 1)) tick();
+    if (host.status().natPeerCount != 1 || guest.status().natPeerCount != 1) fail("recovery ICE setup");
+    const auto hostId = host.status().clientId, guestId = guest.status().clientId;
+    uint64_t hostEpoch = 0, guestEpoch = 0;
+    while (host.has_events()) hostEpoch = host.pop_event().ingress.epoch;
+    while (guest.has_events()) guestEpoch = guest.pop_event().ingress.epoch;
+    const auto publicKey = hostWire->cipher->public_key();
+    hostWire->drop(); guestWire->drop(); tick();
+    hostWire->holdPoll = guestWire->holdPoll = true;
+    int hostReceived = 0, guestReceived = 0, resumes = 0;
+    auto drain = [&](Transport& transport, uint64_t epoch, int& received) {
+        while (transport.has_events()) {
+            const auto event = transport.pop_event();
+            if (event.kind == EventKind::Disconnected || event.kind == EventKind::Connected ||
+                event.kind == EventKind::PeerLeft || event.kind == EventKind::PeerJoined)
+                fail("room-only recovery produced a gameplay/session notification");
+            if (event.ingress.epoch != epoch) fail("room recovery changed gameplay epoch");
+            if (event.kind == EventKind::Diagnostic && event.detail.starts_with("room_recovery_completed")) ++resumes;
+            if (event.message.is_object() && event.message.value("type", "") == "chat" &&
+                event.message.contains("recovery_sequence")) {
+                if (event.message.at("recovery_sequence").get<int>() != received++)
+                    fail("gameplay was lost, reordered or duplicated during recovery");
+            }
+        }
+    };
+    // Both room sockets are unavailable while real ICE/KCP carries ordered
+    // gameplay in both directions. Deliberately leave journals unacknowledged
+    // across the boundary instead of testing only an idle established route.
+    for (int n = 0; n < 100; ++n) {
+        const json payload = {{"type", "chat"}, {"text", std::string(200, 'x')}, {"recovery_sequence", n}};
+        if (!host.send(payload) || !guest.send(payload)) fail("gameplay refused during room recovery");
+        tick();
+        drain(host, hostEpoch, hostReceived); drain(guest, guestEpoch, guestReceived);
+    }
+    if (hostReceived == 0 || guestReceived == 0) fail("gameplay stopped while sockets were unavailable");
+    hostWire->holdPoll = guestWire->holdPoll = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline && (hostReceived != 100 || guestReceived != 100 || resumes != 2)) {
+        tick(); drain(host, hostEpoch, hostReceived); drain(guest, guestEpoch, guestReceived);
+    }
+    if (hostReceived != 100 || guestReceived != 100 || resumes != 2 ||
+        host.status().clientId != hostId || guest.status().clientId != guestId ||
+        publicKey == hostWire->cipher->public_key()) {
+        std::cerr << "recovery hostReceived=" << hostReceived << " guestReceived=" << guestReceived
+                  << " resumes=" << resumes << " host=" << host.status().error << " guest=" << guest.status().error << '\n';
+        fail("recovery did not preserve session with fresh room encryption");
+    }
+    if (broker.gameplayForwardingAttempt) fail("recovery forwarded gameplay through Cloudflare");
+
+    // A second outage must use the same recovery identity but another fresh
+    // encrypted room channel; no accumulating socket/session state.
+    hostWire->drop();
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline && resumes != 3) {
+        tick(); drain(host, hostEpoch, hostReceived); drain(guest, guestEpoch, guestReceived);
+    }
+    if (resumes != 3 || host.status().clientId != hostId) fail("repeated room recovery failed");
+
+    // A changed authoritative settings generation must never be silently
+    // accepted while keeping old gameplay queues and decoder state.
+    broker.resumePatch = {{"settings_generation", 1}};
+    hostWire->drop();
+    bool failedVisibly = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline && !failedVisibly) {
+        tick();
+        while (host.has_events()) failedVisibly |= host.pop_event().kind == EventKind::Disconnected;
+    }
+    if (!failedVisibly) fail("unsafe recovery did not produce a visible full reconnect");
+    host.disconnect(); guest.disconnect();
+
+    // Even a responsive gameplay transport cannot keep a stale room lease
+    // forever. This also exercises repeated attempts without resetting time.
+    Broker timeoutBroker; timeoutBroker.resumeEnabled = true;
+    Transport lonely;
+    auto c = std::make_unique<Channel>(timeoutBroker); auto* wire = c.get();
+    configuration.createRoom = true;
+    if (!lonely.start_cloud_room(configuration, std::move(c))) fail("timeout setup");
+    lonely.tick();
+    while (lonely.has_events()) lonely.pop_event();
+    wire->drop(); lonely.tick(); wire->holdPoll = true;
+    failedVisibly = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline && !failedVisibly) {
+        lonely.tick();
+        while (lonely.has_events()) failedVisibly |= lonely.pop_event().kind == EventKind::Disconnected;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!failedVisibly) fail("room recovery did not expire");
+    std::cout << "room recovery: ordered gameplay preserved, identity stable, unsafe/expired recovery visible\n";
+}
+
 }  // namespace
 
 int main() {
@@ -276,6 +422,7 @@ int main() {
     configuration.settings.voiceProximity = false;
     configuration.settings.voiceProximityRange = 125;
     check_security(configuration);
+    check_room_recovery(configuration);
     std::string error;
     if (!host.start_cloud_room(configuration, std::make_unique<Channel>(broker), &error))
         fail(error.c_str());

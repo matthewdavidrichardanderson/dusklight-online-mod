@@ -226,6 +226,7 @@ std::string friendly_error_sentence(std::string_view error) {
     if (error == "lobby_exists") return "A lobby with that name already exists.";
     if (error == "bad_lobby_code") return "The lobby code is incorrect.";
     if (error == "lobby_full") return "The lobby is full.";
+    if (error == "room_recovering") return "A lobby connection is recovering. Please try again shortly.";
     if (error == "protocol_version") return "The relay protocol is incompatible.";
     if (error == "invalid_lobby_code_proof") return "Lobby code verification failed.";
     if (error == "lobby_too_long") return "The lobby name is too long.";
