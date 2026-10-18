@@ -135,6 +135,8 @@ DEFINE_HOOK(&item_func_POU_SPIRIT, PoePickupHook);
 DEFINE_HOOK_SYMBOL("toggleAutoSave", void(bool), ToggleAutoSaveHook);
 
 namespace {
+// More than the native save's full set of individually tracked facts.
+constexpr size_t kMaxRecoveryFacts = 32768;
 
 constexpr int kMaxSyncedDonationTotal = 10000;
 constexpr int kSyncedFishSpeciesCount = 6;
@@ -3023,9 +3025,8 @@ void GameAdapter::notify_local_save_loaded(uint32_t slot) {
     if (saveRecovery_ && (name == nullptr || saveRecovery_->saveName != name ||
                           saveRecovery_->slot != slot))
         saveRecovery_.reset();
-    if (saveRecovery_)
-        saveRecovery_->restorePending =
-            !saveRecovery_->delta.empty() || !saveRecovery_->titleMessages.empty();
+    // More updates can arrive after this callback, before loading finishes.
+    if (saveRecovery_) saveRecovery_->restorePending = true;
     svc_log->info(mod_ctx, ("Save recovery load slot=" + std::to_string(slot) +
         " pending=" + (saveRecovery_ && saveRecovery_->restorePending ? "yes" : "no") +
         " title_messages=" +
@@ -4189,7 +4190,8 @@ bool GameAdapter::retain_for_save_recovery(const RoutedMessage& message) {
         saveRecovery_->saveName != activeSaveName_ ||
         message.receivedAt < saveRecovery_->savedAt ||
         message.receivedAt >= saveRecovery_->captureUntil ||
-        !opening_or_title_active() || randomizer_active()) return false;
+        (!opening_or_title_active() && !saveRecovery_->restorePending) ||
+        randomizer_active()) return false;
 
     const std::string type = message.payload.value("type", std::string());
     // Requests and live room effects are not save facts. Currency deltas are
@@ -4200,8 +4202,8 @@ bool GameAdapter::retain_for_save_recovery(const RoutedMessage& message) {
         (type == "save_snapshot" && message.payload.value("manual_sync", false)))
         return false;
 
-    constexpr size_t kMaxTitleMessages = 512;
-    constexpr size_t kMaxTitleBytes = 2U * 1024U * 1024U;
+    constexpr size_t kMaxTitleMessages = 32768;
+    constexpr size_t kMaxTitleBytes = 8U * 1024U * 1024U;
     size_t bytes = 0;
     try {
         bytes = message.payload.dump().size();
@@ -4333,11 +4335,27 @@ ApplyResult GameAdapter::consume(const RoutedMessage& message) {
                 !(type == "save_snapshot" && message.payload.value("manual_sync", false)) &&
                 type != "room_actor_action" &&
                 type != "web_timer" && type != "room_switch_bit";
-            const nlohmann::json before = record ? make_recovery_snapshot() : nlohmann::json();
+            // Replay is captured once as a remote-only batch, not one full
+            // native save scan for every retained flag.
+            const bool captureNow = record && !replayingSaveRecovery_;
+            const nlohmann::json before = captureNow ? make_recovery_snapshot() : nlohmann::json();
             RemoteApplicationGuard applying(applyingRemote_);
             const ApplyResult result = consume_progression(message);
-            if (record) record_received_progress(before, result);
-            if (stage_ready() && !opening_or_title_active()) poll_local_state(false);
+            if (captureNow) record_received_progress(before, result);
+            if (record && (result == ApplyResult::Applied || result == ApplyResult::Retained) &&
+                (type == "event_bit" || type == "switch_bit" || type == "dark_clear_lv")) {
+                const nlohmann::json value = message.payload.value("set", true) ?
+                    nlohmann::json(true) : nlohmann::json(nullptr);
+                if (type == "event_bit")
+                    record_recovery_intent(message, {"event_flags", message.payload.at("flag").get<int>()}, value);
+                else if (type == "switch_bit")
+                    record_recovery_intent(message, {"switches", message.payload.at("stage").get<int>(),
+                                                     message.payload.at("flag").get<int>()}, value);
+                else if (type == "dark_clear_lv")
+                    record_recovery_intent(message, {"dark_clear_levels", message.payload.at("no").get<int>()}, true);
+            }
+            if (!replayingSaveRecovery_ && stage_ready() && !opening_or_title_active())
+                poll_local_state(false);
             return result;
         }
         case MessageDomain::OptionalRandomizer:
@@ -5250,12 +5268,16 @@ ApplyResult GameAdapter::apply_dark_clear(int level) {
         if (level < 3) pendingDarkClears_[level] = 0;
         return ApplyResult::Applied;
     }
-    if (level == 2 && stableStageName_ == "R_SP107") {
+    const char* currentStage = dComIfGp_getStartStageName();
+    const std::string_view stage = stage_ready() && currentStage != nullptr ?
+        std::string_view(currentStage) : std::string_view(stableStageName_);
+    const int room = stage_ready() ? dComIfGp_roomControl_getStayNo() : stableRoom_;
+    if (level == 2 && stage == "R_SP107") {
         pendingDarkClears_[level] = 2;
         return ApplyResult::Retained;
     }
     if (level < 3 && dKy_darkworld_check() &&
-        twilight_completion_level_for_stage(stableStageName_, stableRoom_) == level) {
+        twilight_completion_level_for_stage(stage, room) == level) {
         pendingDarkClears_[level] = 1;
         return ApplyResult::Retained;
     }
@@ -5366,6 +5388,14 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
         return ApplyResult::Retained;
     }
     if (!set) {
+        if (flag == 0x2B08) mirrorReloadPending_ = false;
+        if (flag == 0x0880) zoraThawPending_ = nlohmann::json();
+        if (pendingOrdonEventBits_.erase(flag) != 0 && pendingOrdonEventBits_.empty()) {
+            ordonReloadSafeTicks_ = 0;
+            ordonReloadWaitTicks_ = 0;
+            ordonReloadTransitionActive_ = false;
+            ordonReloadSawStageLoad_ = false;
+        }
         dComIfGs_offEventBit(flag);
         return ApplyResult::Applied;
     }
@@ -5378,7 +5408,10 @@ ApplyResult GameAdapter::apply_event_bit(const RoutedMessage& routed) {
     }
     if (dComIfGs_isEventBit(flag)) return ApplyResult::IgnoredByPolicy;
     if (flag == 0x0880) {
-        if (!is_zora_thaw_reload_area(stableStageName_, stableRoom_)) {
+        const std::string_view stage = stage_ready() && eventStage != nullptr ?
+            std::string_view(eventStage) : std::string_view(stableStageName_);
+        const int room = stage_ready() ? dComIfGp_roomControl_getStayNo() : stableRoom_;
+        if (!is_zora_thaw_reload_area(stage, room)) {
             dComIfGs_onEventBit(flag);
             return ApplyResult::Applied;
         }
@@ -5488,6 +5521,7 @@ void GameAdapter::flush_story_messages() {
 }
 
 void GameAdapter::flush_story_events() {
+    RemoteApplicationGuard applying(applyingRemote_);
     if (mirrorReloadPending_) {
         mirrorReloadPending_ = false;
         dComIfGs_onEventBit(0x2B08);
@@ -6310,10 +6344,13 @@ void GameAdapter::apply_shared_ooccoo_local_form() {
 nlohmann::json GameAdapter::make_save_snapshot() {
     using nlohmann::json;
     json eventFlags = json::array();
-    for (int flag = 0; flag < 256 * 8; ++flag) {
-        if (!is_unsynced_event_bit(static_cast<uint16_t>(flag)) &&
-            dComIfGs_isEventBit(static_cast<uint16_t>(flag))) {
-            eventFlags.push_back(flag);
+    for (int byte = 0; byte < 256; ++byte) {
+        for (int bit = 0; bit < 8; ++bit) {
+            // TP encodes the byte index in the high byte and a bit mask
+            // in the low byte, rather than a sequential bit number.
+            const auto flag = static_cast<uint16_t>((byte << 8) | (1U << bit));
+            if (!is_unsynced_event_bit(flag) && dComIfGs_isEventBit(flag))
+                eventFlags.push_back(flag);
         }
     }
 
@@ -6456,12 +6493,26 @@ nlohmann::json GameAdapter::make_recovery_snapshot() {
     return snapshot;
 }
 
+void GameAdapter::record_recovery_intent(const RoutedMessage& message, const RecoveryFact& fact,
+                                        const nlohmann::json& value) {
+    if (!saveRecoveryEnabled_ || !saveRecoveryPolicyReady_ || !saveRecovery_ ||
+        !activeSaveSlot_ || saveRecovery_->slot != *activeSaveSlot_ ||
+        saveRecovery_->saveName != activeSaveName_ ||
+        message.receivedAt < saveRecovery_->savedAt ||
+        message.receivedAt >= saveRecovery_->captureUntil || randomizer_active()) return;
+    saveRecovery_->delta.observe_intent(fact, value);
+    if (replayingSaveRecovery_) recoveryReplayIntents_[fact] = value;
+    if (saveRecovery_->delta.size() > kMaxRecoveryFacts) {
+        svc_log->warn(mod_ctx, "Save recovery journal exceeded its fact limit; discarding it");
+        saveRecovery_.reset();
+    }
+}
+
 void GameAdapter::record_received_progress(const nlohmann::json& before,
                                             ApplyResult result) {
     if (result != ApplyResult::Applied || !saveRecovery_) return;
     const nlohmann::json after = make_recovery_snapshot();
     saveRecovery_->delta.observe(before, after);
-    constexpr size_t kMaxRecoveryFacts = 4096;
     if (saveRecovery_->delta.size() > kMaxRecoveryFacts) {
         svc_log->warn(mod_ctx, "Save recovery journal exceeded its fact limit; discarding it");
         saveRecovery_.reset();
@@ -6480,32 +6531,31 @@ void GameAdapter::restore_saved_progress_if_ready() {
     saveRecovery_->restorePending = false;
     const RecoveryFacts changes = saveRecovery_->delta.applicable(make_recovery_snapshot());
     std::deque<RoutedMessage> titleMessages = std::move(saveRecovery_->titleMessages);
+    saveRecovery_->titleMessages.clear();
     saveRecovery_->titleMessageBytes = 0;
     if (changes.empty() && titleMessages.empty()) return;
 
     nlohmann::json snapshot = {{"type", "save_snapshot"}};
     RemoteApplicationGuard applying(applyingRemote_);
+    RemoteApplicationGuard replaying(replayingSaveRecovery_);
+    recoveryReplayIntents_.clear();
     for (const auto& [fact, value] : changes) {
         const std::string& field = fact.field;
         if (field == "event_flags") {
             if (fact.key < 0 || fact.key > 0xFFFF ||
                 is_unsynced_event_bit(static_cast<uint16_t>(fact.key))) continue;
-            if (value.is_null()) {
-                RoutedMessage clear{"save_recovery",
-                                    {{"type", "event_bit"}, {"flag", fact.key}, {"set", false}},
-                                    {MessageDomain::Progression, false, true}, {}};
-                (void)apply_event_bit(clear);
-            } else snapshot[field].push_back(fact.key);
+            RoutedMessage event{"save_recovery",
+                                {{"type", "event_bit"}, {"flag", fact.key}, {"set", !value.is_null()}},
+                                {MessageDomain::Progression, false, true}, {}};
+            (void)apply_event_bit(event);
         } else if (field == "switches") {
             if (!valid_stage(fact.key) || fact.subkey < 0 ||
                 fact.subkey >= dSv_info_c::MEMORY_SWITCH ||
                 is_unsynced_switch_bit(fact.key, fact.subkey) ||
                 loaded_floor_switch_owns_flag(fact.key, fact.subkey)) continue;
-            if (value.is_null()) {
-                (void)apply_switch_bit({{"type", "switch_bit"}, {"stage", fact.key},
-                                        {"flag", fact.subkey}, {"set", false}},
-                                       "save_recovery");
-            } else snapshot[field].push_back({{"stage", fact.key}, {"flags", {fact.subkey}}});
+            (void)apply_switch_bit({{"type", "switch_bit"}, {"stage", fact.key},
+                                    {"flag", fact.subkey}, {"set", !value.is_null()}},
+                                   "save_recovery");
         } else if (field == "item_first_bits") {
             if (fact.key < 0 || fact.key > 0xFF || !is_synced_item_first_bit(fact.key)) continue;
             if (value.is_null()) dComIfGs_offItemFirstBit(static_cast<u8>(fact.key));
@@ -6555,9 +6605,17 @@ void GameAdapter::restore_saved_progress_if_ready() {
             svc_log->warn(mod_ctx, "Save recovery snapshot could not be applied");
     }
     size_t replayed = 0;
+    const nlohmann::json beforeTitle = titleMessages.empty() ? nlohmann::json() : make_recovery_snapshot();
     for (const RoutedMessage& message : titleMessages) {
         if (consume(message) == ApplyResult::Applied) ++replayed;
     }
+    if (!titleMessages.empty()) record_received_progress(beforeTitle, ApplyResult::Applied);
+    // A later deferred update wins over an earlier applied value in this
+    // batch, even though it is not visible in native memory yet.
+    if (saveRecovery_)
+        for (const auto& [fact, value] : recoveryReplayIntents_)
+            saveRecovery_->delta.observe_intent(fact, value);
+    recoveryReplayIntents_.clear();
     poll_local_state(false);
     svc_log->info(mod_ctx, ("Save recovery applied facts=" +
         std::to_string(changes.size()) + " title_messages=" +
@@ -6879,9 +6937,8 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         return applied ? ApplyResult::Applied : reject("manual sync state rejected");
     }
 
-    // Hydrate snapshot event bits first and as raw save state. Routing them
-    // through live-event policy can suppress prerequisites or incorrectly
-    // trigger reload and progression-prompt work.
+    // Normal catch-up hydrates raw save state. Recovery represents updates
+    // received after this save, so it must use the usual live-event safety.
     const int localMaloPhaseBeforeSnapshot = malo_fundraising_phase();
     const bool snapshotOoccooAccepted = message.contains("ooccoo_state") &&
         accept_ooccoo_state(message["ooccoo_state"]);
@@ -6891,11 +6948,21 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         if (value < 0 || value > 0xFFFF) continue;
         const uint16_t flag = static_cast<uint16_t>(value);
         if (!is_unsynced_event_bit(flag)) {
+            if (replayingSaveRecovery_) {
+                RoutedMessage event{routed.peerId,
+                    {{"type", "event_bit"}, {"flag", flag}, {"set", true}},
+                    {MessageDomain::Progression, false, true}, routed.ingress, routed.receivedAt};
+                const auto result = apply_event_bit(event);
+                if (result == ApplyResult::Retained || result == ApplyResult::Applied)
+                    record_recovery_intent(routed, {"event_flags", flag}, true);
+                continue;
+            }
             if (flag == dSv_event_flag_c::M_035 && local_wagon_escort_unfinished()) {
                 enqueue_unique_deferred_mutation(deferredStoryEvents_, {
                     {"type", "event_bit"}, {"flag", flag}, {"set", true},
                     {"_peer_id", routed.peerId},
                 });
+                record_recovery_intent(routed, {"event_flags", flag}, true);
                 continue;
             }
             if (flag == 0x2B08 && !dComIfGs_isEventBit(flag)) {
@@ -6930,7 +6997,14 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
         if (!valid_stage(stage)) continue;
         for (const auto& raw : entry.value("flags", nlohmann::json::array())) {
             if (!raw.is_number_integer()) continue;
-            (void)apply_snapshot_switch_bit(stage, raw.get<int>());
+            const int flag = raw.get<int>();
+            const auto result = replayingSaveRecovery_ ?
+                apply_switch_bit({{"type", "switch_bit"}, {"stage", stage},
+                                  {"flag", flag}, {"set", true}}, routed.peerId) :
+                apply_snapshot_switch_bit(stage, flag);
+            if (result == ApplyResult::Retained ||
+                (replayingSaveRecovery_ && result == ApplyResult::Applied))
+                record_recovery_intent(routed, {"switches", stage, flag}, true);
         }
     }
     apply_stage_flags("items", dSv_info_c::DAN_ITEM, [this](int stage, int flag) {
@@ -7013,7 +7087,12 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
             dComIfGs_onCollectMirror(static_cast<u8>(raw.get<int>()));
     }
     for (const auto& raw : message.value("dark_clear_levels", nlohmann::json::array())) {
-        if (raw.is_number_integer()) (void)apply_dark_clear(raw.get<int>());
+        if (!raw.is_number_integer()) continue;
+        const int level = raw.get<int>();
+        const auto result = apply_dark_clear(level);
+        if (result == ApplyResult::Retained ||
+            (replayingSaveRecovery_ && result == ApplyResult::Applied))
+            record_recovery_intent(routed, {"dark_clear_levels", level}, true);
     }
     for (const auto& raw : message.value("transform_levels", nlohmann::json::array())) {
         if (raw.is_number_integer() && raw.get<int>() == 3 &&

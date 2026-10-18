@@ -110,6 +110,15 @@ public:
         }
     }
 
+    // Accepted updates may be waiting for a safe room or cutscene boundary.
+    // Remember their final value even before they reach native save memory.
+    void observe_intent(const RecoveryFact& key, const nlohmann::json& target) {
+        const auto saved = baseline_.find(key);
+        const nlohmann::json savedValue = saved == baseline_.end() ? nullptr : saved->second;
+        if (target == savedValue) changed_.erase(key);
+        else changed_[key] = target;
+    }
+
     [[nodiscard]] bool empty() const { return changed_.empty(); }
     [[nodiscard]] size_t size() const { return changed_.size(); }
 

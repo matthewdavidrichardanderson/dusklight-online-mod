@@ -193,6 +193,8 @@ private:
         bool restorePending = false;
     };
     std::optional<SaveRecoveryJournal> saveRecovery_;
+    bool replayingSaveRecovery_ = false;
+    RecoveryFacts recoveryReplayIntents_;
     ItemGiveHandle itemGiveObserver_ = 0;
     // Save-scoped acquisition receipts; never stores a peer's return warp.
     ooccoo::State ooccooState_;
@@ -289,6 +291,8 @@ private:
     nlohmann::json make_save_snapshot();
     nlohmann::json make_recovery_snapshot();
     void record_received_progress(const nlohmann::json& before, ApplyResult result);
+    void record_recovery_intent(const RoutedMessage& message, const RecoveryFact& fact,
+                                const nlohmann::json& value);
     ApplyResult apply_save_snapshot(const RoutedMessage& message);
     ApplyResult apply_switch_bit(const nlohmann::json& message,
                                  std::string_view peerId = {});
