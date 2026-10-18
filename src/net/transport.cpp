@@ -234,6 +234,8 @@ struct Transport::Impl {
     std::string cloudUrl;
     std::string cloudStunHost;
     uint16_t cloudStunPort = 0;
+    std::chrono::steady_clock::time_point cloudJoinedAt{};
+    std::optional<std::chrono::steady_clock::time_point> cloudDisconnectedAt;
     struct CloudLinkAttempt {
         std::chrono::steady_clock::time_point started;
         uint32_t nextLogSecond = 3;
@@ -632,6 +634,7 @@ struct Transport::Impl {
         status.semanticVisualsReady = false;
         status.snapshotDeltasReady = false;
         status.state = State::Disconnected;
+        cloudJoinedAt = {};
         nextDirectPeerId = 1;
         reconnectTicks = 0;
         relayUdpRegisterTicks = 0;
@@ -644,6 +647,7 @@ struct Transport::Impl {
         udpDecoder.reset();
         eventQueueOverflow = false;
         if (!keepConfiguration) {
+            cloudDisconnectedAt.reset();
             status = {};
             automaticReconnect = true;
             sessionEstablished = false;
@@ -666,6 +670,18 @@ struct Transport::Impl {
               bool preserveAcceptedEvents = true) {
         const bool wasActive = status.state != State::Disconnected || status.reconnecting;
         const bool reconnect = sessionEstablished && automaticReconnect && allowReconnect;
+        if (wasActive && status.mode == Mode::CloudRoom) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto uptime = cloudJoinedAt == std::chrono::steady_clock::time_point{} ? 0 :
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - cloudJoinedAt).count();
+            emit(EventKind::Diagnostic, {}, "room_session_failed uptime_ms=" +
+                 std::to_string(uptime) + " reconnect=" + (reconnect ? "yes" : "no") +
+                 " retained_bytes=" + std::to_string(deliveryBytes) + " reason=" + reason);
+            for (const auto& [id, link] : meshLinks)
+                emit(EventKind::Diagnostic, id, "peer_at_room_failure " +
+                     connections.mesh_diagnostics(id));
+            if (sessionEstablished && !cloudDisconnectedAt) cloudDisconnectedAt = now;
+        }
         // A reconnect is a new transport epoch. Retaining UDP decoder
         // sequences, ACK baselines, peer identity or the old UDP endpoint can
         // make valid packets in the next connection look stale or route them
@@ -707,6 +723,8 @@ struct Transport::Impl {
         const std::string wire = cloudCipher->seal(message.dump());
         if (wire.empty()) return false;
         if (cloudChannel->send(wire)) return true;
+        emit(EventKind::Diagnostic, {},
+             "room_control_send_failed type=" + message.value("type", ""));
         deliveryFailure = true;
         return false;
     }
@@ -1755,7 +1773,12 @@ struct Transport::Impl {
         // A departed peer may close its direct link before peer_left arrives.
         if (!receive(link,meshRx[name],[&](const json& frame) { receive_delivery(name,frame); },true) &&
             !departing && !(status.mode == Mode::CloudRoom && cloudNewcomers.contains(name) &&
-                            !connections.connected(link))) deliveryFailure = true;
+                            !connections.connected(link))) {
+            if (status.mode == Mode::CloudRoom)
+                emit(EventKind::Diagnostic, name,
+                     "peer_reliable_receive_failed " + connections.mesh_diagnostics(name));
+            deliveryFailure = true;
+        }
     }
     void pump_deliveries() {
         for (const auto& [name,link] : meshLinks) drain_peer_gameplay(name,link);
@@ -1892,6 +1915,16 @@ struct Transport::Impl {
             }
             sessionEstablished = true;
             status.reconnecting = false;
+            if (status.mode == Mode::CloudRoom) {
+                cloudJoinedAt = std::chrono::steady_clock::now();
+                if (cloudDisconnectedAt) {
+                    const auto downtime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        cloudJoinedAt - *cloudDisconnectedAt).count();
+                    emit(EventKind::Diagnostic, {},
+                         "room_reconnected downtime_ms=" + std::to_string(downtime));
+                    cloudDisconnectedAt.reset();
+                }
+            }
             if (is_room_mode(status.mode) && !status.isOwner &&
                 meshLinks.contains(status.ownerClientId) &&
                 !send_mesh_message({{"type", "voice_settings_request"},

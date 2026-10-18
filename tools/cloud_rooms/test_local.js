@@ -105,6 +105,25 @@ await host.send({ type: "ice_signal", target_client_id: rejoinedWelcome.client_i
   kind: 1, generation: 0, data: "after reconnect" });
 assert.equal((await rejoined.next("ice_signal")).data, "after reconnect");
 
+// A completed Close handshake must release each departing socket. On the
+// pinned compatibility date the Worker has to send the reciprocal frame.
+// Repeat past MAX_PENDING so leaked half-closed sockets cannot go unnoticed.
+for (let attempt = 0; attempt < 6; attempt++) {
+  const returning = await connect(room);
+  await sendHello(returning, "join", "Close recovery");
+  const welcome = await returning.next("welcome");
+  assert.equal((await host.next("peer_joined")).client_id, welcome.client_id);
+  const closed = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Peer Close handshake did not complete")), 5000);
+    returning.socket.addEventListener("close", event => {
+      clearTimeout(timer); resolve(event);
+    }, { once: true });
+  });
+  await returning.close();
+  assert.equal((await closed).code, 1000);
+  assert.equal((await host.next("peer_left")).client_id, welcome.client_id);
+}
+
 await host.send({ type: "room_settings", settings: { ...settings, sync_flags: false } });
 const hostPrepare = await host.next("settings_prepare");
 assert.equal(hostPrepare.generation, 1);

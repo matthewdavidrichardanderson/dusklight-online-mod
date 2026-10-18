@@ -229,9 +229,30 @@ void check_security(const CloudRoomConfig& configuration) {
     const auto oldWelcome = broker.wires.back();
     wire->events.push_back({RoomChannel::EventKind::Closed, "test reconnect"});
     transport.tick();
+    bool sawFailureTiming = false, sawCloseReason = false;
+    while (transport.has_events()) {
+        const auto event = transport.pop_event();
+        if (event.kind != EventKind::Diagnostic) continue;
+        sawFailureTiming |= event.detail.starts_with("room_session_failed uptime_ms=") &&
+                            event.detail.find("reason=test reconnect") != std::string::npos;
+        sawCloseReason |= event.detail.starts_with("room_websocket_closed");
+    }
+    if (!sawFailureTiming || !sawCloseReason) fail("disconnect lost its cause or timing diagnostics");
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
     for (int n = 0; n < 40 && !transport.status().welcomed; ++n) transport.tick();
     if (!transport.status().welcomed || wire->cipher->public_key() == oldPublic)
         fail("reconnect did not establish fresh encryption");
+    bool sawReconnectTiming = false;
+    while (transport.has_events()) {
+        const auto event = transport.pop_event();
+        const std::string prefix = "room_reconnected downtime_ms=";
+        if (event.kind == EventKind::Diagnostic && event.detail.starts_with(prefix)) {
+            sawReconnectTiming = true;
+            if (std::stoll(event.detail.substr(prefix.size())) < 15)
+                fail("reconnect timing did not span the interruption");
+        }
+    }
+    if (!sawReconnectTiming) fail("reconnect did not report its actual duration");
     wire->events.push_back({RoomChannel::EventKind::Message, oldWelcome});
     transport.tick();
     if (transport.status().welcomed || transport.status().state != State::Disconnected)

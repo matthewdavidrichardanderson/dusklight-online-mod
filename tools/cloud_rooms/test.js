@@ -144,6 +144,20 @@ await deliver(rehydrated, late, JSON.stringify(hello(late, "join")));
 assert.equal(late.take("welcome").settings_generation, 1);
 assert.equal(late.take("welcome").settings.sync_flags, false);
 await rehydrated.webSocketClose(late);
+assert.equal(late.closed, true, "reply to peer Close before releasing membership");
+assert.equal(state2.getWebSockets().length, 2, "departed socket must not consume a pending slot");
+// Repeated reconnects must not accumulate the four unjoined sockets that
+// would make Room.fetch reject subsequent players as Room full.
+for (let reconnect = 0; reconnect < 6; reconnect++) {
+  const returning = await state2.add();
+  await deliver(rehydrated, returning, JSON.stringify(hello(returning, "join")));
+  await rehydrated.webSocketClose(returning, 1001, "going away");
+  assert.equal(returning.closeCode, 1001);
+  assert.equal(state2.getWebSockets().length, 2);
+}
+const abnormal = await state2.add();
+await rehydrated.webSocketClose(abnormal, 1006, "");
+assert.equal(abnormal.closeCode, 1000, "never transmit a reserved synthetic Close code");
 
 await room2.webSocketClose(owner2);
 assert.equal(peer2.take("owner_changed").owner_client_id, peer2.take("welcome").client_id);

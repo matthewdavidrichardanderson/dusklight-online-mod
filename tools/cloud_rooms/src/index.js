@@ -404,8 +404,15 @@ export class Room {
     await this.armAlarm();
   }
 
-  async webSocketClose(ws) {
-    await this.exclusive(() => this.leave(ws));
+  async webSocketClose(ws, code = 1000, reason = "") {
+    // Our compatibility date predates automatic Close replies. Complete the
+    // handshake so departed sockets do not linger in getWebSockets() and
+    // exhaust MAX_PENDING when clients reconnect. Synthetic status codes
+    // cannot be sent in a Close frame.
+    await this.exclusive(async () => {
+      close(ws, [1005, 1006, 1015].includes(code) ? 1000 : code, reason);
+      await this.leave(ws);
+    });
   }
 
   async webSocketError(ws) {
