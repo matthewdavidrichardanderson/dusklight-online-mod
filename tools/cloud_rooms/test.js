@@ -413,6 +413,88 @@ for (const data of [fillSignal(outputSignal, "\0", 16 * 1024), "é".repeat(6 * 1
 await deliver(boundsRoom, boundsHost, JSON.stringify({ type: "ice_signal",
   target_client_id: boundsGuest.info.id, kind: 1, generation: 0, data: "still connected" }));
 assert.equal(boundsGuest.sent.at(-1).data, "still connected");
+// Lifecycle logs must identify the same socket across auth, hibernation and
+// closure, and distinguish our rejection from a normal peer-initiated close.
+const lifecycleLogs = [];
+const realLog = console.log;
+console.log = record => lifecycleLogs.push(record);
+try {
+  const diagnosticState = new State();
+  diagnosticState.id = { toString: () => "test-durable-object" };
+  let diagnosticRoom = new Room(diagnosticState, {});
+  const diagnosticHost = await connect(diagnosticState, diagnosticRoom);
+  const diagnosticHello = hello(diagnosticHost, "create");
+  await deliver(diagnosticRoom, diagnosticHost, JSON.stringify(diagnosticHello));
+  const hostConnection = diagnosticHost.info.diagnostic.connectionId;
+  assert.match(hostConnection, /^[0-9a-f]{32}$/);
+  const opened = lifecycleLogs.find(log => log.message === "room_socket_opened");
+  const joinedLog = lifecycleLogs.find(log => log.message === "room_member_joined");
+  assert.equal(opened.connection_id, hostConnection);
+  assert.equal(opened.joined, false);
+  assert.equal(joinedLog.connection_id, hostConnection);
+  assert.equal(joinedLog.client_id, diagnosticHost.take("welcome").client_id);
+  assert.equal(joinedLog.room_instance_id, "test-durable-object");
+  assert.equal(joinedLog.welcome_sent, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(diagnosticHost.info)) < 2048);
+
+  const rejected = await connect(diagnosticState, diagnosticRoom);
+  await deliver(diagnosticRoom, rejected, JSON.stringify(hello(rejected, "join", "wrong-code")));
+  const rejection = lifecycleLogs.find(log => log.message === "room_close_requested");
+  assert.equal(rejection.reason, "bad_lobby_code");
+  assert.equal(rejection.code, 4000);
+  assert.equal(rejection.joined, false);
+  diagnosticRoom = new Room(diagnosticState, {});
+  await diagnosticRoom.webSocketClose(rejected, 4000, "bad_lobby_code", true);
+  const rejectedClose = lifecycleLogs.at(-1);
+  assert.equal(rejectedClose.connection_id, rejection.connection_id);
+  assert.equal(rejectedClose.close_source, "worker");
+  assert.equal(rejectedClose.requested_reason, "bad_lobby_code");
+  assert.equal(rejectedClose.was_clean, true);
+
+  const pending = await accept(diagnosticState, diagnosticRoom);
+  const pendingConnection = pending.info.diagnostic.connectionId;
+  pending.info.deadline = Date.now() - 1;
+  await diagnosticRoom.alarm();
+  assert.equal(lifecycleLogs.at(-1).connection_id, pendingConnection);
+  assert.equal(lifecycleLogs.at(-1).reason, "hello timeout");
+
+  const closeRequests = lifecycleLogs.filter(log => log.message === "room_close_requested").length;
+  diagnosticHost.info.diagnostic.openedAt = Date.now() - 60_000;
+  diagnosticHost.info.diagnostic.joinedAt = Date.now() - 50_000;
+  await diagnosticRoom.webSocketClose(diagnosticHost, 1000, "leaving", true);
+  const peerClose = lifecycleLogs.at(-1);
+  assert.equal(peerClose.message, "room_socket_closed");
+  assert.equal(peerClose.connection_id, hostConnection);
+  assert.equal(peerClose.client_id, joinedLog.client_id);
+  assert.equal(peerClose.joined, true);
+  assert.equal(peerClose.close_source, "peer_or_network");
+  assert.equal(peerClose.requested_reason, null);
+  assert.equal(peerClose.reason, "leaving");
+  assert.ok(peerClose.connection_age_ms >= 60_000);
+  assert.ok(peerClose.joined_age_ms >= 50_000);
+  assert.equal(lifecycleLogs.filter(log => log.message === "room_close_requested").length,
+    closeRequests, "a close reply must not be reported as a worker-initiated disconnect");
+
+  const replacement = await connect(diagnosticState, diagnosticRoom);
+  assert.notEqual(replacement.info.diagnostic.connectionId, hostConnection);
+  await diagnosticRoom.webSocketClose(replacement, 1006, "", false);
+  assert.equal(lifecycleLogs.at(-1).code, 1006);
+  assert.equal(lifecycleLogs.at(-1).was_clean, false);
+  assert.equal(replacement.closeCode, 1000, "log original code before normalizing the close reply");
+
+  const serializedLogs = JSON.stringify(lifecycleLogs);
+  for (const sensitive of ["Example Lobby", "secret-password", diagnosticHello.code_verifier,
+    diagnosticHello.code_proof, diagnosticHost.take("welcome").mesh_key, route]) {
+    assert.equal(serializedLogs.includes(sensitive), false, "lifecycle logs must not expose secrets");
+  }
+  const failingLoggerSocket = await connect(diagnosticState, diagnosticRoom);
+  console.log = () => { throw new Error("logger unavailable"); };
+  await diagnosticRoom.webSocketClose(failingLoggerSocket, 1000, "", true);
+  assert.equal(failingLoggerSocket.closed, true, "logging must not prevent close handling");
+} finally {
+  console.log = realLog;
+}
+
 globalThis.Response = RealResponse;
 delete globalThis.WebSocketPair;
 

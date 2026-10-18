@@ -44,10 +44,39 @@ function send(ws, value) {
   catch { close(ws, 1011, "send failed"); return false; }
 }
 
-function close(ws, code, reason) {
+// Only lifecycle metadata is logged: never room names/routes, player names,
+// credentials, encryption state, message bodies or ICE addresses. Attachments
+// keep the same diagnostic identity when a Durable Object wakes from hibernation.
+function lifecycle(ws, event, details = {}) {
+  try {
+    const info = attachment(ws);
+    const diagnostic = info.diagnostic ?? {};
+    const elapsed = since => Number.isFinite(since) ? Math.max(0, Date.now() - since) : null;
+    console.log({ message: event,
+      connection_id: diagnostic.connectionId ?? null,
+      room_instance_id: diagnostic.roomInstanceId ?? null,
+      client_id: info.id ?? null,
+      joined: info.joined === true,
+      connection_age_ms: elapsed(diagnostic.openedAt),
+      joined_age_ms: elapsed(diagnostic.joinedAt),
+      ...details });
+  } catch { /* Diagnostics must not interrupt room handling. */ }
+}
+
+function closeReason(reason) {
+  return typeof reason === "string" ? reason.slice(0, 123).replace(/[\x00-\x1f\x7f]/g, " ") : "";
+}
+
+function close(ws, code, reason, workerInitiated = true) {
   // Close handshakes can leave already queued messages to be dispatched.
   // Persist terminal state so none can revive a rejected encrypted channel.
-  try { ws.serializeAttachment({ ...attachment(ws), closing: true }); } catch {}
+  const info = attachment(ws);
+  const firstRequest = workerInitiated && !info.closing;
+  if (firstRequest) {
+    info.closeRequest = { code, reason: closeReason(reason) };
+    lifecycle(ws, "room_close_requested", info.closeRequest);
+  }
+  try { ws.serializeAttachment({ ...info, closing: true }); } catch {}
   try { ws.close(code, reason); } catch {}
 }
 
@@ -194,7 +223,10 @@ export class Room {
       const salt = joined(this.state).length && typeof this.room?.salt === "string" ?
         this.room.salt : pendingSalt ?? randomHex();
       server.serializeAttachment({ joined: false, deadline: Date.now() + HELLO_TIMEOUT_MS,
-        nonce, salt, route, secure: createSession() });
+        nonce, salt, route, secure: createSession(),
+        diagnostic: { connectionId: randomHex(), openedAt: Date.now(),
+          roomInstanceId: this.state.id?.toString() ?? null } });
+      lifecycle(server, "room_socket_opened");
       server.send(JSON.stringify({ type: "secure_hello", version: 1,
         public_key: attachment(server).secure.publicKey }));
       await this.armAlarm();
@@ -345,6 +377,7 @@ export class Room {
     }
     const id = newClientId(this.state);
     const info = { joined: true, id, name, secure: pending.secure, route: pending.route,
+      diagnostic: { ...pending.diagnostic, joinedAt: Date.now() },
       capabilities: capabilities(message),
       want_puppet: message.want_puppet === true };
     ws.serializeAttachment(info);
@@ -352,13 +385,15 @@ export class Room {
     await this.state.storage.put("room", this.room);
     const all = joined(this.state);
     const ready = readiness(all);
-    send(ws, { type: "welcome", protocol_version: 5, room_id: message.room_id,
+    const welcomed = send(ws, { type: "welcome", protocol_version: 5, room_id: message.room_id,
       mesh_key: this.room.meshKey,
       client_id: id, owner_client_id: this.room.owner, peers: members.map(other => ({
         client_id: attachment(other).id, name: attachment(other).name,
         want_puppet: attachment(other).want_puppet,
       })), settings: this.room.settings, settings_generation: this.room.generation,
       settings_pending: !!this.room.pending, ...ready });
+    lifecycle(ws, "room_member_joined", { action, welcome_sent: welcomed,
+      member_count: all.length });
     broadcast(members, { type: "peer_joined", client_id: id, name,
       want_puppet: info.want_puppet, ...ready });
     await this.armAlarm();
@@ -404,18 +439,25 @@ export class Room {
     await this.armAlarm();
   }
 
-  async webSocketClose(ws, code = 1000, reason = "") {
+  async webSocketClose(ws, code = 1000, reason = "", wasClean) {
     // Our compatibility date predates automatic Close replies. Complete the
     // handshake so departed sockets do not linger in getWebSockets() and
     // exhaust MAX_PENDING when clients reconnect. Synthetic status codes
     // cannot be sent in a Close frame.
     await this.exclusive(async () => {
-      close(ws, [1005, 1006, 1015].includes(code) ? 1000 : code, reason);
+      const request = attachment(ws).closeRequest;
+      lifecycle(ws, "room_socket_closed", { code, reason: closeReason(reason),
+        was_clean: typeof wasClean === "boolean" ? wasClean : null,
+        close_source: request ? "worker" : "peer_or_network",
+        requested_code: request?.code ?? null,
+        requested_reason: request?.reason ?? null });
+      close(ws, [1005, 1006, 1015].includes(code) ? 1000 : code, reason, false);
       await this.leave(ws);
     });
   }
 
   async webSocketError(ws) {
+    lifecycle(ws, "room_socket_error");
     close(ws, 1011, "socket error");
     await this.exclusive(() => this.leave(ws));
   }
@@ -424,7 +466,9 @@ export class Room {
     await this.ready;
     const own = attachment(ws);
     if (!own.joined || !this.room) { await this.armAlarm(); return; }
-    ws.serializeAttachment({ joined: false });
+    // Retain only diagnostic context for any subsequent close/error callback.
+    ws.serializeAttachment({ joined: false, closing: own.closing, id: own.id,
+      diagnostic: own.diagnostic, closeRequest: own.closeRequest });
     const members = joined(this.state);
     if (!members.length) {
       this.room = null;
@@ -459,7 +503,7 @@ export class Room {
     for (const ws of this.state.getWebSockets()) {
       const own = attachment(ws);
       if (!own.joined && own.deadline && own.deadline <= now) {
-        ws.serializeAttachment({ joined: false, deadline: 0 });
+        ws.serializeAttachment({ ...own, joined: false, deadline: 0 });
         close(ws, 4000, "hello timeout");
       }
     }
