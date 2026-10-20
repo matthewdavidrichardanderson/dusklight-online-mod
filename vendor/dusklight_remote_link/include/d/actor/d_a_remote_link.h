@@ -612,6 +612,7 @@ private:
     cXyz mRemoteIronBallRenderedPos;
     csXyz mRemoteIronBallRenderedAngle;
     cXyz mRemoteIronBallHandRoot;
+    bool mRemoteIronBallRenderReady;
     bool mRemoteHookshotVisualValid;
     bool mRemoteHookshotLeft;
     s16 mRemoteHookshotArmAimX;
@@ -637,6 +638,7 @@ private:
     cXyz mRemoteHookshotRenderedSubTop;
     cXyz mRemoteHookshotRoot;
     cXyz mRemoteHookshotSubRoot;
+    bool mRemoteHookshotRenderReady;
     J3DModelData* mpHookshotChainModelData;
     HookshotChainPacket mHookshotChainPacket;
     bool mRemoteBoomerangVisualValid;

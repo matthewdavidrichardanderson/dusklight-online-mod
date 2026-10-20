@@ -1024,6 +1024,7 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteIronBallRenderedPos(cXyz::Zero),
       mRemoteIronBallRenderedAngle(0, 0, 0),
       mRemoteIronBallHandRoot(cXyz::Zero),
+      mRemoteIronBallRenderReady(false),
       mRemoteHookshotVisualValid(false),
       mRemoteHookshotLeft(true),
       mRemoteHookshotArmAimX(0),
@@ -1049,6 +1050,7 @@ daRemoteLink_c::daRemoteLink_c()
       mRemoteHookshotRenderedSubTop(cXyz::Zero),
       mRemoteHookshotRoot(cXyz::Zero),
       mRemoteHookshotSubRoot(cXyz::Zero),
+      mRemoteHookshotRenderReady(false),
       mpHookshotChainModelData(NULL),
       mHookshotChainPacket(),
       mRemoteBoomerangVisualValid(false),
@@ -2164,6 +2166,8 @@ void daRemoteLink_c::clearHeldItemExtras() {
 void daRemoteLink_c::setupHeldItemModel() {
     const HeldItemVisualDesc* desc = getHeldItemVisualDesc(mRemoteEquipItem);
     if (desc == NULL || mVisualState.form == FORM_WOLF) {
+        mRemoteIronBallRenderReady = false;
+        mRemoteHookshotRenderReady = false;
         mpHeldItemModel = NULL;
         mpIronBallChainModelData = NULL;
         mpHookshotChainModelData = NULL;
@@ -2184,6 +2188,8 @@ void daRemoteLink_c::setupHeldItemModel() {
         return;
     }
 
+    mRemoteIronBallRenderReady = false;
+    mRemoteHookshotRenderReady = false;
     mpHeldItemModel = NULL;
     mpIronBallChainModelData = NULL;
     mpHookshotChainModelData = NULL;
@@ -5465,8 +5471,10 @@ void daRemoteLink_c::applyHumanEquipmentMatrices(bool i_presentation) {
 }
 
 void daRemoteLink_c::updateRemoteIronBallVisual(bool i_presentation) {
+    mRemoteIronBallRenderReady = false;
     if (!mRemoteIronBallVisualValid || mpHeldItemModel == NULL ||
-        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL) {
+        mpBodyModel == NULL || mpBodyModel->getModelData() == NULL ||
+        mpBodyModel->getModelData()->getJointNum() <= 15) {
         return;
     }
 
@@ -5519,6 +5527,11 @@ void daRemoteLink_c::updateRemoteIronBallVisual(bool i_presentation) {
                              mRemoteIronBallVisualAngle.z));
     }
 
+    if (!std::isfinite(renderedBallPos.x) || !std::isfinite(renderedBallPos.y) ||
+        !std::isfinite(renderedBallPos.z)) {
+        mHeldItemMatrixValid = false;
+        return;
+    }
     mDoMtx_stack_c::transS(renderedBallPos);
     mDoMtx_stack_c::ZXYrotM(renderedBallAngle);
     mRemoteIronBallRenderedPos = renderedBallPos;
@@ -5543,9 +5556,21 @@ void daRemoteLink_c::updateRemoteIronBallVisual(bool i_presentation) {
         mDoMtx_stack_c::multVec(&l_remoteIronBallChainVec,
                                  &mRemoteIronBallHandRoot);
     }
+    // Receiving a pose does not mean the body/weapon matrices have run yet.
+    // In particular, a fresh actor can receive throws while the game is paused.
+    mRemoteIronBallRenderReady =
+        std::isfinite(mRemoteIronBallHandRoot.x) &&
+        std::isfinite(mRemoteIronBallHandRoot.y) &&
+        std::isfinite(mRemoteIronBallHandRoot.z);
+    if (!mRemoteIronBallRenderReady) mHeldItemMatrixValid = false;
 }
 
 void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
+    mRemoteHookshotRenderReady = false;
+    mHeldItemMatrixValid = false;
+    mHookTipMatrixValid = false;
+    mHookSubItemMatrixValid = false;
+    mHookSubTipMatrixValid = false;
     if (!mRemoteHookshotVisualValid || mpHeldItemModel == NULL ||
         mpHookTipModel == NULL || mpBodyModel == NULL ||
         mpBodyModel->getModelData() == NULL ||
@@ -5644,6 +5669,16 @@ void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
     }
     if (mRemoteHookshotTopLinkAnchored) renderedTop = mRemoteHookshotRoot;
     if (mRemoteHookshotSubTopLinkAnchored) renderedSubTop = mRemoteHookshotSubRoot;
+    const auto finitePosition = [](const cXyz& pos) {
+        return std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z);
+    };
+    if (!finitePosition(mRemoteHookshotRoot) ||
+        !finitePosition(mRemoteHookshotSubRoot) ||
+        !finitePosition(renderedTop) || !finitePosition(renderedSubTop)) {
+        mHeldItemMatrixValid = false;
+        mHookSubItemMatrixValid = false;
+        return;
+    }
     mRemoteHookshotRenderedTop = renderedTop;
     mRemoteHookshotRenderedSubTop = renderedSubTop;
     mDoMtx_stack_c::transS(renderedTop);
@@ -5671,6 +5706,9 @@ void daRemoteLink_c::updateRemoteHookshotVisual(bool i_presentation) {
     } else {
         mHookSubTipMatrixValid = false;
     }
+    // Both single and double clawshots need calculated hand/tip endpoints
+    // before their chains may be queued, including the first unpaused frame.
+    mRemoteHookshotRenderReady = true;
 }
 
 void daRemoteLink_c::setRemoteAttachmentMatrices(
@@ -6446,6 +6484,10 @@ void daRemoteLink_c::setRemoteIronBallVisualState(
     const std::array<cXyz, 100>& i_chainDirections,
     bool i_chainEndOffsetValid, const cXyz& i_chainEndOffset) {
     const bool wasValid = mRemoteIronBallVisualValid;
+    const bool wasRenderReady = mRemoteIronBallRenderReady;
+    // Invalidate presentation until both endpoints have been calculated for
+    // this pose. Never combine newly received chain data with default endpoints.
+    mRemoteIronBallRenderReady = false;
     mRemoteIronBallVisualValid =
         i_valid && mRemoteEquipItem == dItemNo_IRONBALL_e &&
         mVisualState.form != FORM_WOLF;
@@ -6471,7 +6513,7 @@ void daRemoteLink_c::setRemoteIronBallVisualState(
         mRemoteIronBallPreviousVisualPos = mRemoteIronBallVisualPos;
         mRemoteIronBallPreviousVisualAngle = mRemoteIronBallVisualAngle;
         mRemoteIronBallPreviousVisualValid = true;
-    } else if (wasValid && wasLinkAnchored && !i_linkAnchored) {
+    } else if (wasValid && wasRenderReady && wasLinkAnchored && !i_linkAnchored) {
         // Preserve the final body-anchored ball endpoint for the first throw
         // interval instead of pretending the new world-space ball already
         // occupied its current position in the preceding frame.
@@ -6508,7 +6550,7 @@ void daRemoteLink_c::setRemoteIronBallVisualState(
     mRemoteIronBallChainDirections = i_chainDirections;
     mRemoteIronBallChainEndOffsetValid = i_chainEndOffsetValid;
     mRemoteIronBallChainEndOffset = i_chainEndOffset;
-    mHeldItemMatrixValid = mRemoteItemDraw && mpHeldItemModel != NULL;
+    mHeldItemMatrixValid = false; // Set by updateRemoteIronBallVisual after calc.
     clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
 }
 
@@ -6519,6 +6561,8 @@ void daRemoteLink_c::setRemoteHookshotVisualState(
     const cXyz& i_subTop, const csXyz& i_subTopAngle, s16 i_stopTime,
     f32 i_itemFrame, f32 i_tipFrame, f32 i_subTipFrame) {
     const bool wasValid = mRemoteHookshotVisualValid;
+    const bool wasRenderReady = mRemoteHookshotRenderReady;
+    mRemoteHookshotRenderReady = false;
     mRemoteHookshotVisualValid =
         i_valid && (mRemoteEquipItem == dItemNo_HOOKSHOT_e ||
                     mRemoteEquipItem == dItemNo_W_HOOKSHOT_e) &&
@@ -6531,7 +6575,7 @@ void daRemoteLink_c::setRemoteHookshotVisualState(
         mHookSubTipMatrixValid = false;
         return;
     }
-    if (wasValid && mRemoteHookshotLeft == i_left) {
+    if (wasValid && wasRenderReady && mRemoteHookshotLeft == i_left) {
         mRemoteHookshotPreviousTop =
             mRemoteHookshotTopLinkAnchored && !i_topLinkAnchored ?
                 mRemoteHookshotRenderedTop : mRemoteHookshotTop;
@@ -6565,6 +6609,10 @@ void daRemoteLink_c::setRemoteHookshotVisualState(
     mRemoteHookshotItemFrame = i_itemFrame;
     mRemoteHookshotTipFrame = i_tipFrame;
     mRemoteHookshotSubTipFrame = i_subTipFrame;
+    mHeldItemMatrixValid = false;
+    mHookTipMatrixValid = false;
+    mHookSubItemMatrixValid = false;
+    mHookSubTipMatrixValid = false;
     clearRemoteModelMatrixInterpolation(mHeldItemMatrixInterp);
     clearRemoteModelMatrixInterpolation(mHookTipMatrixInterp);
     clearRemoteModelMatrixInterpolation(mHookSubItemMatrixInterp);
@@ -7445,7 +7493,8 @@ void daRemoteLink_c::applyRemoteTransformMaterialColor(bool i_active) {
 }
 
 void daRemoteLink_c::drawIronBallChain() {
-    if (!mRemoteIronBallVisualValid || mRemoteIronBallChainCount == 0 ||
+    if (!mRemoteIronBallVisualValid || !mRemoteIronBallRenderReady ||
+        mRemoteIronBallChainCount == 0 ||
         mpIronBallChainModelData == NULL) {
         return;
     }
@@ -7592,13 +7641,15 @@ void daRemoteLink_c::drawIronBallChain() {
             rollStep = -0x3000;
         }
         float distance = delta.abs();
-        if (distance <= 5.0f) continue;
+        // Even an entire legitimate chain is at most 100 ten-unit links.
+        // Endpoint fillers must never bridge an arbitrary world-space gap.
+        if (!std::isfinite(distance) || distance <= 5.0f || distance > 1005.0f) continue;
         const float horizontal = delta.absXZ();
         const s16 yaw = horizontal >= 1.0f ? delta.atan2sX_Z() : baseAngle.y;
         const s16 pitch = delta.atan2sY_XZ();
         s16 endpointRoll = static_cast<s16>(baseAngle.z + rollStep);
         const cXyz step = delta * (10.0f / distance);
-        while (distance > 5.0f) {
+        for (int links = 0; distance > 5.0f && links < 100; ++links) {
             drawLink(start, csXyz(pitch, yaw, endpointRoll));
             start += step;
             distance -= 10.0f;
@@ -7608,7 +7659,8 @@ void daRemoteLink_c::drawIronBallChain() {
 }
 
 void daRemoteLink_c::drawHookshotChains() {
-    if (!mRemoteHookshotVisualValid || mpHookshotChainModelData == NULL) return;
+    if (!mRemoteHookshotVisualValid || !mRemoteHookshotRenderReady ||
+        mpHookshotChainModelData == NULL) return;
     J3DMaterial* material = mpHookshotChainModelData->getMaterialNodePointer(0);
     if (material == NULL || material->getShape() == NULL) return;
     j3dSys.setVtxPos(mpHookshotChainModelData->getVtxPosArray(),
@@ -7646,7 +7698,7 @@ void daRemoteLink_c::drawHookshotChains() {
 
     cXyz direction = mRemoteHookshotRoot - mRemoteHookshotRenderedTop;
     f32 distance = direction.abs();
-    if (distance > 1.0f) {
+    if (std::isfinite(distance) && distance > 1.0f) {
         direction *= 1.0f / distance;
         cXyz pos = mRemoteHookshotRenderedTop;
         const csXyz base(direction.atan2sY_XZ(), direction.atan2sX_Z(), 0);
@@ -7674,7 +7726,7 @@ void daRemoteLink_c::drawHookshotChains() {
 
     direction = mRemoteHookshotSubRoot - mRemoteHookshotRenderedSubTop;
     distance = direction.abs();
-    if (distance > 1.0f) {
+    if (std::isfinite(distance) && distance > 1.0f) {
         direction *= 1.0f / distance;
         cXyz pos = mRemoteHookshotRenderedSubTop;
         csXyz angle(direction.atan2sY_XZ(), direction.atan2sX_Z(), 0);
@@ -8113,11 +8165,13 @@ int daRemoteLink_c::Draw() {
             }
         }
     }
-    if (mRemoteIronBallVisualValid && mRemoteIronBallChainCount > 0 &&
+    if (mRemoteIronBallVisualValid && mRemoteIronBallRenderReady &&
+        mRemoteIronBallChainCount > 0 &&
         mpIronBallChainModelData != NULL) {
         dComIfGd_getOpaListDark()->entryImm(&mIronBallChainPacket, 0);
     }
-    if (mRemoteHookshotVisualValid && mpHookshotChainModelData != NULL &&
+    if (mRemoteHookshotVisualValid && mRemoteHookshotRenderReady &&
+        mpHookshotChainModelData != NULL &&
         ((mRemoteHookshotRoot - mRemoteHookshotRenderedTop).abs2() > 1.0f ||
          (mRemoteHookshotSubRoot - mRemoteHookshotRenderedSubTop).abs2() > 1.0f)) {
         dComIfGd_getOpaListDark()->entryImm(&mHookshotChainPacket, 0);
