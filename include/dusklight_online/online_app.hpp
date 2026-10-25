@@ -59,6 +59,7 @@ private:
         ConfigVarHandle dummyModel = 0;
         ConfigVarHandle nameLabels = 0;
         ConfigVarHandle syncFlags = 0;
+        ConfigVarHandle syncPrompts = 0;
         ConfigVarHandle saveRecovery = 0;
         ConfigVarHandle displayMidna = 0;
         ConfigVarHandle remoteCollision = 0;

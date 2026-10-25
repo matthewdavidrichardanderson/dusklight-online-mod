@@ -45,6 +45,7 @@ public:
     // Called from the fapGm_Execute pre-hook, after Dusklight has sampled the
     // controller but before vanilla menu/gameplay code consumes D-Pad Down.
     void consume_progression_prompt_input();
+    void set_progression_prompts_enabled(bool enabled);
     void suppress_progression_prompts(bool suppress);
     void publish_local(nlohmann::json message);
     bool request_manual_sync(std::string_view peerId, bool flagsOnly, std::string* error = nullptr);
@@ -250,6 +251,7 @@ private:
         uint32_t holdTicks = 0;
         bool waiting = false;
     } progressionPrompt_;
+    bool progressionPromptsEnabled_ = false;
     bool progressionPromptsSuppressed_ = false;
     bool progressionPromptAcceptHeld_ = false;
     struct PendingProgressionCue {
@@ -341,6 +343,7 @@ private:
     [[nodiscard]] bool expecting_manual_sync_reply(std::string_view peerId,
                                                     uint64_t requestId) const;
     void update_progression_prompts();
+    void clear_progression_prompts();
     void maybe_queue_progression_pose_prompt(std::string_view peerId,
                                              const dusk::multiplayer::PeerPoseSnapshot& pose);
     void maybe_queue_progression_event_prompt(std::string_view peerId, uint16_t flag);

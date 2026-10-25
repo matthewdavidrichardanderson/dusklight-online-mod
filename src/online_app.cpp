@@ -659,6 +659,8 @@ void OnlineApp::refresh_master_volume_gain() {
 }
 
 void OnlineApp::consume_progression_prompt_input() {
+    if (game_ != nullptr)
+        game_->set_progression_prompts_enabled(bool_value(config_.syncPrompts));
     speedrunDownHeld_ = false;
     if (speedrunPhase_ == SpeedrunPhase::WaitingReady && !speedrunLocalPlayerReady_) {
         interface_of_controller_pad& pad = mDoCPd_c::getCpadInfo(PAD_1);
@@ -679,6 +681,8 @@ void OnlineApp::match_player_colour() {
 }
 
 void OnlineApp::update() {
+    if (game_ != nullptr)
+        game_->set_progression_prompts_enabled(bool_value(config_.syncPrompts));
     if (const auto binding = game::take_voice_mute_hotkey_binding()) {
         svc_config->set_int(mod_ctx, config_.voiceMuteHotkey, *binding);
     }
@@ -1191,6 +1195,7 @@ ModResult OnlineApp::register_config(ModError* error) {
         BoolVar{"remote-model", true, &config_.dummyModel},
         BoolVar{"name-labels", true, &config_.nameLabels},
         BoolVar{"sync-flags", true, &config_.syncFlags},
+        BoolVar{"sync-prompts", false, &config_.syncPrompts},
         BoolVar{"save-recovery", true, &config_.saveRecovery},
         BoolVar{"display-midna", false, &config_.displayMidna},
         BoolVar{"remote-collision", true, &config_.remoteCollision},
@@ -2119,6 +2124,10 @@ ModResult OnlineApp::build_settings_tab(ModContext*, UiWindowHandle, UiElementHa
         &OnlineApp::pvp_setting_locked, &app,
         "<p>Allow connected players to damage each other. Remote collision must also be enabled.</p>");
     svc_ui->pane_add_section(mod_ctx, left, "Display");
+    add_bound_control(
+        left, UI_CONTROL_TOGGLE, "Sync prompts", app.config_.syncPrompts,
+        0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
+        "<p>Show prompts to sync and reload when other players reach story milestones.</p>");
     add_bound_control(
         left, UI_CONTROL_TOGGLE, "Name labels", app.config_.nameLabels,
         0, 0, 1, 0, nullptr, nullptr, nullptr, nullptr,
