@@ -5,7 +5,8 @@
 namespace dusklight_online::game {
 
 // Apply the visual and actor side effects of a permanent collectible bit.
-void repair_remote_tbox_collectible(int stage, int flag, bool newlySet);
+void repair_remote_tbox_collectible(int stage, int flag, bool newlySet, bool animate = true);
+void update_remote_tbox_animations(bool active);
 void repair_remote_memory_item_collectible(int stage, int flag);
 
 // Apply actor-side state latched before a remotely received switch changed.

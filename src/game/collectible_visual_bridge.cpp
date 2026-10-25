@@ -56,6 +56,8 @@
 namespace dusklight_online::game {
 namespace {
 
+std::unordered_set<fpc_ProcID> sOpeningTboxes;
+
 void* judge_tbox(void* actor, void* data) {
     if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_TBOX_e) return nullptr;
     auto* tbox = static_cast<daTbox_c*>(actor);
@@ -601,10 +603,19 @@ void* repair_faron_mist_gate(void* actor, void*) {
     return actor;
 }
 
-void repair_tbox_visual(int flag) {
+void repair_tbox_visual(int flag, bool animate = false) {
     auto* tbox = static_cast<daTbox_c*>(fopAcIt_Judge(judge_tbox, &flag));
-    if (tbox == nullptr) return;
-    if (tbox->mpAnm != nullptr) tbox->mpAnm->setFrame(tbox->mpAnm->getEndFrame());
+    if (tbox == nullptr || tbox->eventInfo.checkCommandDemoAccrpt()) return;
+    const auto id = fopAcM_GetID(tbox);
+    if (sOpeningTboxes.contains(id)) return;
+    if (tbox->mpAnm != nullptr) {
+        if (animate && tbox->mpAnm->getFrame() < tbox->mpAnm->getEndFrame()) {
+            tbox->mpAnm->setPlaySpeed(1.0f);
+            sOpeningTboxes.insert(id);
+        } else {
+            tbox->mpAnm->setFrame(tbox->mpAnm->getEndFrame());
+        }
+    }
     tbox->setAction(&daTbox_c::actionWait);
     tbox->setDzb();
     dTres_c::offStatus(0, flag, 1);
@@ -653,10 +664,33 @@ int current_stage_table() {
 
 }  // namespace
 
-void repair_remote_tbox_collectible(int stage, int flag, bool newlySet) {
+void repair_remote_tbox_collectible(int stage, int flag, bool newlySet, bool animate) {
     if (!newlySet || stage != current_stage_table()) return;
-    repair_tbox_visual(flag);
+    repair_tbox_visual(flag, animate);
     if (!repair_key_visual(flag)) repair_drop_visual(flag);
+}
+
+void update_remote_tbox_animations(bool active) {
+    if (!active) {
+        sOpeningTboxes.clear();
+        return;
+    }
+    if (dComIfGp_isPauseFlag()) return;
+    for (auto it = sOpeningTboxes.begin(); it != sOpeningTboxes.end();) {
+        auto* actor = fopAcM_SearchByID(*it);
+        auto* tbox = actor != nullptr && fopAcM_GetName(actor) == fpcNm_TBOX_e
+            ? static_cast<daTbox_c*>(actor) : nullptr;
+        if (tbox == nullptr || tbox->mpAnm == nullptr ||
+            tbox->eventInfo.checkCommandDemoAccrpt()) {
+            it = sOpeningTboxes.erase(it);
+        } else if (tbox->mpAnm->play()) {
+            tbox->mpAnm->setFrame(tbox->mpAnm->getEndFrame());
+            tbox->mpAnm->setPlaySpeed(0.0f);
+            it = sOpeningTboxes.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void repair_remote_memory_item_collectible(int stage, int flag) {

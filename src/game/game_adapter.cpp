@@ -4061,6 +4061,7 @@ void GameAdapter::update(bool syncFlagsEnabled, bool syncWorldEnabled, bool remo
     } else {
         dusk::multiplayer::destroy_all_remote_link_dummies();
     }
+    update_remote_tbox_animations(stage_ready() && !opening_or_title_active());
     if (!status.welcomed) {
         progressionTicks_ = 0;
         presenceTicks_ = 0;
@@ -6991,7 +6992,7 @@ ApplyResult GameAdapter::apply_save_snapshot(const RoutedMessage& routed) {
     apply_stage_flags("chests", 64, [](int stage, int flag) {
         const bool newlySet = !stage_bits(stage).isTbox(flag);
         stage_bits(stage).onTbox(flag);
-        repair_remote_tbox_collectible(stage, flag, newlySet);
+        repair_remote_tbox_collectible(stage, flag, newlySet, false);
     });
     for (const auto& entry : message.value("switches", nlohmann::json::array())) {
         if (!entry.is_object()) continue;
