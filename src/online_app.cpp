@@ -631,12 +631,12 @@ ModResult OnlineApp::initialize(ModError* error) {
     return MOD_OK;
 }
 
-void OnlineApp::refresh_master_volume_gain() {
+void OnlineApp::refresh_host_settings() {
     if (hostConfigPath_.empty()) return;
     const auto now = std::chrono::steady_clock::now();
-    if (lastMasterVolumePoll_ != std::chrono::steady_clock::time_point{} &&
-        now - lastMasterVolumePoll_ < std::chrono::milliseconds(250)) return;
-    lastMasterVolumePoll_ = now;
+    if (lastHostConfigPoll_ != std::chrono::steady_clock::time_point{} &&
+        now - lastHostConfigPoll_ < std::chrono::milliseconds(250)) return;
+    lastHostConfigPoll_ = now;
 
     std::error_code error;
     const auto written = std::filesystem::last_write_time(hostConfigPath_, error);
@@ -646,6 +646,9 @@ void OnlineApp::refresh_master_volume_gain() {
     if (!file) return;
     const auto config = nlohmann::json::parse(file, nullptr, false);
     if (!config.is_object()) return;
+    const auto mirror = config.find("game.enableMirrorMode");
+    game::set_host_mirror_mode(mirror != config.end() && mirror->is_boolean() &&
+                               mirror->get<bool>());
     float percent = 60.0f;  // Dusklight's default when the key is absent.
     const auto value = config.find("audio.masterVolume");
     if (value != config.end()) {
@@ -758,11 +761,11 @@ void OnlineApp::update() {
     }
     transport_.tick();
     const net::Status captureStatus = transport_.status();
+    refresh_host_settings();
     if (voice_ != nullptr) {
         const bool voiceEnabled = kVoiceRuntimeAvailable && captureStatus.welcomed &&
                                   captureStatus.voiceSettingsReady &&
                                   bool_value(config_.voiceEnabled);
-        if (voiceEnabled) refresh_master_volume_gain();
         voice_->configure(voiceEnabled, bool_value(config_.voiceMicMuted),
                           string_value(config_.voiceInput),
                           static_cast<int>(int_value(config_.micVolume, 100)),

@@ -82,7 +82,7 @@ private:
     std::unique_ptr<game::VoiceChat> voice_;
     std::filesystem::path hostConfigPath_;
     std::optional<std::filesystem::file_time_type> lastHostConfigWrite_;
-    std::chrono::steady_clock::time_point lastMasterVolumePoll_{};
+    std::chrono::steady_clock::time_point lastHostConfigPoll_{};
     float masterVolumeGain_ = 1.0f;
     std::string lastVoiceError_;
     UiWindowHandle window_ = 0;
@@ -176,7 +176,7 @@ private:
     std::array<InlineKickRow, 7> inlineKickRows_{};
 
     ModResult register_config(ModError* error);
-    void refresh_master_volume_gain();
+    void refresh_host_settings();
     ModResult register_ui(ModError* error);
     std::string string_value(ConfigVarHandle handle) const;
     bool bool_value(ConfigVarHandle handle, bool fallback = false) const;

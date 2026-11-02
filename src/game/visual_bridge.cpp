@@ -39,7 +39,6 @@
 #include "d/d_msg_object.h"
 #include "dusk/map_loader_definitions.h"
 #include "dusk/multiplayer/remote_link_dummy.hpp"
-#include "dusk/settings.h"
 #include "f_op/f_op_camera_mng.h"
 #include "m_Do/m_Do_graphic.h"
 #include "m_Do/m_Do_lib.h"
@@ -73,8 +72,7 @@ namespace {
 
 using GetHostContextFn = ImGuiContext* (*)();
 GetHostContextFn sGetHostContext = nullptr;
-using GetHostSettingsFn = dusk::UserSettings& (*)();
-GetHostSettingsFn sGetHostSettings = nullptr;
+bool sHostMirrorMode = false;
 
 std::string escape_toast_rml(std::string_view text) {
     std::string escaped;
@@ -560,10 +558,7 @@ void draw_field_map_markers(dMenuMapCommon_c* iconList) {
     // Match the pan offset used by regionTextureDraw, including spot-map zoom.
     const f32 panX = centerX - shiftedCenterX;
     const f32 panY = centerY - shiftedCenterY;
-    // The 3D camera projection is unreliable while the pause map animates.
-    // Read the same mirror setting that the field map uses for its own icons.
-    const bool mirrored = sGetHostSettings != nullptr &&
-                          sGetHostSettings().game.enableMirrorMode.getValue();
+    const bool mirrored = sHostMirrorMode;
     J2DPicture* linkIcon = map->mPictures[ICON_LINK_e];
     if (linkIcon == nullptr) return;
     const f32 iconWidth = map->getIconSizeX(ICON_LINK_e);
@@ -1989,11 +1984,6 @@ ModResult install_visual_hooks(ModError* error) {
         return mods::set_error(error, MOD_UNAVAILABLE, "Host ImGui context accessor is unavailable");
     }
     sGetHostContext = reinterpret_cast<GetHostContextFn>(contextAddress);
-    void* settingsAddress = nullptr;
-    if (svc_hook->resolve(mod_ctx, "dusk::getSettings", &settingsAddress, nullptr) == MOD_OK &&
-        settingsAddress != nullptr) {
-        sGetHostSettings = reinterpret_cast<GetHostSettingsFn>(settingsAddress);
-    }
     if (mods::hook::add_pre<HostUiEventHook>(&host_ui_event_pre) != MOD_OK ||
         mods::hook::add_post<HostUiEventHook>(&host_ui_event_post) != MOD_OK ||
         mods::hook::add_post<OpaqueDrawListHook>(&opaque_draw_list_post) != MOD_OK ||
@@ -2013,13 +2003,17 @@ void uninstall_visual_hooks() {
     mods::hook::uninstall<HostImGuiPostDrawHook>();
     mods::hook::uninstall<OpaqueDrawListHook>();
     sGetHostContext = nullptr;
-    sGetHostSettings = nullptr;
+    sHostMirrorMode = false;
     reset_visual_overlays();
     if (sFontAtlas != nullptr) {
         svc_resource->free(mod_ctx, &sFontAtlas->fontBuffer);
         svc_resource->free(mod_ctx, &sFontAtlas->uiFontBuffer);
         sFontAtlas.reset();
     }
+}
+
+void set_host_mirror_mode(bool mirrored) {
+    sHostMirrorMode = mirrored;
 }
 
 void update_visual_overlays(

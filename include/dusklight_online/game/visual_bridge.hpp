@@ -12,6 +12,8 @@
 
 namespace dusklight_online::game {
 
+void set_host_mirror_mode(bool mirrored);
+
 struct ProgressionPromptView {
     bool active = false;
     bool waiting = false;
